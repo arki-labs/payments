@@ -1,6 +1,6 @@
 # @arki/payments
 
-Published version: **0.0.0-stage**
+Published version: **0.2.0**
 
 This repository is a **read-only mirror** of the [@arki/payments](https://www.npmjs.com/package/@arki/payments) npm package.
 

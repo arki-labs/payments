@@ -1,0 +1,20 @@
+import { createIdFactory } from '@arki/db/id-factory';
+const taxConfigId = createIdFactory('txc_');
+const taxJurisdictionId = createIdFactory('txj_');
+const taxExemptionId = createIdFactory('txe_');
+export const createTaxConfigId = taxConfigId.create;
+export const createTaxJurisdictionId = taxJurisdictionId.create;
+export const createTaxExemptionId = taxExemptionId.create;
+export const taxConfigIdSchema = taxConfigId.schema;
+export const taxJurisdictionIdSchema = taxJurisdictionId.schema;
+export const taxExemptionIdSchema = taxExemptionId.schema;
+export const taxConfigIdFactory = taxConfigId;
+export const taxJurisdictionIdFactory = taxJurisdictionId;
+export const taxExemptionIdFactory = taxExemptionId;
+export const taxConfigStatusValues = ['active', 'inactive', 'pending'];
+export const taxCalculationModeValues = ['automatic', 'manual', 'disabled'];
+export const taxBusinessTypeValues = ['saas', 'digital_goods', 'physical_goods', 'services', 'mixed'];
+export const jurisdictionTypeValues = ['country', 'state', 'province', 'city', 'county', 'district'];
+export const exemptionTypeValues = ['customer', 'product', 'jurisdiction', 'threshold'];
+export const exemptionStatusValues = ['active', 'expired', 'revoked', 'pending_review'];
+//# sourceMappingURL=primitives.js.map
