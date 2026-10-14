@@ -1,4 +1,5 @@
-import { createInsertSchema, createSelectSchema, z } from '@arki/contracts';
+import { z } from '@arki/contracts';
+import { createInsertSchema, createSelectSchema } from '@arki/contracts/drizzle';
 import { instantSchema } from '@arki/date/zod';
 /**
  * Factory for the Drizzle-table-derived Zod schemas. The host app calls this
