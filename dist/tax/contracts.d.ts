@@ -207,6 +207,8 @@ export declare const updateConfigurationInputSchema: z.ZodObject<{
 export declare const setDefaultConfigurationInputSchema: z.ZodObject<{
     id: z.ZodPipe<z.ZodString, z.ZodTransform<`txc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txc_${string}`, "out">, z.ZodTransform<`txc_${string}`, string & z.$brand<`txc_${string}`>>>;
 }, z.core.$strip>;
+/** A tax rate in percent, as a decimal string: `'19'`, `'7.5'`. Never negative, never above 100. */
+export declare const taxRateSchema: z.ZodString;
 export declare const createJurisdictionSchema: z.ZodObject<{
     name: z.ZodString;
     code: z.ZodString;
@@ -338,16 +340,6 @@ export declare const taxIdValidationSchema: z.ZodObject<{
     value: z.ZodString;
     country: z.ZodString;
 }, z.core.$strip>;
-export declare const generateTaxReportInputSchema: z.ZodObject<{
-    reportType: z.ZodEnum<{
-        gst: "gst";
-        sales_and_use_tax: "sales_and_use_tax";
-        vat: "vat";
-    }>;
-    startDate: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
-    endDate: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
-    jurisdiction: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>;
 export declare const getCustomerTaxSummaryInputSchema: z.ZodObject<{
     customerId: z.ZodString;
     year: z.ZodNumber;
@@ -403,14 +395,15 @@ export declare const taxCalculationResultSchema: z.ZodObject<{
         taxCode: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     applicableTaxIds: z.ZodArray<z.ZodString>;
+    appliedExemptionIds: z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`txe_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txe_${string}`, "out">, z.ZodTransform<`txe_${string}`, string & z.$brand<`txe_${string}`>>>>;
 }, z.core.$strip>;
 export declare function taxCalculationResultJson(result: TaxCalculationResult): z.input<typeof taxCalculationResultSchema>;
 /** What `TaxService.getCustomerTaxSummary` answers. */
 export declare const customerTaxSummarySchema: z.ZodObject<{
-    totalTaxPaid: z.ZodObject<{
+    totalTaxPaid: z.ZodArray<z.ZodObject<{
         amount: z.ZodString;
         currency: z.ZodString;
-    }, z.core.$strip>;
+    }, z.core.$strip>>;
     totalTransactions: z.ZodNumber;
     breakdown: z.ZodArray<z.ZodObject<{
         jurisdiction: z.ZodString;
@@ -438,26 +431,20 @@ export declare const taxComplianceReportSchema: z.ZodObject<{
         endDate: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
     }, z.core.$strip>;
     jurisdiction: z.ZodString;
-    totalSales: z.ZodObject<{
+    totalSales: z.ZodArray<z.ZodObject<{
         amount: z.ZodString;
         currency: z.ZodString;
-    }, z.core.$strip>;
-    totalTaxCollected: z.ZodObject<{
+    }, z.core.$strip>>;
+    totalTaxCollected: z.ZodArray<z.ZodObject<{
         amount: z.ZodString;
         currency: z.ZodString;
-    }, z.core.$strip>;
-    exemptSales: z.ZodObject<{
+    }, z.core.$strip>>;
+    exemptSales: z.ZodArray<z.ZodObject<{
         amount: z.ZodString;
         currency: z.ZodString;
-    }, z.core.$strip>;
+    }, z.core.$strip>>;
     transactions: z.ZodNumber;
     generatedAt: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
-    status: z.ZodEnum<{
-        completed: "completed";
-        failed: "failed";
-        pending: "pending";
-    }>;
-    downloadUrl: z.ZodOptional<z.ZodString>;
     summary: z.ZodObject<{
         taxableTransactions: z.ZodNumber;
         exemptTransactions: z.ZodNumber;
@@ -491,7 +478,6 @@ export type RevokeExemptionInput = z.infer<typeof revokeExemptionInputSchema>;
 export type TaxCalculationInput = z.infer<typeof taxCalculationInputSchema>;
 export type CalculateSubscriptionTaxInput = z.infer<typeof calculateSubscriptionTaxInputSchema>;
 export type TaxIdValidation = z.infer<typeof taxIdValidationSchema>;
-export type GenerateTaxReportInput = z.infer<typeof generateTaxReportInputSchema>;
 export type GetCustomerTaxSummaryInput = z.infer<typeof getCustomerTaxSummaryInputSchema>;
 export type GenerateComplianceReportInput = z.infer<typeof generateComplianceReportInputSchema>;
 export type ExportTaxDataInput = z.infer<typeof exportTaxDataInputSchema>;

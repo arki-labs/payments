@@ -1,5 +1,6 @@
 import type { AnyRelations } from 'drizzle-orm';
 import type { NodePgDatabase, NodePgTransaction } from 'drizzle-orm/node-postgres';
+import type { PgliteDatabase } from 'drizzle-orm/pglite';
 import type { UserId } from '../core/user-id.js';
 import type { Instant } from '@arki/date';
 import type { Money } from '@arki/money';
@@ -16,12 +17,14 @@ import type { Refund } from './types.js';
  */
 /** A refund row's amount: whole minor units and a currency that defaults to USD, as the column does. */
 export declare function refundAmountOf(refund: Pick<Refund, 'refundAmountMinor' | 'currency'>): Money;
-export type RefundsDatabase = NodePgDatabase<AnyRelations> | NodePgTransaction<AnyRelations>;
+export type RefundsDatabase = NodePgDatabase<AnyRelations> | NodePgTransaction<AnyRelations> | PgliteDatabase<AnyRelations>;
 export declare class RefundRepository {
     private readonly db;
     private readonly refunds;
     constructor(db: RefundsDatabase, tables: Pick<RefundsTables, 'refunds'>);
     findById(refundId: RefundId): Promise<Refund | null>;
+    /** The refund the provider knows by `providerRefundId`: the link between a webhook and our row. */
+    findByProviderRefundId(providerRefundId: string): Promise<Refund | null>;
     findByPaymentId(paymentId: PaymentId): Promise<Refund[]>;
     findByStatus(status: RefundStatus): Promise<Refund[]>;
     findPending(): Promise<Refund[]>;

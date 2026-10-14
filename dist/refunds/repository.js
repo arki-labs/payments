@@ -27,6 +27,15 @@ export class RefundRepository {
             .limit(1);
         return refund ?? null;
     }
+    /** The refund the provider knows by `providerRefundId`: the link between a webhook and our row. */
+    async findByProviderRefundId(providerRefundId) {
+        const [refund] = await this.db
+            .select()
+            .from(this.refunds)
+            .where(eq(this.refunds.providerRefundId, providerRefundId))
+            .limit(1);
+        return refund ?? null;
+    }
     async findByPaymentId(paymentId) {
         return this.db
             .select()

@@ -1,4 +1,6 @@
 import type { PgColumn, PgSchema } from 'drizzle-orm/pg-core';
+/** At most one refund of a payment waits for a decision at a time. The database enforces it. */
+export declare const pendingRefundIndexName = "refunds_one_pending_per_payment_idx";
 export type CreateRefundsTablesDeps = {
     schema: PgSchema;
     /** `() => payments.id` from the host app's payments-core tables. */
@@ -196,6 +198,21 @@ export declare function createRefundsTables({ schema, paymentIdRef, userIdRef }:
                 generated: undefined;
             }>;
             rejectionReason: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                name: string;
+                tableName: "refunds";
+                dataType: "string";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                identity: undefined;
+                generated: undefined;
+            }>;
+            approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
                 name: string;
                 tableName: "refunds";
                 dataType: "string";

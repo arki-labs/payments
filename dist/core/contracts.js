@@ -3,7 +3,7 @@ import { z } from '@arki/contracts';
 import { instantSchema } from '@arki/date/zod';
 import { refundIdSchema } from '../refunds/primitives.js';
 import { moneyJsonSchema, positiveMoneySchema, priceSchema } from './money.js';
-import { billingIntervalValues, paymentIdSchema, paymentMethodTypeValues, paymentProviderValues, paymentStatusValues, planIdSchema, planTierValues, subscriptionIdSchema, subscriptionStatusValues, webhookEventTypeValues, webhookIdSchema, } from './primitives.js';
+import { billingIntervalValues, customerIdSchema, paymentIdSchema, paymentMethodTypeValues, paymentProviderValues, paymentStatusValues, planIdSchema, planTierValues, subscriptionIdSchema, subscriptionStatusValues, webhookEventTypeValues, webhookIdSchema, } from './primitives.js';
 // Base enum schemas
 export const paymentProviderSchema = z.enum(paymentProviderValues);
 export const subscriptionStatusSchema = z.enum(subscriptionStatusValues);
@@ -63,11 +63,15 @@ export const createSubscriptionInputSchema = z.object({
     metadata: z.record(z.string(), z.unknown()).optional(),
     customerDetails: customerDetailsSchema,
 });
-export const updateSubscriptionInputSchema = z.object({
+export const updateSubscriptionInputSchema = z
+    .object({
     planId: planIdSchema.optional(),
     paymentMethodId: z.string().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     cancelAtPeriodEnd: z.boolean().optional(),
+})
+    .refine(data => data.planId !== undefined || data.cancelAtPeriodEnd !== undefined, {
+    message: 'Give a planId, a cancelAtPeriodEnd, or both',
 });
 export const cancelSubscriptionInputSchema = z.object({
     immediately: z.boolean().default(false),
@@ -114,6 +118,7 @@ export const subscriptionQuerySchema = paginationSchema.extend({
 export const paymentQuerySchema = paginationSchema.extend({
     status: paymentStatusSchema.optional(),
     subscriptionId: subscriptionIdSchema.optional(),
+    customerId: customerIdSchema.optional(),
     userId: userIdSchema.optional(),
     startDate: instantSchema().optional(),
     endDate: instantSchema().optional(),

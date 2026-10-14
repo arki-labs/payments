@@ -1,11 +1,16 @@
 import type { Money } from '@arki/money';
-import type { BillingInterval, Customer, CustomerId, Payment, PaymentId, PaymentMethodInfo, PaymentMethodType, PaymentProviderType, Plan, PlanId, Subscription, SubscriptionId, SubscriptionPreview, SubscriptionStatus, WebhookValidationResult } from '../types.js';
+import type { BillingInterval, Customer, CustomerId, Payment, PaymentId, PaymentMethodInfo, PaymentMethodType, PaymentProviderType, Plan, PlanId, PlanTier, Subscription, SubscriptionId, SubscriptionPreview, SubscriptionStatus, WebhookValidationResult } from '../types.js';
 export type PaymentProviderConfig = {
     apiKey: string;
     webhookSecret: string;
     webhookEndpointSecret?: string;
     publicKey?: string;
     environment: 'sandbox' | 'production';
+};
+/** What a refund call answers: the provider's refund id, and the payment as the provider now has it. */
+export type ProviderRefundResult = {
+    providerRefundId: string;
+    payment: Payment;
 };
 export declare abstract class BasePaymentProvider {
     protected config: PaymentProviderConfig;
@@ -26,6 +31,9 @@ export declare abstract class BasePaymentProvider {
     abstract deleteCustomer(customerId: CustomerId): Promise<void>;
     abstract createPlan(params: {
         name: string;
+        description?: string;
+        tier: PlanTier;
+        features?: string[];
         amount: Money;
         interval: BillingInterval;
         intervalCount?: number;
@@ -45,6 +53,8 @@ export declare abstract class BasePaymentProvider {
         paymentMethodId?: string;
         trialPeriodDays?: number;
         metadata?: Record<string, unknown>;
+        /** Same key, same parameters: the provider returns the first result instead of creating a second subscription. */
+        idempotencyKey?: string;
     }): Promise<Subscription>;
     abstract getSubscription(subscriptionId: SubscriptionId): Promise<Subscription | null>;
     abstract updateSubscription(subscriptionId: SubscriptionId, params: {
@@ -52,10 +62,15 @@ export declare abstract class BasePaymentProvider {
         paymentMethodId?: string;
         metadata?: Record<string, unknown>;
         cancelAtPeriodEnd?: boolean;
+        /** What happens to the charge when `planId` changes. The provider's default applies when left out. */
+        prorationBehavior?: 'create_prorations' | 'none' | 'always_invoice';
+        idempotencyKey?: string;
     }): Promise<Subscription>;
     abstract cancelSubscription(subscriptionId: SubscriptionId, options: {
+        /** True: end it now. Otherwise it stays active until the end of the paid period. */
         immediately?: boolean;
         reason?: string;
+        idempotencyKey?: string;
     }): Promise<Subscription>;
     abstract reactivateSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
     abstract pauseSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
@@ -80,7 +95,7 @@ export declare abstract class BasePaymentProvider {
         amount?: Money;
         reason?: string;
         metadata?: Record<string, unknown>;
-    }): Promise<Payment>;
+    }): Promise<ProviderRefundResult>;
     abstract attachPaymentMethod(params: {
         customerId: CustomerId;
         paymentMethodId: string;
@@ -92,7 +107,9 @@ export declare abstract class BasePaymentProvider {
         paymentMethodId: string;
     }): Promise<void>;
     abstract validateWebhook(payload: string | Buffer, signature: string, timestamp: string, sourceIp: string): Promise<WebhookValidationResult>;
-    abstract createSetupIntent(customerId: CustomerId): Promise<{
+    abstract createSetupIntent(customerId: CustomerId, options?: {
+        idempotencyKey?: string;
+    }): Promise<{
         clientSecret: string;
         setupIntentId: string;
     }>;
@@ -100,7 +117,12 @@ export declare abstract class BasePaymentProvider {
         customerId: CustomerId;
         amount: Money;
         paymentMethodId?: string;
+        /**
+         * True: charge now without the customer present. Needs `paymentMethodId`.
+         * False: the customer finishes the payment in the client with the returned secret.
+         */
         automatic: boolean;
+        idempotencyKey?: string;
     }): Promise<{
         clientSecret: string;
         paymentIntentId: string;

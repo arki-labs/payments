@@ -1,11 +1,21 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { z } from '@arki/contracts';
-import { add, fromDate, isAfter, now } from '@arki/date';
+import { add, fromDate, instant, isAfter, now, sub, toMillis } from '@arki/date';
 import { getLogger } from '@arki/log';
+import { valueList } from '../sql-list.js';
 import { fromMinorColumn, toMinorColumn } from '../../core/money.js';
 import { analyticsRowId, DEFAULT_ANALYTICS_CURRENCY } from '../analytics-money.js';
 import { createDunningCampaignRepository, createDunningExecutionRepository, createDunningTemplateRepository, } from '../repository.js';
 const logger = getLogger('dunning.campaign');
+/** Narrows a cross-domain query to (or away from) the customers a caller named. */
+function customerFilters(column, filters) {
+    const conditions = [];
+    if (filters?.customerIds?.length)
+        conditions.push(sql `${column} IN ${valueList(filters.customerIds)}`);
+    if (filters?.excludeCustomerIds?.length)
+        conditions.push(sql `${column} NOT IN ${valueList(filters.excludeCustomerIds)}`);
+    return conditions;
+}
 /** The payment row `checkAndStopOnPaymentSuccess` reads; node-postgres sends `bigint` as text. */
 const paymentRowSchema = z.object({ amount_minor: z.union([z.number(), z.string()]), currency: z.string() });
 /**
@@ -14,6 +24,7 @@ const paymentRowSchema = z.object({ amount_minor: z.union([z.number(), z.string(
  */
 export class DunningCampaignService {
     db;
+    tables;
     communicationServiceFactory;
     _paymentRetryService;
     campaignRepo;
@@ -21,6 +32,7 @@ export class DunningCampaignService {
     executionRepo;
     constructor(db, tables, communicationServiceFactory, _paymentRetryService) {
         this.db = db;
+        this.tables = tables;
         this.communicationServiceFactory = communicationServiceFactory;
         this._paymentRetryService = _paymentRetryService;
         this.campaignRepo = createDunningCampaignRepository(db, {
@@ -43,19 +55,23 @@ export class DunningCampaignService {
      * Create a new dunning campaign with templates
      */
     async createCampaign(input, createdBy) {
-        return this.db.transaction(async (_tx) => {
-            // Create the campaign
-            const campaignModel = await this.campaignRepo.create({
+        return this.db.transaction(async (tx) => {
+            // The repositories run on the transaction: a template that fails takes the campaign with it
+            const campaignRepo = createDunningCampaignRepository(tx, {
+                dunningCampaigns: this.tables.dunningCampaigns,
+                dunningCampaignAnalytics: this.tables.dunningCampaignAnalytics,
+            });
+            const templateRepo = createDunningTemplateRepository(tx, { dunningTemplates: this.tables.dunningTemplates });
+            const campaignModel = await campaignRepo.create({
                 ...input,
                 createdBy,
             });
             if (!campaignModel) {
                 throw new Error('Failed to create campaign');
             }
-            // Create templates for the campaign
             const templates = [];
             for (const templateInput of input.templates) {
-                const template = await this.templateRepo.create({
+                const template = await templateRepo.create({
                     campaignId: campaignModel.id,
                     name: templateInput.name,
                     stepNumber: templateInput.stepNumber,
@@ -71,21 +87,50 @@ export class DunningCampaignService {
         });
     }
     /**
-     * Update an existing campaign
+     * Update an existing campaign.
+     *
+     * When `input.templates` is given it is the complete new set of steps (replace semantics, like create).
+     * Steps are matched by `stepNumber`: a matching step is updated in place (its id, and so the history
+     * that points at it, survives), a new number is inserted, and a number that is gone is deleted.
+     * A step that already sent a communication cannot be deleted (the database refuses), so the whole
+     * update fails and nothing changes. Omit `templates` to leave the steps alone.
      */
     async updateCampaign(campaignId, input, updatedBy) {
-        const campaignModel = await this.campaignRepo.update(campaignId, {
-            ...input,
-            updatedBy,
+        const { templates: nextTemplates, ...campaignFields } = input;
+        return this.db.transaction(async (tx) => {
+            const campaignRepo = createDunningCampaignRepository(tx, {
+                dunningCampaigns: this.tables.dunningCampaigns,
+                dunningCampaignAnalytics: this.tables.dunningCampaignAnalytics,
+            });
+            const templateRepo = createDunningTemplateRepository(tx, { dunningTemplates: this.tables.dunningTemplates });
+            const campaignModel = await campaignRepo.update(campaignId, { ...campaignFields, updatedBy });
+            if (!campaignModel) {
+                return null;
+            }
+            if (nextTemplates) {
+                const existing = await templateRepo.findByCampaignId(campaignId);
+                const keptSteps = new Set(nextTemplates.map(template => template.stepNumber));
+                for (const template of existing) {
+                    if (!keptSteps.has(template.stepNumber))
+                        await templateRepo.delete(template.id);
+                }
+                for (const next of nextTemplates) {
+                    const current = existing.find(template => template.stepNumber === next.stepNumber);
+                    if (current) {
+                        await templateRepo.update(current.id, {
+                            name: next.name,
+                            delayHours: next.delayHours,
+                            communication: next.communication,
+                        });
+                    }
+                    else {
+                        await templateRepo.create({ campaignId, ...next });
+                    }
+                }
+            }
+            const templates = await templateRepo.findByCampaignId(campaignId);
+            return { ...campaignModel, templates };
         });
-        if (!campaignModel) {
-            return null;
-        }
-        const templates = await this.templateRepo.findByCampaignId(campaignId);
-        return {
-            ...campaignModel,
-            templates,
-        };
     }
     /**
      * Get campaign by ID with templates
@@ -207,16 +252,16 @@ export class DunningCampaignService {
         sinceFailure.setDate(sinceFailure.getDate() - daysSinceFailure);
         const sinceLastPayment = new Date();
         sinceLastPayment.setDate(sinceLastPayment.getDate() - daysSinceLastPayment);
-        // NOTE: This is a cross-domain query that accesses payments and customers tables
-        // which are outside the dunning domain. These remain as SQL queries since they
-        // don't belong to the dunning feature's repository.
-        // Query for customers with payment failures
+        // Cross-domain query: payments and customers belong to the core tables, not to dunning.
+        // The tables are interpolated so the names carry their schema.
+        const { customers: customersTable, payments } = this.tables;
+        const customerConditions = customerFilters(sql `customer_id`, customFilters);
         const result = await this.db.execute(sql `
       WITH failed_payments AS (
         SELECT
           p.customer_id,
           p.subscription_id,
-          p.id as payment_id,
+          (array_agg(p.id ORDER BY p.created_at DESC))[1] as payment_id,
           COUNT(*) as failure_count,
           MAX(p.created_at) as last_failure_date,
           json_build_object(
@@ -224,36 +269,35 @@ export class DunningCampaignService {
             'last_failure_date', MAX(p.created_at),
             'failure_reasons', array_agg(DISTINCT p.failure_reason)
           ) as trigger_data
-        FROM payments p
+        FROM ${payments} p
         WHERE p.status = 'failed'
           AND p.created_at >= ${sinceFailure}
-        GROUP BY p.customer_id, p.subscription_id, p.id
+        GROUP BY p.customer_id, p.subscription_id
         HAVING COUNT(*) >= ${paymentFailureCount}
       ),
       recent_customers AS (
-        SELECT DISTINCT
+        SELECT
           fp.customer_id,
           fp.subscription_id,
           fp.payment_id,
           fp.trigger_data
         FROM failed_payments fp
-        JOIN customers c ON c.id = fp.customer_id
-        LEFT JOIN payments recent_success ON (
+        JOIN ${customersTable} c ON c.id = fp.customer_id
+        LEFT JOIN ${payments} recent_success ON (
           recent_success.customer_id = fp.customer_id
           AND recent_success.status = 'succeeded'
           AND recent_success.created_at > fp.last_failure_date
         )
         WHERE recent_success.id IS NULL
           AND NOT EXISTS (
-            SELECT 1 FROM payments p2
+            SELECT 1 FROM ${payments} p2
             WHERE p2.customer_id = fp.customer_id
               AND p2.status = 'succeeded'
               AND p2.created_at >= ${sinceLastPayment}
           )
       )
       SELECT * FROM recent_customers
-      ${customFilters?.customerIds?.length ? sql `WHERE customer_id = ANY(${customFilters.customerIds})` : sql ``}
-      ${customFilters?.excludeCustomerIds?.length ? sql `AND customer_id != ANY(${customFilters.excludeCustomerIds})` : sql ``}
+      ${customerConditions.length > 0 ? sql `WHERE ${sql.join(customerConditions, sql ` AND `)}` : sql ``}
       LIMIT 1000
     `);
         const customers = (result.rows || []);
@@ -266,10 +310,16 @@ export class DunningCampaignService {
     }
     async findCustomersWithSubscriptionStatus(conditions, customFilters) {
         const { subscriptionStatus = ['past_due', 'unpaid'] } = conditions;
-        // NOTE: Cross-domain query accessing subscriptions and customers tables
+        // Cross-domain query: subscriptions and customers belong to the core tables.
+        const { customers: customersTable, subscriptions } = this.tables;
+        const filters = [
+            sql `s.status IN ${valueList(subscriptionStatus)}`,
+            sql `s.current_period_end < NOW()`,
+            ...customerFilters(sql `c.id`, customFilters),
+        ];
         const result = await this.db.execute(sql `
-      SELECT DISTINCT
-        s.user_id as customer_id,
+      SELECT
+        c.id as customer_id,
         s.id as subscription_id,
         NULL as payment_id,
         json_build_object(
@@ -277,12 +327,9 @@ export class DunningCampaignService {
           'current_period_end', s.current_period_end,
           'days_overdue', EXTRACT(days FROM NOW() - s.current_period_end)
         ) as trigger_data
-      FROM subscriptions s
-      JOIN customers c ON c.user_id = s.user_id
-      WHERE s.status = ANY(${subscriptionStatus})
-        AND s.current_period_end < NOW()
-        ${customFilters?.customerIds?.length ? sql `AND c.id = ANY(${customFilters.customerIds})` : sql ``}
-        ${customFilters?.excludeCustomerIds?.length ? sql `AND c.id != ANY(${customFilters.excludeCustomerIds})` : sql ``}
+      FROM ${subscriptions} s
+      JOIN ${customersTable} c ON c.id = s.customer_id
+      WHERE ${sql.join(filters, sql ` AND `)}
       ORDER BY s.current_period_end ASC
       LIMIT 1000
     `);
@@ -298,10 +345,18 @@ export class DunningCampaignService {
         const { trialEndingDays = 3, renewalReminderDays = 7 } = conditions;
         const targetDate = new Date();
         targetDate.setDate(targetDate.getDate() + Math.max(trialEndingDays, renewalReminderDays));
-        // NOTE: Cross-domain query accessing subscriptions and customers tables
+        // Cross-domain query: subscriptions and customers belong to the core tables.
+        const { customers: customersTable, subscriptions } = this.tables;
+        const filters = [
+            sql `s.status = 'trialing'`,
+            sql `s.trial_end IS NOT NULL`,
+            sql `s.trial_end BETWEEN NOW() AND ${targetDate}`,
+            sql `s.trial_end > NOW()`,
+            ...customerFilters(sql `c.id`, customFilters),
+        ];
         const result = await this.db.execute(sql `
-      SELECT DISTINCT
-        s.user_id as customer_id,
+      SELECT
+        c.id as customer_id,
         s.id as subscription_id,
         NULL as payment_id,
         json_build_object(
@@ -309,14 +364,9 @@ export class DunningCampaignService {
           'days_until_end', EXTRACT(days FROM s.trial_end - NOW()),
           'subscription_status', s.status
         ) as trigger_data
-      FROM subscriptions s
-      JOIN customers c ON c.user_id = s.user_id
-      WHERE s.status = 'trialing'
-        AND s.trial_end IS NOT NULL
-        AND s.trial_end BETWEEN NOW() AND ${targetDate}
-        AND s.trial_end > NOW()
-        ${customFilters?.customerIds?.length ? sql `AND c.id = ANY(${customFilters.customerIds})` : sql ``}
-        ${customFilters?.excludeCustomerIds?.length ? sql `AND c.id != ANY(${customFilters.excludeCustomerIds})` : sql ``}
+      FROM ${subscriptions} s
+      JOIN ${customersTable} c ON c.id = s.customer_id
+      WHERE ${sql.join(filters, sql ` AND `)}
       ORDER BY s.trial_end ASC
       LIMIT 1000
     `);
@@ -389,18 +439,28 @@ export class DunningCampaignService {
         const errors = [];
         try {
             // Get customer information
-            const customerResult = await this.db.execute(sql `
-        SELECT c.id, c.email, c.name, crp.communication_preferences
-        FROM customers c
-        LEFT JOIN customer_risk_profiles crp ON crp.customer_id = c.id
-        WHERE c.id = ${execution.customerId}
-      `);
-            const customers = customerResult.rows || [];
-            if (customers.length === 0) {
+            const { customers: customersTable, customerRiskProfiles } = this.tables;
+            const [row] = await this.db
+                .select({
+                id: customersTable.id,
+                email: customersTable.email,
+                name: customersTable.name,
+                communicationPreferences: customerRiskProfiles.communicationPreferences,
+            })
+                .from(customersTable)
+                .leftJoin(customerRiskProfiles, eq(customerRiskProfiles.customerId, customersTable.id))
+                .where(eq(customersTable.id, execution.customerId))
+                .limit(1);
+            if (!row) {
                 throw new Error(`Customer ${execution.customerId} not found`);
             }
-            const customer = customers[0];
-            const communicationPrefs = customer.communication_preferences || {};
+            const customer = {
+                id: row.id,
+                email: row.email ?? undefined,
+                name: row.name ?? undefined,
+                communicationPreferences: row.communicationPreferences ?? undefined,
+            };
+            const communicationPrefs = customer.communicationPreferences ?? {};
             // Check if customer has unsubscribed from this channel
             if (campaign.settings.respectUnsubscribe && communicationPrefs.unsubscribed) {
                 logger.info('Customer has unsubscribed from communications', {
@@ -413,7 +473,7 @@ export class DunningCampaignService {
                     performance: { processingTime: Date.now() - startTime, successRate: 1 },
                 };
             }
-            if (communicationPrefs.unsubscribed_channels?.includes(template.communication.channel)) {
+            if (communicationPrefs.unsubscribedChannels?.includes(template.communication.channel)) {
                 logger.info('Customer has unsubscribed from channel', {
                     customerId: execution.customerId,
                     channel: template.communication.channel,
@@ -596,10 +656,10 @@ export class DunningCampaignService {
         // Check if the customer has made a successful payment since the execution started
         const paymentResult = await this.db.execute(sql `
       SELECT p.id, p.amount_minor, p.currency, p.created_at
-      FROM payments p
+      FROM ${this.tables.payments} p
       WHERE p.customer_id = ${execution.customerId}
         AND p.status = 'succeeded'
-        AND p.created_at >= ${execution.startedAt || execution.scheduledAt}
+        AND p.created_at >= ${new Date(toMillis(execution.startedAt ?? execution.scheduledAt))}
       ORDER BY p.created_at DESC
       LIMIT 1
     `);
@@ -635,34 +695,85 @@ export class DunningCampaignService {
         const currency = metrics.revenueRecovered?.currency.code ?? DEFAULT_ANALYTICS_CURRENCY;
         const analyticsId = analyticsRowId(campaignId, today, currency);
         const revenueMinor = metrics.revenueRecovered ? toMinorColumn(metrics.revenueRecovered) : 0;
-        // NOTE: Analytics tracking would be implemented with a separate analytics repository
-        // when the dunningCampaignAnalytics table is properly set up.
-        // For now, this SQL query remains as a placeholder.
-        await this.db.execute(sql `
-      INSERT INTO dunning_campaign_analytics (
-        id, campaign_id, date, currency, payments_recovered, revenue_recovered_minor,
-        executions, customers_reached, communications_sent, created_at, updated_at
-      )
-      VALUES (
-        ${analyticsId}, ${campaignId}, ${today}, ${currency},
-        ${metrics.paymentsRecovered || 0}, ${revenueMinor},
-        ${metrics.executions || 0}, ${metrics.customersReached || 0}, ${metrics.communicationsSent || 0},
-        NOW(), NOW()
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        payments_recovered = dunning_campaign_analytics.payments_recovered + ${metrics.paymentsRecovered || 0},
-        revenue_recovered_minor = dunning_campaign_analytics.revenue_recovered_minor + ${revenueMinor},
-        executions = dunning_campaign_analytics.executions + ${metrics.executions || 0},
-        customers_reached = dunning_campaign_analytics.customers_reached + ${metrics.customersReached || 0},
-        communications_sent = dunning_campaign_analytics.communications_sent + ${metrics.communicationsSent || 0},
-        updated_at = NOW()
-    `);
+        const analytics = this.tables.dunningCampaignAnalytics;
+        const paymentsRecovered = metrics.paymentsRecovered ?? 0;
+        const executions = metrics.executions ?? 0;
+        const customersReached = metrics.customersReached ?? 0;
+        const communicationsSent = metrics.communicationsSent ?? 0;
+        await this.db
+            .insert(analytics)
+            .values({
+            id: analyticsId,
+            campaignId,
+            date: instant(`${today}T00:00:00Z`),
+            currency,
+            paymentsRecovered,
+            revenueRecoveredMinor: revenueMinor,
+            executions,
+            customersReached,
+            communicationsSent,
+        })
+            .onConflictDoUpdate({
+            target: analytics.id,
+            set: {
+                paymentsRecovered: sql `${analytics.paymentsRecovered} + ${paymentsRecovered}`,
+                revenueRecoveredMinor: sql `${analytics.revenueRecoveredMinor} + ${revenueMinor}`,
+                executions: sql `${analytics.executions} + ${executions}`,
+                customersReached: sql `${analytics.customersReached} + ${customersReached}`,
+                communicationsSent: sql `${analytics.communicationsSent} + ${communicationsSent}`,
+                updatedAt: now(),
+            },
+        });
     }
     /**
      * Get campaign analytics and performance metrics
      */
     async getCampaignAnalytics(campaignId, days = 30) {
         return this.campaignRepo.getAnalyticsSummary(campaignId, days);
+    }
+    /** One page of executions, filtered and sorted as `query` says. */
+    async listExecutions(query) {
+        return this.executionRepo.findMany(query);
+    }
+    /**
+     * The numbers on the dunning dashboard, all read from the tables: campaign counts, what ran
+     * today (since 00:00 UTC), what was recovered today and this month, the conversion rate and
+     * the top campaign over the last 30 days, and the latest executions.
+     */
+    async getDashboardStats() {
+        const current = new Date();
+        const startOfToday = fromDate(new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), current.getUTCDate())));
+        const startOfMonth = fromDate(new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 1)));
+        const last30Days = sub(now(), { hours: 30 * 24 });
+        const [campaigns, today, month, recent, top, recentExecutions] = await Promise.all([
+            this.campaignRepo.countCampaigns(),
+            this.campaignRepo.getAnalyticsSince(startOfToday),
+            this.campaignRepo.getAnalyticsSince(startOfMonth),
+            this.campaignRepo.getAnalyticsSince(last30Days),
+            this.campaignRepo.findTopPerformer(last30Days),
+            this.executionRepo.findMany({ limit: 10, offset: 0, sortBy: 'createdAt', sortOrder: 'desc' }),
+        ]);
+        const topCampaign = top ? await this.campaignRepo.findById(top.campaignId) : null;
+        const topRevenue = top ? await this.campaignRepo.getAnalyticsSince(last30Days, top.campaignId) : null;
+        return {
+            totalCampaigns: campaigns.total,
+            activeCampaigns: campaigns.active,
+            executionsToday: today.executions,
+            customersReachedToday: today.customersReached,
+            revenueRecoveredToday: today.revenueRecovered,
+            revenueRecoveredThisMonth: month.revenueRecovered,
+            averageConversionRate: recent.conversionRate,
+            topPerformingCampaign: top && topCampaign && topRevenue
+                ? {
+                    id: top.campaignId,
+                    name: topCampaign.name,
+                    paymentsRecovered: top.paymentsRecovered,
+                    conversionRate: top.conversionRate,
+                    revenueRecovered: topRevenue.revenueRecovered,
+                }
+                : null,
+            recentExecutions,
+        };
     }
     /**
      * Retry failed executions with exponential backoff

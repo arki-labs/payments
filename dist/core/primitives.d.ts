@@ -151,6 +151,6 @@ export type PaymentStatus = (typeof paymentStatusValues)[number];
 export type BillingInterval = (typeof billingIntervalValues)[number];
 export type PlanTier = (typeof planTierValues)[number];
 export type PaymentMethodType = (typeof paymentMethodTypeValues)[number];
-export declare const webhookEventTypeValues: readonly ['subscription.created', 'subscription.updated', 'subscription.canceled', 'subscription.trial_will_end', 'payment.succeeded', 'payment.failed', 'payment.requires_action', 'customer.created', 'customer.updated', 'customer.deleted', 'invoice.created', 'invoice.finalized', 'invoice.paid', 'invoice.payment_failed'];
+export declare const webhookEventTypeValues: readonly ['subscription.created', 'subscription.updated', 'subscription.canceled', 'subscription.trial_will_end', 'payment.succeeded', 'payment.failed', 'payment.requires_action', 'payment.refunded', 'payment.dispute_created', 'refund.updated', 'customer.created', 'customer.updated', 'customer.deleted', 'invoice.created', 'invoice.finalized', 'invoice.paid', 'invoice.payment_failed'];
 export type WebhookEventType = (typeof webhookEventTypeValues)[number];
 //# sourceMappingURL=primitives.d.ts.map

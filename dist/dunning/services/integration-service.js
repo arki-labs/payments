@@ -25,6 +25,10 @@ export class DunningIntegrationService {
             dunningCampaignAnalytics: dunningTables.dunningCampaignAnalytics,
             dunningTemplates: dunningTables.dunningTemplates,
             dunningExecutions: dunningTables.dunningExecutions,
+            customerRiskProfiles: dunningTables.customerRiskProfiles,
+            customers: coreTables.customers,
+            payments: coreTables.payments,
+            subscriptions: coreTables.subscriptions,
         }, () => this.communicationService, paymentRetryService);
         this.segmentationService = createCustomerSegmentationService(db, coreTables, {
             customerSegments: dunningTables.customerSegments,

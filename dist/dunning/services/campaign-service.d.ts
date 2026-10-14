@@ -1,9 +1,10 @@
+import type { CoreTables } from '../../core/tables.js';
 import type { PaymentRetryService } from '../../core/services/payment-retry-service.js';
-import type { CreateDunningCampaignInput, ExecuteCampaignInput, ListDunningCampaignsQuery, UpdateDunningCampaignInput } from '../contracts.js';
+import type { CreateDunningCampaignInput, ExecuteCampaignInput, ListDunningCampaignsQuery, ListExecutionsQuery, UpdateDunningCampaignInput } from '../contracts.js';
 import type { DunningCampaignId, DunningCampaignStatus } from '../primitives.js';
 import type { DunningDatabase } from '../repository.js';
 import type { DunningTables } from '../tables.js';
-import type { DunningCampaign, DunningExecution, DunningTemplate } from '../types.js';
+import type { DunningCampaign, DunningDashboardStats, DunningExecution, DunningTemplate } from '../types.js';
 import type { CommunicationOrchestrationService } from './communication-service.js';
 /**
  * Service for managing dunning campaigns
@@ -11,19 +12,28 @@ import type { CommunicationOrchestrationService } from './communication-service.
  */
 export declare class DunningCampaignService {
     private readonly db;
+    private readonly tables;
     private readonly communicationServiceFactory;
     private readonly _paymentRetryService?;
     private campaignRepo;
     private templateRepo;
     private executionRepo;
-    constructor(db: DunningDatabase, tables: Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics' | 'dunningTemplates' | 'dunningExecutions'>, communicationServiceFactory: () => CommunicationOrchestrationService, _paymentRetryService?: PaymentRetryService | undefined);
+    constructor(db: DunningDatabase, tables: DunningCampaignServiceTables, communicationServiceFactory: () => CommunicationOrchestrationService, _paymentRetryService?: PaymentRetryService | undefined);
     private getCommunicationService;
     /**
      * Create a new dunning campaign with templates
      */
-    createCampaign(input: CreateDunningCampaignInput, createdBy: string): Promise<DunningCampaign>;
+    createCampaign(input: CreateDunningCampaignInput, createdBy: string): Promise<DunningCampaign & {
+        templates: DunningTemplate[];
+    }>;
     /**
-     * Update an existing campaign
+     * Update an existing campaign.
+     *
+     * When `input.templates` is given it is the complete new set of steps (replace semantics, like create).
+     * Steps are matched by `stepNumber`: a matching step is updated in place (its id, and so the history
+     * that points at it, survives), a new number is inserted, and a number that is gone is deleted.
+     * A step that already sent a communication cannot be deleted (the database refuses), so the whole
+     * update fails and nothing changes. Omit `templates` to leave the steps alone.
      */
     updateCampaign(campaignId: DunningCampaignId, input: UpdateDunningCampaignInput, updatedBy: string): Promise<(DunningCampaign & {
         templates: DunningTemplate[];
@@ -247,14 +257,22 @@ export declare class DunningCampaignService {
      * Get campaign analytics and performance metrics
      */
     getCampaignAnalytics(campaignId?: DunningCampaignId, days?: number): Promise<{
-        executions?: number | undefined;
-        customersReached?: number | undefined;
-        communicationsSent?: number | undefined;
-        paymentsRecovered?: number | undefined;
-        conversionRate?: number | undefined;
-        roi?: number | undefined;
+        executions: number;
+        customersReached: number;
+        communicationsSent: number;
+        paymentsRecovered: number;
+        conversionRate: number;
+        roi: number;
         revenueRecovered: import("@arki/money/bag").MoneyBag;
     }>;
+    /** One page of executions, filtered and sorted as `query` says. */
+    listExecutions(query: ListExecutionsQuery): Promise<DunningExecution[]>;
+    /**
+     * The numbers on the dunning dashboard, all read from the tables: campaign counts, what ran
+     * today (since 00:00 UTC), what was recovered today and this month, the conversion rate and
+     * the top campaign over the last 30 days, and the latest executions.
+     */
+    getDashboardStats(): Promise<DunningDashboardStats>;
     /**
      * Retry failed executions with exponential backoff
      * This method finds executions that are ready to retry (nextRetryAt is in the past)
@@ -311,7 +329,7 @@ export declare class DunningCampaignService {
         updatedBy: string | null;
     }[]>;
 }
-export type DunningCampaignServiceTables = Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics' | 'dunningTemplates' | 'dunningExecutions'>;
+export type DunningCampaignServiceTables = Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics' | 'dunningTemplates' | 'dunningExecutions' | 'customerRiskProfiles'> & Pick<CoreTables, 'customers' | 'payments' | 'subscriptions'>;
 /**
  * Factory function to create DunningCampaignService.
  */

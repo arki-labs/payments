@@ -51,9 +51,12 @@ export declare const webhookEventTypeSchema: z.ZodEnum<{
     "invoice.finalized": "invoice.finalized";
     "invoice.paid": "invoice.paid";
     "invoice.payment_failed": "invoice.payment_failed";
+    "payment.dispute_created": "payment.dispute_created";
     "payment.failed": "payment.failed";
+    "payment.refunded": "payment.refunded";
     "payment.requires_action": "payment.requires_action";
     "payment.succeeded": "payment.succeeded";
+    "refund.updated": "refund.updated";
     "subscription.canceled": "subscription.canceled";
     "subscription.created": "subscription.created";
     "subscription.trial_will_end": "subscription.trial_will_end";
@@ -247,6 +250,7 @@ export declare const paymentQuerySchema: z.ZodObject<{
         succeeded: "succeeded";
     }>>;
     subscriptionId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>>>;
+    customerId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>>>;
     userId: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
     startDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     endDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
@@ -298,9 +302,12 @@ export declare const webhookEventQuerySchema: z.ZodObject<{
         "invoice.finalized": "invoice.finalized";
         "invoice.paid": "invoice.paid";
         "invoice.payment_failed": "invoice.payment_failed";
+        "payment.dispute_created": "payment.dispute_created";
         "payment.failed": "payment.failed";
+        "payment.refunded": "payment.refunded";
         "payment.requires_action": "payment.requires_action";
         "payment.succeeded": "payment.succeeded";
+        "refund.updated": "refund.updated";
         "subscription.canceled": "subscription.canceled";
         "subscription.created": "subscription.created";
         "subscription.trial_will_end": "subscription.trial_will_end";

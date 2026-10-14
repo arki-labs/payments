@@ -41,7 +41,7 @@ export type RefundMetrics = {
     rejectionRate: number;
     byReason: Record<RefundReason, number>;
 };
-export type RefundErrorCode = 'TRANSACTION_NOT_FOUND' | 'INVALID_STATE' | 'AMOUNT_EXCEEDED' | 'WINDOW_EXCEEDED' | 'PROCESSING_FAILED' | 'APPROVAL_REQUIRED' | 'ALREADY_REFUNDED';
+export type RefundErrorCode = 'TRANSACTION_NOT_FOUND' | 'REFUND_NOT_FOUND' | 'DUPLICATE_PENDING_REFUND' | 'REASON_REQUIRED' | 'INVALID_STATE' | 'AMOUNT_EXCEEDED' | 'WINDOW_EXCEEDED' | 'PROCESSING_FAILED' | 'APPROVAL_REQUIRED' | 'ALREADY_REFUNDED';
 export declare class RefundError extends Error {
     code: RefundErrorCode;
     cause?: unknown;

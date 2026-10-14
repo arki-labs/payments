@@ -1,15 +1,17 @@
 import type { CoreTables } from '../../core/tables.js';
-import type { CustomerId } from '../../core/types.js';
+import type { Customer, CustomerId } from '../../core/types.js';
 import type { CreateCustomerSegmentInput, ListCustomerSegmentsQuery, UpdateCustomerSegmentInput } from '../contracts.js';
 import type { CustomerSegmentId } from '../primitives.js';
 import type { DunningDatabase } from '../repository.js';
 import type { DunningTables } from '../tables.js';
 import type { CustomerRiskProfile, CustomerSegment, RiskScore, SegmentCriteria } from '../types.js';
+/** The customer columns a segment listing returns. */
+export type SegmentCustomer = Pick<Customer, 'id' | 'userId' | 'email' | 'name' | 'createdAt'>;
 /**
  * Service for customer segmentation and risk scoring
  * Handles segment management, customer classification, and risk assessment
  */
-export type SegmentationCoreTables = Pick<CoreTables, 'customers' | 'payments' | 'subscriptions'>;
+export type SegmentationCoreTables = Pick<CoreTables, 'customers' | 'payments' | 'subscriptions' | 'plans'>;
 export type SegmentationDunningTables = Pick<DunningTables, 'customerSegments' | 'customerRiskProfiles'>;
 export declare class CustomerSegmentationService {
     private readonly db;
@@ -18,6 +20,7 @@ export declare class CustomerSegmentationService {
     private readonly customers;
     private readonly payments;
     private readonly subscriptions;
+    private readonly plans;
     constructor(db: DunningDatabase, coreTables: SegmentationCoreTables, dunningTables: SegmentationDunningTables);
     /**
      * Create a new customer segment
@@ -50,11 +53,11 @@ export declare class CustomerSegmentationService {
     /**
      * Get customers matching segment criteria
      */
-    getCustomersInSegment(segmentId: CustomerSegmentId, limit?: number): Promise<any[]>;
+    getCustomersInSegment(segmentId: CustomerSegmentId, limit?: number): Promise<SegmentCustomer[]>;
     /**
      * Get customers matching specific criteria
      */
-    getCustomersMatchingCriteria(criteria: SegmentCriteria, limit?: number): Promise<any[]>;
+    getCustomersMatchingCriteria(criteria: SegmentCriteria, limit?: number): Promise<SegmentCustomer[]>;
     /**
      * Build SQL conditions from segment criteria
      */

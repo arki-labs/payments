@@ -1,9 +1,11 @@
 import { sql } from 'drizzle-orm';
-import { bigint, integer, text, varchar } from 'drizzle-orm/pg-core';
+import { bigint, integer, text, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 import { userIdFactory } from '../core/user-id.js';
 import { instant } from '@arki/db/temporal';
 import { paymentIdFactory } from '../core/primitives.js';
 import { refundIdFactory, refundReasonValues, refundStatusValues } from './primitives.js';
+/** At most one refund of a payment waits for a decision at a time. The database enforces it. */
+export const pendingRefundIndexName = 'refunds_one_pending_per_payment_idx';
 export function createRefundsTables({ schema, paymentIdRef, userIdRef }) {
     // Re-build FK factories locally so COLUMN_ZOD_SCHEMA tagging matches the host-app's
     // version of these column builders exactly.
@@ -26,6 +28,8 @@ export function createRefundsTables({ schema, paymentIdRef, userIdRef }) {
         approvedBy: userFk.optional('approved_by'),
         rejectedBy: userFk.optional('rejected_by'),
         rejectionReason: text('rejection_reason'),
+        /** What the approver wrote when approving. Null when they wrote nothing. */
+        approvalNotes: text('approval_notes'),
         requestedAt: instant('requested_at').default(sql `now()`),
         approvedAt: instant('approved_at'),
         processedAt: instant('processed_at'),
@@ -37,7 +41,7 @@ export function createRefundsTables({ schema, paymentIdRef, userIdRef }) {
         updatedAt: instant('updated_at').default(sql `now()`),
         /** Set by `@arki/journal`. 0 means: this row was written before the journal. */
         version: integer('version').notNull().default(0),
-    });
+    }, table => [uniqueIndex(pendingRefundIndexName).on(table.paymentId).where(sql `${table.status} = 'pending'`)]);
     const refundForeignKeys = refundIdFactory.createForeignKeyFactory(() => refunds.id);
     return {
         enums: {

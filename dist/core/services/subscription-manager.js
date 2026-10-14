@@ -82,7 +82,10 @@ export class SubscriptionManager {
             // Update the subscription
             const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, {
                 planId: newPlanId,
+                prorationBehavior: options.prorationBehavior || 'create_prorations',
             });
+            // The provider moved the plan; store it. The provider's answer says which plan it is on now.
+            await this.writes.changeSubscriptionPlan({ subscriptionId, planId: updatedSubscription.planId });
             return {
                 subscription: updatedSubscription,
                 preview,
@@ -90,6 +93,30 @@ export class SubscriptionManager {
         }
         catch (error) {
             throw new Error(`Failed to update subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+    /**
+     * Set or clear "ends when the paid period ends". The provider changes the flag, then the row follows.
+     * Unlike `cancelSubscription` it never cancels now, and `false` undoes an earlier `true`.
+     */
+    async setCancelAtPeriodEnd(subscriptionId, cancelAtPeriodEnd) {
+        try {
+            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+            if (!currentSubscription) {
+                throw new Error('Subscription not found');
+            }
+            if (currentSubscription.status === 'canceled') {
+                throw new Error('Subscription is already canceled');
+            }
+            const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, { cancelAtPeriodEnd });
+            await this.writes.setSubscriptionCancelAtPeriodEnd({
+                subscriptionId,
+                cancelAtPeriodEnd: updatedSubscription.cancelAtPeriodEnd,
+            });
+            return updatedSubscription;
+        }
+        catch (error) {
+            throw new Error(`Failed to set cancel at period end: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
         }
     }
     async cancelSubscription(subscriptionId, options = {}) {

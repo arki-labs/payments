@@ -4,6 +4,8 @@ import { sum } from '@arki/money';
 import { currencyCodeSchema } from '@arki/money/zod';
 import { nonNegativeMoneySchema, paymentAmount } from '../core/money.js';
 import { createRefundRepository, refundAmountOf } from './repository.js';
+import { pendingRefundIndexName } from './tables.js';
+import { RefundError } from './types.js';
 /**
  * The largest refund approved without a person, per currency: `{ USD: '10.00', JPY: '1500' }`.
  * Each amount is exact text in its own currency, so 10 USD and 1500 JPY are both "small".
@@ -29,6 +31,20 @@ export const DEFAULT_REFUND_AUTO_APPROVE_LIMITS = {
     EUR: '10.00',
     JPY: '1500',
 };
+/** Whether the error is the database refusing a second pending refund for a payment, at any depth of `cause`. */
+function isPendingRefundConflict(error) {
+    for (let current = error, depth = 0; current instanceof Error && depth < 5; depth += 1) {
+        if ('constraint' in current && current.constraint === pendingRefundIndexName) {
+            return true;
+        }
+        current = current.cause;
+    }
+    return false;
+}
+/** A refund in these statuses has been, or will be, paid back, so it counts against what the payment can still refund. */
+function refundHoldsMoney(status) {
+    return status === 'pending' || status === 'approved' || status === 'processing' || status === 'completed';
+}
 /**
  * Reads come from the repositories. Every change of a `refunds` row goes
  * through `writes`: one journal command per step, so each step leaves an event.
@@ -54,7 +70,8 @@ export class RefundService {
     }
     async requestRefund(data) {
         await this.validateRefundEligibility(data.paymentId, data.amount);
-        const refund = await this.writes.requestRefund({
+        const refund = await this.writes
+            .requestRefund({
             paymentId: data.paymentId,
             originalAmount: data.amount.toJSON(),
             refundAmount: data.amount.toJSON(),
@@ -63,6 +80,13 @@ export class RefundService {
             customerNote: data.customerNote,
             internalNotes: data.internalNotes,
             metadata: JSON.stringify({}),
+        })
+            .catch((error) => {
+            // Two requests can pass the check above together; the database lets only one stay pending
+            if (isPendingRefundConflict(error)) {
+                throw new RefundError(`Payment ${data.paymentId} already has a refund waiting for a decision`, 'DUPLICATE_PENDING_REFUND', error);
+            }
+            throw error;
         });
         if (await this.shouldAutoApprove(refund)) {
             return this.approveRefund({ refundId: refund.id, approvedBy: this.systemUserId });
@@ -73,18 +97,19 @@ export class RefundService {
         return refund;
     }
     async approveRefund(data) {
-        const refund = await this.refundRepository.findById(data.refundId);
-        if (!refund || refund.status !== 'pending') {
-            throw new Error(`Invalid refund state for ${data.refundId}`);
-        }
-        const approvedRefund = await this.writes.approveRefund({ refundId: data.refundId, approvedBy: data.approvedBy });
+        await this.requirePending(data.refundId);
+        const approvedRefund = await this.writes.approveRefund({
+            refundId: data.refundId,
+            approvedBy: data.approvedBy,
+            notes: data.notes ?? null,
+        });
         return this.processRefund(approvedRefund);
     }
     async rejectRefund(data) {
-        const refund = await this.refundRepository.findById(data.refundId);
-        if (!refund || refund.status !== 'pending') {
-            throw new Error(`Invalid refund state for ${data.refundId}`);
+        if (data.reason.trim() === '') {
+            throw new RefundError('A rejection needs a reason', 'REASON_REQUIRED');
         }
+        await this.requirePending(data.refundId);
         const rejectedRefund = await this.writes.rejectRefund({
             refundId: data.refundId,
             rejectedBy: data.rejectedBy,
@@ -95,6 +120,17 @@ export class RefundService {
         }
         return rejectedRefund;
     }
+    /** A refund that can still be approved or rejected. A missing one and one past `pending` are different errors. */
+    async requirePending(refundId) {
+        const refund = await this.refundRepository.findById(refundId);
+        if (!refund) {
+            throw new RefundError(`Refund ${refundId} not found`, 'REFUND_NOT_FOUND');
+        }
+        if (refund.status !== 'pending') {
+            throw new RefundError(`Invalid refund state for ${refundId}`, 'INVALID_STATE');
+        }
+        return refund;
+    }
     async processRefund(refund) {
         // Outside the `try`: a refund that could not start has nothing to mark as failed
         await this.writes.processRefund({ refundId: refund.id });
@@ -103,8 +139,8 @@ export class RefundService {
             if (!payment) {
                 throw new Error(`Payment ${refund.paymentId} not found`);
             }
-            const providerPaymentId = payment.providerPaymentId || payment.id;
-            const providerResult = await this.paymentProvider.refundPayment(providerPaymentId, {
+            // The provider resolves its own payment from our payment id
+            const providerResult = await this.paymentProvider.refundPayment(payment.id, {
                 amount: refundAmountOf(refund),
                 reason: refund.reason,
                 metadata: {
@@ -114,7 +150,7 @@ export class RefundService {
             });
             const completedRefund = await this.writes.completeRefund({
                 refundId: refund.id,
-                providerRefundId: providerResult.id,
+                providerRefundId: providerResult.providerRefundId,
                 providerResponse: JSON.stringify(providerResult),
             });
             if (this.notificationService) {
@@ -146,9 +182,14 @@ export class RefundService {
             throw new Error('Refund window exceeded');
         }
         const existingRefunds = await this.refundRepository.findByPaymentId(paymentId);
-        const totalRefunded = sum(existingRefunds.filter(r => r.status === 'completed').map(refund => refundAmountOf(refund)), paid.currency);
+        if (existingRefunds.some(existing => existing.status === 'pending')) {
+            throw new RefundError(`Payment ${paymentId} already has a refund waiting for a decision`, 'DUPLICATE_PENDING_REFUND');
+        }
+        // Money already promised back counts, not only money already sent: an approved or processing
+        // refund will be paid. Rejected and failed ones never move money.
+        const totalRefunded = sum(existingRefunds.filter(r => refundHoldsMoney(r.status)).map(refund => refundAmountOf(refund)), paid.currency);
         if (totalRefunded.plus(amount).gt(paid)) {
-            throw new Error('Refund amount exceeds payment amount');
+            throw new RefundError('Refund amount exceeds payment amount', 'AMOUNT_EXCEEDED');
         }
     }
     /**

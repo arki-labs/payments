@@ -25,6 +25,7 @@
 import type { CommandRunner, JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
 import { z } from '@arki/contracts';
 import { Money } from '@arki/money';
+import type { CoreTables } from '../core/tables.js';
 import type { RefundsTables } from './tables.js';
 import type { Refund } from './types.js';
 export declare const requestRefundInputSchema: z.ZodObject<{
@@ -63,6 +64,7 @@ export declare const requestRefundInputSchema: z.ZodObject<{
 export declare const approveRefundInputSchema: z.ZodObject<{
     refundId: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
     approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+    notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const rejectRefundInputSchema: z.ZodObject<{
     refundId: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
@@ -99,7 +101,7 @@ export type RefundWrites = {
     completeRefund(input: CompleteRefundInput): Promise<Refund>;
     failRefund(input: FailRefundInput): Promise<Refund>;
 };
-export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extends TransactionSource<Tx>, AppDb extends RootDb>(j: JournalDefinitions<Meta, Tx, AppDb>, tables: Pick<RefundsTables, 'refunds'>): {
+export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extends TransactionSource<Tx>, AppDb extends RootDb>(j: JournalDefinitions<Meta, Tx, AppDb>, tables: Pick<RefundsTables, 'refunds'> & Pick<CoreTables, 'payments'>): {
     entities: {
         refund: import("@arki/journal").OnOnlyEntityBuilder<"refund", import("drizzle-orm/pg-core").PgTableWithColumns<{
             name: "refunds";
@@ -300,6 +302,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -478,6 +495,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -544,6 +562,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             approvedBy: null;
             rejectedBy: null;
             rejectionReason: null;
+            approvalNotes: null;
             requestedAt: import("temporal-spec").Temporal.Instant;
             approvedAt: null;
             processedAt: null;
@@ -605,6 +624,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
         }, z.core.$strip>>;
         RefundApproved: import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>>;
         RefundRejected: import("@arki/journal").EventDef<"RefundRejected", z.ZodObject<{
             rejectedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
@@ -851,6 +871,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -1029,6 +1064,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -1086,6 +1122,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
         approveRefund: import("@arki/journal").Command<z.ZodObject<{
             refundId: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>, Promise<import("@arki/journal").WriteResult<import("drizzle-orm/pg-core").PgTableWithColumns<{
             name: "refunds";
             schema: string;
@@ -1285,6 +1322,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -1463,6 +1515,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -1720,6 +1773,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -1898,6 +1966,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -2153,6 +2222,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -2331,6 +2415,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -2588,6 +2673,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -2766,6 +2866,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;
@@ -3022,6 +3123,21 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
                     identity: undefined;
                     generated: undefined;
                 }>;
+                approvalNotes: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").PgTextBuilder<[string, ...string[]]>, {
+                    name: string;
+                    tableName: "refunds";
+                    dataType: "string";
+                    data: string;
+                    driverParam: string;
+                    notNull: false;
+                    hasDefault: false;
+                    isPrimaryKey: false;
+                    isAutoincrement: false;
+                    hasRuntimeDefault: false;
+                    enumValues: undefined;
+                    identity: undefined;
+                    generated: undefined;
+                }>;
                 requestedAt: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasDefault<import("drizzle-orm/pg-core").PgCustomColumnBuilder<{
                     dataType: 'custom';
                     data: import("temporal-spec").Temporal.Instant;
@@ -3200,6 +3316,7 @@ export declare function createRefundsJournal<Meta extends z.ZodObject, Tx extend
             dialect: 'pg';
         }>, import("@arki/journal").EventDef<"RefundApproved", z.ZodObject<{
             approvedBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
+            notes: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         }, z.core.$strip>> | import("@arki/journal").EventDef<"RefundCompleted", z.ZodObject<{
             providerRefundId: z.ZodString;
             providerResponse: z.ZodNullable<z.ZodString>;

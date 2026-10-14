@@ -18,8 +18,8 @@
 import { createPaymentJournal } from './journal/payment.js';
 import { createSubscriptionJournal } from './journal/subscription.js';
 import { writtenRow } from './journal/support.js';
-export { cancelPaymentInputSchema, completePaymentInputSchema, failPaymentInputSchema, initiatePaymentInputSchema, } from './journal/payment.js';
-export { activateSubscriptionInputSchema, cancelSubscriptionInputSchema, createSubscriptionInputSchema, markSubscriptionPastDueInputSchema, pauseSubscriptionInputSchema, reactivateSubscriptionInputSchema, resumeSubscriptionInputSchema, syncSubscriptionInputSchema, } from './journal/subscription.js';
+export { cancelPaymentInputSchema, completePaymentInputSchema, failPaymentInputSchema, initiatePaymentInputSchema, markPaymentRequiresActionInputSchema, recordPaymentDisputeInputSchema, recordPaymentRefundInputSchema, } from './journal/payment.js';
+export { activateSubscriptionInputSchema, cancelSubscriptionInputSchema, changeSubscriptionPlanInputSchema, createSubscriptionInputSchema, markSubscriptionPastDueInputSchema, pauseSubscriptionInputSchema, reactivateSubscriptionInputSchema, resumeSubscriptionInputSchema, setSubscriptionCancelAtPeriodEndInputSchema, syncSubscriptionInputSchema, } from './journal/subscription.js';
 export function createCoreJournal(j, tables) {
     const payments = createPaymentJournal(j, tables.payments);
     const subscriptions = createSubscriptionJournal(j, tables.subscriptions);
@@ -34,12 +34,17 @@ export function createCoreJournal(j, tables) {
             completePayment: input => writtenRow(run(commands.completePayment, input), 'completePayment'),
             failPayment: input => writtenRow(run(commands.failPayment, input), 'failPayment'),
             cancelPayment: input => writtenRow(run(commands.cancelPayment, input), 'cancelPayment'),
+            markPaymentRequiresAction: input => writtenRow(run(commands.markPaymentRequiresAction, input), 'markPaymentRequiresAction'),
+            recordPaymentRefund: input => writtenRow(run(commands.recordPaymentRefund, input), 'recordPaymentRefund'),
+            recordPaymentDispute: input => writtenRow(run(commands.recordPaymentDispute, input), 'recordPaymentDispute'),
             createSubscription: input => writtenRow(run(commands.createSubscription, input), 'createSubscription'),
             syncSubscription: input => writtenRow(run(commands.syncSubscription, input), 'syncSubscription'),
             cancelSubscription: input => writtenRow(run(commands.cancelSubscription, input), 'cancelSubscription'),
             reactivateSubscription: input => writtenRow(run(commands.reactivateSubscription, input), 'reactivateSubscription'),
             pauseSubscription: input => writtenRow(run(commands.pauseSubscription, input), 'pauseSubscription'),
             resumeSubscription: input => writtenRow(run(commands.resumeSubscription, input), 'resumeSubscription'),
+            changeSubscriptionPlan: input => writtenRow(run(commands.changeSubscriptionPlan, input), 'changeSubscriptionPlan'),
+            setSubscriptionCancelAtPeriodEnd: input => writtenRow(run(commands.setSubscriptionCancelAtPeriodEnd, input), 'setSubscriptionCancelAtPeriodEnd'),
             markSubscriptionPastDue: input => writtenRow(run(commands.markSubscriptionPastDue, input), 'markSubscriptionPastDue'),
             activateSubscription: input => writtenRow(run(commands.activateSubscription, input), 'activateSubscription'),
         }),

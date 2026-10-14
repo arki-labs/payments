@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { now } from '@arki/date';
 /**
  * Tax Configuration Repository
@@ -167,6 +167,9 @@ export class TaxExemptionRepository {
         this.taxExemptions = tables.taxExemptions;
     }
     async createExemption(data) {
+        if (!data.customerId && !data.productCode && !data.jurisdictionId) {
+            throw new Error('A tax exemption needs a customer, a product code or a jurisdiction');
+        }
         const result = await this.db.insert(this.taxExemptions).values(data).returning();
         if (!result[0]) {
             throw new Error('Failed to create tax exemption');
@@ -189,6 +192,38 @@ export class TaxExemptionRepository {
         // Check that exemption is currently valid
         sql `${this.taxExemptions.validFrom} <= NOW()`, sql `(${this.taxExemptions.validTo} IS NULL OR ${this.taxExemptions.validTo} > NOW())`))
             .orderBy(this.taxExemptions.validFrom);
+    }
+    /**
+     * The customer's exemptions that were in force at some point between `start` and `end`,
+     * both inclusive. Pending and revoked exemptions never applied, so they are left out.
+     */
+    async findCustomerExemptionsInRange(customerId, start, end) {
+        return this.db
+            .select()
+            .from(this.taxExemptions)
+            .where(and(eq(this.taxExemptions.customerId, customerId), inArray(this.taxExemptions.status, ['active', 'expired']), lte(this.taxExemptions.validFrom, end), or(isNull(this.taxExemptions.validTo), gte(this.taxExemptions.validTo, start))))
+            .orderBy(this.taxExemptions.validFrom);
+    }
+    /**
+     * The exemptions that can keep tax off a sale to `customerId` at `at`: active, in force, and
+     * either the customer's own or open to every customer (no `customerId`). Pending, revoked and
+     * expired ones never apply. `threshold` exemptions are left out: nothing stores a threshold
+     * amount to test a sale against. The caller narrows by product and jurisdiction.
+     */
+    async findApplicableExemptions(customerId, at = now()) {
+        return this.db
+            .select()
+            .from(this.taxExemptions)
+            .where(and(or(eq(this.taxExemptions.customerId, customerId), isNull(this.taxExemptions.customerId)), eq(this.taxExemptions.status, 'active'), ne(this.taxExemptions.type, 'threshold'), lte(this.taxExemptions.validFrom, at), or(isNull(this.taxExemptions.validTo), gt(this.taxExemptions.validTo, at))))
+            .orderBy(this.taxExemptions.validFrom, this.taxExemptions.id);
+    }
+    /** Every customer's exemptions that were in force at some point between `start` and `end`, both inclusive. Pending and revoked ones never applied. */
+    async findExemptionsInRange(start, end) {
+        return this.db
+            .select()
+            .from(this.taxExemptions)
+            .where(and(inArray(this.taxExemptions.status, ['active', 'expired']), lte(this.taxExemptions.validFrom, end), or(isNull(this.taxExemptions.validTo), gte(this.taxExemptions.validTo, start))))
+            .orderBy(this.taxExemptions.validFrom, this.taxExemptions.id);
     }
     async findProductExemptions(productCode) {
         return this.db
@@ -260,27 +295,134 @@ export class TaxExemptionRepository {
         const futureDate = new Date();
         futureDate.setDate(futureDate.getDate() + 30);
         const [activeCount] = await this.db
-            .select({ count: sql `count(*)` })
+            .select({ count: sql `count(*)`.mapWith(Number) })
             .from(this.taxExemptions)
             .where(eq(this.taxExemptions.status, 'active'));
+        const [pendingCount] = await this.db
+            .select({ count: sql `count(*)`.mapWith(Number) })
+            .from(this.taxExemptions)
+            .where(eq(this.taxExemptions.status, 'pending_review'));
         const [expiredCount] = await this.db
-            .select({ count: sql `count(*)` })
+            .select({ count: sql `count(*)`.mapWith(Number) })
             .from(this.taxExemptions)
             .where(eq(this.taxExemptions.status, 'expired'));
         const [revokedCount] = await this.db
-            .select({ count: sql `count(*)` })
+            .select({ count: sql `count(*)`.mapWith(Number) })
             .from(this.taxExemptions)
             .where(eq(this.taxExemptions.status, 'revoked'));
         const [expiringCount] = await this.db
-            .select({ count: sql `count(*)` })
+            .select({ count: sql `count(*)`.mapWith(Number) })
             .from(this.taxExemptions)
             .where(and(eq(this.taxExemptions.status, 'active'), sql `${this.taxExemptions.validTo} IS NOT NULL`, sql `${this.taxExemptions.validTo} <= ${futureDate.toISOString()}`, sql `${this.taxExemptions.validTo} > NOW()`));
         return {
             totalActive: activeCount?.count || 0,
+            totalPendingReview: pendingCount?.count || 0,
             totalExpired: expiredCount?.count || 0,
             totalRevoked: revokedCount?.count || 0,
             expiringNext30Days: expiringCount?.count || 0,
         };
+    }
+}
+/**
+ * Tax Audit Repository
+ * The append-only trail of tax actions
+ */
+export class TaxAuditRepository {
+    db;
+    taxAuditEntries;
+    constructor(db, tables) {
+        this.db = db;
+        this.taxAuditEntries = tables.taxAuditEntries;
+    }
+    async record(entry) {
+        const [row] = await this.db.insert(this.taxAuditEntries).values(entry).returning();
+        if (!row)
+            throw new Error('Failed to record tax audit entry');
+        return row;
+    }
+    /** The entries about one entity, oldest first. */
+    async findByEntity(entity, entityId) {
+        return this.db
+            .select()
+            .from(this.taxAuditEntries)
+            .where(and(eq(this.taxAuditEntries.entity, entity), eq(this.taxAuditEntries.entityId, entityId)))
+            .orderBy(this.taxAuditEntries.occurredAt, this.taxAuditEntries.id);
+    }
+}
+/**
+ * Tax Record Repository
+ * The per-jurisdiction tax of each recorded sale and refund
+ */
+export class TaxRecordRepository {
+    db;
+    taxRecords;
+    constructor(db, tables) {
+        this.db = db;
+        this.taxRecords = tables.taxRecords;
+    }
+    /** Write the rows. A row already recorded (same type, reference, jurisdiction and rate) is left as it was. */
+    async recordMany(rows) {
+        if (rows.length === 0)
+            return;
+        await this.db.insert(this.taxRecords).values(rows).onConflictDoNothing();
+    }
+    async findByReference(type, reference) {
+        return this.db
+            .select()
+            .from(this.taxRecords)
+            .where(and(eq(this.taxRecords.type, type), eq(this.taxRecords.reference, reference)))
+            .orderBy(this.taxRecords.jurisdiction, this.taxRecords.rate);
+    }
+    /** How many distinct sales carried tax between `start` and `end`, both inclusive (a sale taxed in two jurisdictions counts once). */
+    async countSaleTransactions(period) {
+        const [row] = await this.db
+            .select({ count: sql `count(distinct ${this.taxRecords.reference})`.mapWith(Number) })
+            .from(this.taxRecords)
+            .where(and(eq(this.taxRecords.type, 'sale'), gte(this.taxRecords.occurredAt, period.start), lte(this.taxRecords.occurredAt, period.end), period.customerId === undefined ? undefined : eq(this.taxRecords.customerId, period.customerId), period.jurisdiction === undefined
+            ? undefined
+            : sql `lower(${this.taxRecords.jurisdiction}) = lower(${period.jurisdiction})`));
+        return row?.count ?? 0;
+    }
+    /**
+     * The tax each payment carried, for the records that happened between `start` and `end`, both
+     * inclusive. Records with no payment id are left out. `jurisdiction` limits it to one (any case).
+     */
+    async totalsByPayment(period) {
+        const { type, taxAmountMinor } = this.taxRecords;
+        return this.db
+            .select({
+            paymentId: sql `${this.taxRecords.paymentId}`,
+            currency: this.taxRecords.currency,
+            saleTaxMinor: sql `coalesce(sum(${taxAmountMinor}) filter (where ${type} = 'sale'), 0)`.mapWith(Number),
+            refundTaxMinor: sql `coalesce(sum(${taxAmountMinor}) filter (where ${type} = 'refund'), 0)`.mapWith(Number),
+        })
+            .from(this.taxRecords)
+            .where(and(sql `${this.taxRecords.paymentId} IS NOT NULL`, gte(this.taxRecords.occurredAt, period.start), lte(this.taxRecords.occurredAt, period.end), period.jurisdiction === undefined
+            ? undefined
+            : sql `lower(${this.taxRecords.jurisdiction}) = lower(${period.jurisdiction})`))
+            .groupBy(this.taxRecords.paymentId, this.taxRecords.currency);
+    }
+    /**
+     * Tax per jurisdiction and currency for the records that happened between `start` and `end`,
+     * both inclusive, ordered by jurisdiction then currency. `customerId` limits it to one customer.
+     */
+    async totalsByJurisdiction(period) {
+        const { type, taxAmountMinor, reference } = this.taxRecords;
+        return this.db
+            .select({
+            jurisdiction: this.taxRecords.jurisdiction,
+            currency: this.taxRecords.currency,
+            saleTaxMinor: sql `coalesce(sum(${taxAmountMinor}) filter (where ${type} = 'sale'), 0)`.mapWith(Number),
+            refundTaxMinor: sql `coalesce(sum(${taxAmountMinor}) filter (where ${type} = 'refund'), 0)`.mapWith(Number),
+            saleCount: sql `count(distinct ${reference}) filter (where ${type} = 'sale')`.mapWith(Number),
+            refundCount: sql `count(distinct ${reference}) filter (where ${type} = 'refund')`.mapWith(Number),
+        })
+            .from(this.taxRecords)
+            .where(and(gte(this.taxRecords.occurredAt, period.start), lte(this.taxRecords.occurredAt, period.end), period.customerId === undefined ? undefined : eq(this.taxRecords.customerId, period.customerId), period.jurisdiction === undefined
+            ? undefined
+            : sql `lower(${this.taxRecords.jurisdiction}) = lower(${period.jurisdiction})`))
+            .groupBy(this.taxRecords.jurisdiction, this.taxRecords.currency)
+            .orderBy(this.taxRecords.jurisdiction, this.taxRecords.currency);
     }
 }
 /**
@@ -292,6 +434,8 @@ export function createTaxRepositories(db, tables) {
         configurations: new TaxConfigurationRepository(db, { taxConfigurations: tables.taxConfigurations }),
         jurisdictions: new TaxJurisdictionRepository(db, { taxJurisdictions: tables.taxJurisdictions }),
         exemptions: new TaxExemptionRepository(db, { taxExemptions: tables.taxExemptions }),
+        records: new TaxRecordRepository(db, { taxRecords: tables.taxRecords }),
+        audit: new TaxAuditRepository(db, { taxAuditEntries: tables.taxAuditEntries }),
     };
 }
 //# sourceMappingURL=repository.js.map

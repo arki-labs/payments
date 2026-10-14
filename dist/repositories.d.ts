@@ -25,6 +25,8 @@ export declare function createPaymentRepositories(db: PaymentRepositoriesDatabas
         configurations: import("./tax/repository.js").TaxConfigurationRepository;
         jurisdictions: import("./tax/repository.js").TaxJurisdictionRepository;
         exemptions: import("./tax/repository.js").TaxExemptionRepository;
+        records: import("./tax/repository.js").TaxRecordRepository;
+        audit: import("./tax/repository.js").TaxAuditRepository;
     };
 };
 export type PaymentRepositories = ReturnType<typeof createPaymentRepositories>;

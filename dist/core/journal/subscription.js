@@ -81,6 +81,16 @@ export const resumeSubscriptionInputSchema = z.object({
     subscriptionId: subscriptionIdSchema,
     status: statusSchema.default('active'),
 });
+export const changeSubscriptionPlanInputSchema = z.object({
+    subscriptionId: subscriptionIdSchema,
+    /** The plan the provider moved the subscription to */
+    planId: planIdSchema,
+});
+export const setSubscriptionCancelAtPeriodEndInputSchema = z.object({
+    subscriptionId: subscriptionIdSchema,
+    /** The flag the provider reports after the change */
+    cancelAtPeriodEnd: z.boolean(),
+});
 export const markSubscriptionPastDueInputSchema = z.object({ subscriptionId: subscriptionIdSchema });
 export const activateSubscriptionInputSchema = z.object({ subscriptionId: subscriptionIdSchema });
 /** The time the caller gave, or the one the row holds when the caller did not say. */
@@ -141,6 +151,10 @@ export function createSubscriptionJournal(j, subscriptions) {
     const SubscriptionReactivated = j.event('SubscriptionReactivated', z.object({ status: statusSchema }));
     const SubscriptionPaused = j.event('SubscriptionPaused', z.object({ status: statusSchema }));
     const SubscriptionResumed = j.event('SubscriptionResumed', z.object({ status: statusSchema }));
+    /** The provider moved the subscription to another plan. */
+    const SubscriptionPlanChanged = j.event('SubscriptionPlanChanged', z.object({ planId: planIdSchema }));
+    /** The subscription will (or will no longer) end when the paid period ends. The status does not change. */
+    const SubscriptionCancelAtPeriodEndSet = j.event('SubscriptionCancelAtPeriodEndSet', z.object({ cancelAtPeriodEnd: z.boolean() }));
     /** A payment failed for good: the subscription is `past_due`. */
     const SubscriptionPastDue = j.event('SubscriptionPastDue', z.object({}));
     const subscription = j
@@ -190,6 +204,11 @@ export function createSubscriptionJournal(j, subscriptions) {
     }))
         .on(SubscriptionPaused, (_row, e) => ({ status: e.data.status, updatedAt: fromDate(e.recordedAt) }))
         .on(SubscriptionResumed, (_row, e) => ({ status: e.data.status, updatedAt: fromDate(e.recordedAt) }))
+        .on(SubscriptionPlanChanged, (_row, e) => ({ planId: e.data.planId, updatedAt: fromDate(e.recordedAt) }))
+        .on(SubscriptionCancelAtPeriodEndSet, (_row, e) => ({
+        cancelAtPeriodEnd: e.data.cancelAtPeriodEnd,
+        updatedAt: fromDate(e.recordedAt),
+    }))
         .on(SubscriptionPastDue, (_row, e) => ({ status: 'past_due', updatedAt: fromDate(e.recordedAt) }));
     /** Stores a subscription the provider just created, with the status the provider reported. */
     const createSubscription = j.command('createSubscription', createSubscriptionInputSchema, (input, { write }) => {
@@ -263,6 +282,21 @@ export function createSubscriptionJournal(j, subscriptions) {
         }
         return [SubscriptionResumed({ status: input.status })];
     }));
+    /** Stores the plan the provider moved the subscription to. The same plan again writes nothing. */
+    const changeSubscriptionPlan = j.command('changeSubscriptionPlan', changeSubscriptionPlanInputSchema, (input, { write }) => write(subscription, input.subscriptionId, row => {
+        const current = requireSubscription(row, input.subscriptionId);
+        return current.planId === input.planId ? [] : [SubscriptionPlanChanged({ planId: input.planId })];
+    }));
+    /** Stores the flag the provider reports. A subscription that is already canceled has no period end to wait for. */
+    const setSubscriptionCancelAtPeriodEnd = j.command('setSubscriptionCancelAtPeriodEnd', setSubscriptionCancelAtPeriodEndInputSchema, (input, { write }) => write(subscription, input.subscriptionId, row => {
+        const current = requireSubscription(row, input.subscriptionId);
+        if (current.status === 'canceled') {
+            throw new CommandError('CONFLICT', `Subscription ${input.subscriptionId} is already canceled`);
+        }
+        return current.cancelAtPeriodEnd === input.cancelAtPeriodEnd
+            ? []
+            : [SubscriptionCancelAtPeriodEndSet({ cancelAtPeriodEnd: input.cancelAtPeriodEnd })];
+    }));
     /** A payment failed (dunning started, or every retry was used up). Already past due: nothing to write. */
     const markSubscriptionPastDue = j.command('markSubscriptionPastDue', markSubscriptionPastDueInputSchema, (input, { write }) => write(subscription, input.subscriptionId, row => {
         const current = requireSubscription(row, input.subscriptionId);
@@ -286,6 +320,8 @@ export function createSubscriptionJournal(j, subscriptions) {
             SubscriptionReactivated,
             SubscriptionPaused,
             SubscriptionResumed,
+            SubscriptionPlanChanged,
+            SubscriptionCancelAtPeriodEndSet,
             SubscriptionPastDue,
         },
         commands: {
@@ -295,6 +331,8 @@ export function createSubscriptionJournal(j, subscriptions) {
             reactivateSubscription,
             pauseSubscription,
             resumeSubscription,
+            changeSubscriptionPlan,
+            setSubscriptionCancelAtPeriodEnd,
             markSubscriptionPastDue,
             activateSubscription,
         },

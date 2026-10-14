@@ -120,6 +120,20 @@ export const riskScoreSchema = z.object({
     }),
 });
 // Input validation schemas for API operations
+/** One step of a campaign, as create and update accept it. */
+export const dunningCampaignTemplateInputSchema = z.object({
+    name: z.string().min(1).max(255),
+    stepNumber: z.number().int().min(1),
+    delayHours: z.number().int().min(0),
+    communication: communicationTemplateSchema,
+});
+/** The full set of steps of a campaign. Step numbers are unique: update matches steps by number. */
+export const dunningCampaignTemplatesSchema = z
+    .array(dunningCampaignTemplateInputSchema)
+    .min(1)
+    .refine(templates => new Set(templates.map(template => template.stepNumber)).size === templates.length, {
+    message: 'Template step numbers must be unique',
+});
 export const createDunningCampaignInputSchema = z.object({
     name: z.string().min(1).max(255),
     description: z.string().max(1000).optional(),
@@ -127,14 +141,7 @@ export const createDunningCampaignInputSchema = z.object({
     trigger: campaignTriggerSchema,
     settings: campaignSettingsSchema,
     targetSegments: z.array(customerSegmentIdSchema).default([]),
-    templates: z
-        .array(z.object({
-        name: z.string().min(1).max(255),
-        stepNumber: z.number().int().min(1),
-        delayHours: z.number().int().min(0),
-        communication: communicationTemplateSchema,
-    }))
-        .min(1),
+    templates: dunningCampaignTemplatesSchema,
 });
 export const updateDunningCampaignInputSchema = z.object({
     name: z.string().min(1).max(255).optional(),
@@ -144,6 +151,8 @@ export const updateDunningCampaignInputSchema = z.object({
     trigger: campaignTriggerSchema.optional(),
     settings: campaignSettingsSchema.optional(),
     targetSegments: z.array(customerSegmentIdSchema).optional(),
+    /** When given, the campaign's steps become exactly this set (see `DunningCampaignService.updateCampaign`). */
+    templates: dunningCampaignTemplatesSchema.optional(),
 });
 export const createDunningTemplateInputSchema = z.object({
     campaignId: dunningCampaignIdSchema,
@@ -257,6 +266,7 @@ export const customerRiskProfileInputSchema = z.object({
         successfulPayments: z.number().int().min(0),
         failedPayments: z.number().int().min(0),
         averageAmount: z.number().min(0),
+        currency: z.string().optional(),
         lastPaymentDate: instantSchema().optional(),
         streakDays: z.number().int().min(0),
     }),

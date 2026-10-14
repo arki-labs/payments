@@ -1,9 +1,13 @@
 export type TaxConfigId = `txc_${string}`;
 export type TaxJurisdictionId = `txj_${string}`;
 export type TaxExemptionId = `txe_${string}`;
+export type TaxRecordId = `txr_${string}`;
+export type TaxAuditEntryId = `txa_${string}`;
 export declare const createTaxConfigId: () => `txc_${string}`;
 export declare const createTaxJurisdictionId: () => `txj_${string}`;
 export declare const createTaxExemptionId: () => `txe_${string}`;
+export declare const createTaxRecordId: () => `txr_${string}`;
+export declare const createTaxAuditEntryId: () => `txa_${string}`;
 export declare const taxConfigIdSchema: import("zod").ZodPipe<import("zod").ZodString, import("zod").ZodTransform<`txc_${string}`, string>> | import("zod").ZodPipe<import("zod/v4/core").$ZodBranded<import("zod").ZodString, `txc_${string}`, "out">, import("zod").ZodTransform<`txc_${string}`, string & import("zod").$brand<`txc_${string}`>>>;
 export declare const taxJurisdictionIdSchema: import("zod").ZodPipe<import("zod").ZodString, import("zod").ZodTransform<`txj_${string}`, string>> | import("zod").ZodPipe<import("zod/v4/core").$ZodBranded<import("zod").ZodString, `txj_${string}`, "out">, import("zod").ZodTransform<`txj_${string}`, string & import("zod").$brand<`txj_${string}`>>>;
 export declare const taxExemptionIdSchema: import("zod").ZodPipe<import("zod").ZodString, import("zod").ZodTransform<`txe_${string}`, string>> | import("zod").ZodPipe<import("zod/v4/core").$ZodBranded<import("zod").ZodString, `txe_${string}`, "out">, import("zod").ZodTransform<`txe_${string}`, string & import("zod").$brand<`txe_${string}`>>>;
@@ -82,12 +86,64 @@ export declare const taxExemptionIdFactory: {
         }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txe_${string}`>;
     };
 };
+export declare const taxRecordIdFactory: {
+    create: () => `txr_${string}`;
+    make: () => `txr_${string}`;
+    new: () => `txr_${string}`;
+    schema: import("zod").ZodPipe<import("zod").ZodString, import("zod").ZodTransform<`txr_${string}`, string>> | import("zod").ZodPipe<import("zod/v4/core").$ZodBranded<import("zod").ZodString, `txr_${string}`, "out">, import("zod").ZodTransform<`txr_${string}`, string & import("zod").$brand<`txr_${string}`>>>;
+    primaryColumn: (name?: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `txr_${string}`>>;
+    optionalColumn: (name: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txr_${string}` | null>>;
+    requiredColumn: (name: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txr_${string}`>>;
+    reference: (name: string) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txr_${string}`>;
+    optionalReference: (name: string) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txr_${string}`>;
+    foreignKey: (name: string, referenceFn: () => import("drizzle-orm/pg-core").PgColumn, options?: {
+        onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+    }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txr_${string}`>;
+    optionalForeignKey: (name: string, referenceFn: () => import("drizzle-orm/pg-core").PgColumn, options?: {
+        onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+    }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txr_${string}`>;
+    createForeignKeyFactory: (referenceFn: () => import("drizzle-orm/pg-core").PgColumn) => {
+        required: (name: string, options?: {
+            onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+        }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txr_${string}`>;
+        optional: (name: string, options?: {
+            onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+        }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txr_${string}`>;
+    };
+};
+export declare const taxAuditEntryIdFactory: {
+    create: () => `txa_${string}`;
+    make: () => `txa_${string}`;
+    new: () => `txa_${string}`;
+    schema: import("zod").ZodPipe<import("zod").ZodString, import("zod").ZodTransform<`txa_${string}`, string>> | import("zod").ZodPipe<import("zod/v4/core").$ZodBranded<import("zod").ZodString, `txa_${string}`, "out">, import("zod").ZodTransform<`txa_${string}`, string & import("zod").$brand<`txa_${string}`>>>;
+    primaryColumn: (name?: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `txa_${string}`>>;
+    optionalColumn: (name: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txa_${string}` | null>>;
+    requiredColumn: (name: string) => import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txa_${string}`>>;
+    reference: (name: string) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txa_${string}`>;
+    optionalReference: (name: string) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txa_${string}`>;
+    foreignKey: (name: string, referenceFn: () => import("drizzle-orm/pg-core").PgColumn, options?: {
+        onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+    }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txa_${string}`>;
+    optionalForeignKey: (name: string, referenceFn: () => import("drizzle-orm/pg-core").PgColumn, options?: {
+        onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+    }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txa_${string}`>;
+    createForeignKeyFactory: (referenceFn: () => import("drizzle-orm/pg-core").PgColumn) => {
+        required: (name: string, options?: {
+            onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+        }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txa_${string}`>;
+        optional: (name: string, options?: {
+            onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+        }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txa_${string}`>;
+    };
+};
 export declare const taxConfigStatusValues: readonly ['active', 'inactive', 'pending'];
 export declare const taxCalculationModeValues: readonly ['automatic', 'manual', 'disabled'];
 export declare const taxBusinessTypeValues: readonly ['saas', 'digital_goods', 'physical_goods', 'services', 'mixed'];
 export declare const jurisdictionTypeValues: readonly ['country', 'state', 'province', 'city', 'county', 'district'];
 export declare const exemptionTypeValues: readonly ['customer', 'product', 'jurisdiction', 'threshold'];
 export declare const exemptionStatusValues: readonly ['active', 'expired', 'revoked', 'pending_review'];
+export declare const taxRecordTypeValues: readonly ['sale', 'refund'];
+export type TaxRecordType = (typeof taxRecordTypeValues)[number];
 export type TaxConfigStatus = (typeof taxConfigStatusValues)[number];
 export type TaxCalculationMode = (typeof taxCalculationModeValues)[number];
 export type TaxBusinessType = (typeof taxBusinessTypeValues)[number];

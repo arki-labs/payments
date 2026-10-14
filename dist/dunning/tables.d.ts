@@ -1526,6 +1526,8 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 successfulPayments: number;
                 failedPayments: number;
                 averageAmount: number;
+                /** ISO currency code `averageAmount` is in; absent when the customer has no payments. */
+                currency?: string;
                 lastPaymentDate?: Instant;
                 streakDays: number;
             }>>, {
@@ -1537,6 +1539,8 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                     successfulPayments: number;
                     failedPayments: number;
                     averageAmount: number;
+                    /** ISO currency code `averageAmount` is in; absent when the customer has no payments. */
+                    currency?: string;
                     lastPaymentDate?: Instant;
                     streakDays: number;
                 };

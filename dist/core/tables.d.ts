@@ -13,7 +13,7 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         billingIntervalEnum: import("drizzle-orm/pg-core").PgEnum<["monthly", "yearly", "weekly", "daily"]>;
         planTierEnum: import("drizzle-orm/pg-core").PgEnum<["basic", "premium", "pro", "enterprise"]>;
         paymentMethodTypeEnum: import("drizzle-orm/pg-core").PgEnum<["card", "bank_account", "paypal", "apple_pay", "google_pay"]>;
-        webhookEventTypeEnum: import("drizzle-orm/pg-core").PgEnum<["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"]>;
+        webhookEventTypeEnum: import("drizzle-orm/pg-core").PgEnum<["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "payment.refunded", "payment.dispute_created", "refund.updated", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"]>;
     };
     plans: import("drizzle-orm/pg-core").PgTableWithColumns<{
         name: "plans";
@@ -894,6 +894,36 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
+            disputeId: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, {
+                name: string;
+                tableName: "payments";
+                dataType: "string";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                identity: undefined;
+                generated: undefined;
+            }>;
+            disputeStatus: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, {
+                name: string;
+                tableName: "payments";
+                dataType: "string";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                identity: undefined;
+                generated: undefined;
+            }>;
             metadata: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgJsonbBuilder, Record<string, unknown>>, {
                 name: string;
                 tableName: "payments";
@@ -999,18 +1029,18 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
-            eventType: import("drizzle-orm/pg-core").PgBuildColumn<"webhook_events", import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgEnumColumnBuilder<["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"]>, "customer.created" | "customer.deleted" | "customer.updated" | "invoice.created" | "invoice.finalized" | "invoice.paid" | "invoice.payment_failed" | "payment.failed" | "payment.requires_action" | "payment.succeeded" | "subscription.canceled" | "subscription.created" | "subscription.trial_will_end" | "subscription.updated">>, {
+            eventType: import("drizzle-orm/pg-core").PgBuildColumn<"webhook_events", import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgEnumColumnBuilder<["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "payment.refunded", "payment.dispute_created", "refund.updated", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"]>, "customer.created" | "customer.deleted" | "customer.updated" | "invoice.created" | "invoice.finalized" | "invoice.paid" | "invoice.payment_failed" | "payment.dispute_created" | "payment.failed" | "payment.refunded" | "payment.requires_action" | "payment.succeeded" | "refund.updated" | "subscription.canceled" | "subscription.created" | "subscription.trial_will_end" | "subscription.updated">>, {
                 name: string;
                 tableName: "webhook_events";
                 dataType: "string enum";
-                data: "customer.created" | "customer.deleted" | "customer.updated" | "invoice.created" | "invoice.finalized" | "invoice.paid" | "invoice.payment_failed" | "payment.failed" | "payment.requires_action" | "payment.succeeded" | "subscription.canceled" | "subscription.created" | "subscription.trial_will_end" | "subscription.updated";
+                data: "customer.created" | "customer.deleted" | "customer.updated" | "invoice.created" | "invoice.finalized" | "invoice.paid" | "invoice.payment_failed" | "payment.dispute_created" | "payment.failed" | "payment.refunded" | "payment.requires_action" | "payment.succeeded" | "refund.updated" | "subscription.canceled" | "subscription.created" | "subscription.trial_will_end" | "subscription.updated";
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: ["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"];
+                enumValues: ["subscription.created", "subscription.updated", "subscription.canceled", "subscription.trial_will_end", "payment.succeeded", "payment.failed", "payment.requires_action", "payment.refunded", "payment.dispute_created", "refund.updated", "customer.created", "customer.updated", "customer.deleted", "invoice.created", "invoice.finalized", "invoice.paid", "invoice.payment_failed"];
                 identity: undefined;
                 generated: undefined;
             }>;

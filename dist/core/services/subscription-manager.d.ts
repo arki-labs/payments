@@ -49,6 +49,11 @@ export declare class SubscriptionManager {
         subscription: Subscription;
         preview: SubscriptionPreview;
     }>;
+    /**
+     * Set or clear "ends when the paid period ends". The provider changes the flag, then the row follows.
+     * Unlike `cancelSubscription` it never cancels now, and `false` undoes an earlier `true`.
+     */
+    setCancelAtPeriodEnd(subscriptionId: SubscriptionId, cancelAtPeriodEnd: boolean): Promise<Subscription>;
     cancelSubscription(subscriptionId: SubscriptionId, options?: SubscriptionCancellationOptions): Promise<Subscription>;
     reactivateSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
     pauseSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;

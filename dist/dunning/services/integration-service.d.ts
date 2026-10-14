@@ -28,7 +28,7 @@ export type DunningIntegrationConfig = {
     /** Channel-provider config forwarded to `createCommunicationOrchestrationService`. */
     communication?: CommunicationOrchestrationConfig;
 };
-export type DunningIntegrationCoreTables = Pick<CoreTables, 'customers' | 'payments' | 'subscriptions'>;
+export type DunningIntegrationCoreTables = Pick<CoreTables, 'customers' | 'payments' | 'subscriptions' | 'plans'>;
 export type DunningIntegrationDunningTables = Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics' | 'dunningTemplates' | 'dunningExecutions' | 'dunningCommunications' | 'customerSegments' | 'customerRiskProfiles'>;
 export declare class DunningIntegrationService {
     private readonly db;

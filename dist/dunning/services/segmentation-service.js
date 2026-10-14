@@ -4,6 +4,7 @@ import { getLogger } from '@arki/log';
 import { Money } from '@arki/money';
 import { toMinorColumn } from '../../core/money.js';
 import { createCustomerRiskProfileRepository, createCustomerSegmentRepository } from '../repository.js';
+import { valueList } from '../sql-list.js';
 const logger = getLogger('dunning.segmentation');
 export class CustomerSegmentationService {
     db;
@@ -12,6 +13,7 @@ export class CustomerSegmentationService {
     customers;
     payments;
     subscriptions;
+    plans;
     constructor(db, coreTables, dunningTables) {
         this.db = db;
         this.segmentRepo = createCustomerSegmentRepository(db, {
@@ -23,6 +25,7 @@ export class CustomerSegmentationService {
         this.customers = coreTables.customers;
         this.payments = coreTables.payments;
         this.subscriptions = coreTables.subscriptions;
+        this.plans = coreTables.plans;
     }
     /**
      * Create a new customer segment
@@ -96,10 +99,10 @@ export class CustomerSegmentationService {
         const conditions = this.buildSegmentConditions(criteria);
         const result = conditions.length > 0
             ? await this.db
-                .select({ count: sql `COUNT(DISTINCT ${this.customers.id})` })
+                .select({ count: sql `COUNT(DISTINCT ${this.customers.id})`.mapWith(Number) })
                 .from(this.customers)
                 .where(conditions.length === 1 ? conditions[0] : and(...conditions))
-            : await this.db.select({ count: sql `COUNT(DISTINCT ${this.customers.id})` }).from(this.customers);
+            : await this.db.select({ count: sql `COUNT(DISTINCT ${this.customers.id})`.mapWith(Number) }).from(this.customers);
         return result[0]?.count ?? 0;
     }
     /**
@@ -153,7 +156,7 @@ export class CustomerSegmentationService {
         if (criteria.totalSpent && spendBound) {
             const { min, max } = criteria.totalSpent;
             const totalSpentSubquery = this.db
-                .select({ customerId: this.payments.customerId, total: sql `SUM(${this.payments.amountMinor})` })
+                .select({ customerId: this.payments.customerId, total: sql `SUM(${this.payments.amountMinor})`.as('total') })
                 .from(this.payments)
                 .where(and(eq(this.payments.status, 'succeeded'), eq(this.payments.currency, Money.fromJSON(spendBound).currency.code)))
                 .groupBy(this.payments.customerId);
@@ -216,8 +219,8 @@ export class CustomerSegmentationService {
             conditions.push(sql `
           ${this.customers.id} IN (
                     SELECT s.customer_id FROM ${this.subscriptions} s
-                    JOIN plans p ON s.plan_id = p.id
-                    WHERE p.tier = ANY(${criteria.planTier})
+                    JOIN ${this.plans} p ON s.plan_id = p.id
+                    WHERE p.tier IN ${valueList(criteria.planTier)}
                   )
         `);
         }
@@ -248,7 +251,7 @@ export class CustomerSegmentationService {
             subscriptionChurnRisk: this.calculateSubscriptionChurnRisk(subscriptionHistory),
             engagementRisk: this.calculateEngagementRisk(engagementMetrics),
             recencyRisk: this.calculateRecencyRisk(paymentHistory.lastPaymentDate),
-            volatilityRisk: await this.calculateVolatilityRisk(customerId),
+            volatilityRisk: await this.calculateVolatilityRisk(customerId, paymentHistory.currency),
             customerLifetimeValueRisk: this.calculateCLVRisk(paymentHistory, subscriptionHistory),
         };
         // Dynamic weights based on data availability and customer profile
@@ -348,20 +351,23 @@ export class CustomerSegmentationService {
     /**
      * Calculate volatility risk based on payment amount and frequency patterns
      */
-    async calculateVolatilityRisk(customerId) {
+    async calculateVolatilityRisk(customerId, currency) {
+        // Amounts in different currencies cannot be compared, so only the customer's main currency counts
+        if (!currency) {
+            return 25; // No payments: moderate risk for insufficient data
+        }
         // Get last 12 months of payment data for volatility analysis
         const twelveMonthsAgo = new Date();
         twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
         const monthlyPayments = await this.db
             .select({
             month: sql `DATE_TRUNC('month', created_at)`,
-            paymentCount: sql `COUNT(*)`,
-            totalAmount: sql `SUM(amount)`,
-            avgAmount: sql `AVG(amount)`,
-            failureCount: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`,
+            paymentCount: sql `COUNT(*)`.mapWith(Number),
+            totalAmount: sql `SUM(${this.payments.amountMinor})`.mapWith(Number),
+            failureCount: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`.mapWith(Number),
         })
             .from(this.payments)
-            .where(and(sql `${this.payments.customerId} = ${customerId}`, sql `${this.payments.createdAt} >= ${twelveMonthsAgo}`))
+            .where(and(sql `${this.payments.customerId} = ${customerId}`, eq(this.payments.currency, currency), sql `${this.payments.createdAt} >= ${twelveMonthsAgo}`))
             .groupBy(sql `DATE_TRUNC('month', created_at)`)
             .orderBy(sql `DATE_TRUNC('month', created_at)`);
         if (monthlyPayments.length < 3) {
@@ -407,22 +413,20 @@ export class CustomerSegmentationService {
         // Compare recent vs older payment patterns
         const recentPayments = await this.db
             .select({
-            totalPayments: sql `COUNT(*)`,
-            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`,
-            avgAmount: sql `AVG(amount)`,
+            totalPayments: sql `COUNT(*)`.mapWith(Number),
+            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`.mapWith(Number),
         })
             .from(this.payments)
             .where(and(sql `${this.payments.customerId} = ${customerId}`, sql `${this.payments.createdAt} >= ${thirtyDaysAgo}`));
         const olderPayments = await this.db
             .select({
-            totalPayments: sql `COUNT(*)`,
-            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`,
-            avgAmount: sql `AVG(amount)`,
+            totalPayments: sql `COUNT(*)`.mapWith(Number),
+            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`.mapWith(Number),
         })
             .from(this.payments)
             .where(and(sql `${this.payments.customerId} = ${customerId}`, sql `${this.payments.createdAt} >= ${sixtyDaysAgo}`, sql `${this.payments.createdAt} < ${thirtyDaysAgo}`));
-        const recentData = recentPayments[0] || { totalPayments: 0, failedPayments: 0, avgAmount: 0 };
-        const olderData = olderPayments[0] || { totalPayments: 0, failedPayments: 0, avgAmount: 0 };
+        const recentData = recentPayments[0] || { totalPayments: 0, failedPayments: 0 };
+        const olderData = olderPayments[0] || { totalPayments: 0, failedPayments: 0 };
         // Calculate trend direction
         let direction = 'stable';
         let changePercent = 0;
@@ -438,18 +442,8 @@ export class CustomerSegmentationService {
                 direction = 'declining';
             }
         }
-        return {
-            direction,
-            changePercent: Math.abs(changePercent),
-            timeframe: 30,
-            factors: {
-                recentPaymentActivity: recentData.totalPayments,
-                recentFailureRate: recentData.totalPayments > 0 ? Math.round((recentData.failedPayments / recentData.totalPayments) * 100) : 0,
-                paymentVolumeChange: olderData.avgAmount > 0
-                    ? Math.round(((recentData.avgAmount - olderData.avgAmount) / olderData.avgAmount) * 100)
-                    : 0,
-            },
-        };
+        // The trend is about failure rate: amounts in different currencies cannot be compared, so no volume trend
+        return { direction, changePercent: Math.abs(changePercent), timeframe: 30 };
     }
     /**
      * Calculate coefficient of variation for volatility analysis
@@ -518,23 +512,41 @@ export class CustomerSegmentationService {
      * Get customer payment history for risk calculation
      */
     async getCustomerPaymentHistory(customerId) {
-        const result = await this.db
+        // One row per currency: an average over minor units of different currencies means nothing
+        const rows = await this.db
             .select({
-            totalPayments: sql `COUNT(*)`,
-            successfulPayments: sql `COUNT(CASE WHEN status = 'succeeded' THEN 1 END)`,
-            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`,
-            averageAmount: sql `AVG(amount)`,
+            currency: this.payments.currency,
+            totalPayments: sql `COUNT(*)`.mapWith(Number),
+            successfulPayments: sql `COUNT(CASE WHEN status = 'succeeded' THEN 1 END)`.mapWith(Number),
+            failedPayments: sql `COUNT(CASE WHEN status = 'failed' THEN 1 END)`.mapWith(Number),
+            averageAmount: sql `AVG(${this.payments.amountMinor})`.mapWith(Number),
             lastPaymentDate: sql `MAX(CASE WHEN status = 'succeeded' THEN created_at END)`.mapWith(this.payments.createdAt),
+            lastFailureDate: sql `MAX(CASE WHEN status = 'failed' THEN created_at END)`.mapWith(this.payments.createdAt),
+            firstPaymentDate: sql `MIN(created_at)`.mapWith(this.payments.createdAt),
         })
             .from(this.payments)
-            .where(sql `${this.payments.customerId} = ${customerId}`);
-        return (result[0] ?? {
-            totalPayments: 0,
-            successfulPayments: 0,
-            failedPayments: 0,
-            averageAmount: 0,
-            lastPaymentDate: null,
-        });
+            .where(sql `${this.payments.customerId} = ${customerId}`)
+            .groupBy(this.payments.currency);
+        // Counts add up across currencies. The average is reported for the currency with the most payments
+        // (ties go to the first code alphabetically), and `currency` says which one it is.
+        const main = rows.toSorted((a, b) => b.totalPayments - a.totalPayments || a.currency.localeCompare(b.currency))[0];
+        const latest = (dates) => dates.filter((date) => date !== null).sort((a, b) => toMillis(b) - toMillis(a))[0];
+        const earliest = rows
+            .map(row => row.firstPaymentDate)
+            .filter((date) => date !== null)
+            .sort((a, b) => toMillis(a) - toMillis(b))[0];
+        const lastFailure = latest(rows.map(row => row.lastFailureDate));
+        const streakStart = lastFailure ?? earliest;
+        return {
+            totalPayments: rows.reduce((sum, row) => sum + row.totalPayments, 0),
+            successfulPayments: rows.reduce((sum, row) => sum + row.successfulPayments, 0),
+            failedPayments: rows.reduce((sum, row) => sum + row.failedPayments, 0),
+            averageAmount: main?.averageAmount ?? 0,
+            currency: main?.currency,
+            lastPaymentDate: latest(rows.map(row => row.lastPaymentDate)),
+            // Days without a failed payment: since the last failure, or since the first payment when none failed
+            streakDays: streakStart ? Math.floor((Date.now() - toMillis(streakStart)) / 86_400_000) : 0,
+        };
     }
     /**
      * Get customer subscription history for risk calculation
@@ -542,21 +554,22 @@ export class CustomerSegmentationService {
     async getCustomerSubscriptionHistory(customerId) {
         const result = await this.db
             .select({
-            totalSubscriptions: sql `COUNT(*)`,
-            activeSubscriptions: sql `COUNT(CASE WHEN status = 'active' THEN 1 END)`,
-            canceledSubscriptions: sql `COUNT(CASE WHEN status = 'canceled' THEN 1 END)`,
-            averageDuration: sql `AVG(EXTRACT(EPOCH FROM (COALESCE(canceled_at, NOW()) - created_at)) / 86400 / 30)`,
+            totalSubscriptions: sql `COUNT(*)`.mapWith(Number),
+            activeSubscriptions: sql `COUNT(CASE WHEN status = 'active' THEN 1 END)`.mapWith(Number),
+            canceledSubscriptions: sql `COUNT(CASE WHEN status = 'canceled' THEN 1 END)`.mapWith(Number),
+            averageDuration: sql `AVG(EXTRACT(EPOCH FROM (COALESCE(canceled_at, NOW()) - created_at)) / 86400 / 30)`.mapWith(Number),
             currentStatus: sql `MAX(CASE WHEN status = 'active' THEN status END)`,
         })
             .from(this.subscriptions)
             .where(sql `${this.subscriptions.customerId} = ${customerId}`);
-        return (result[0] ?? {
-            totalSubscriptions: 0,
-            activeSubscriptions: 0,
-            canceledSubscriptions: 0,
-            averageDuration: 0,
-            currentStatus: null,
-        });
+        const row = result[0];
+        return {
+            totalSubscriptions: row?.totalSubscriptions ?? 0,
+            activeSubscriptions: row?.activeSubscriptions ?? 0,
+            canceledSubscriptions: row?.canceledSubscriptions ?? 0,
+            averageDuration: row?.averageDuration ?? 0,
+            currentStatus: row?.currentStatus ?? undefined,
+        };
     }
     /**
      * Get customer engagement metrics for risk calculation
@@ -570,7 +583,7 @@ export class CustomerSegmentationService {
         if (!customer) {
             return {
                 score: 0,
-                lastActivity: null,
+                lastActivity: undefined,
                 activityFrequency: 0,
                 featureUsage: {},
             };
@@ -581,9 +594,9 @@ export class CustomerSegmentationService {
         // Get recent payment activity as a proxy for engagement
         const recentPaymentActivity = await this.db
             .select({
-            paymentCount: sql `COUNT(*)`,
+            paymentCount: sql `COUNT(*)`.mapWith(Number),
             lastPaymentDate: sql `MAX(created_at)`.mapWith(this.payments.createdAt),
-            successRate: sql `ROUND((COUNT(CASE WHEN status = 'succeeded' THEN 1 END) * 100.0 / COUNT(*)), 2)`,
+            successRate: sql `ROUND((COUNT(CASE WHEN status = 'succeeded' THEN 1 END) * 100.0 / COUNT(*)), 2)`.mapWith(Number),
         })
             .from(this.payments)
             .where(and(sql `${this.payments.customerId} = ${customerId}`, sql `${this.payments.createdAt} >= ${thirtyDaysAgo}`));
@@ -595,8 +608,8 @@ export class CustomerSegmentationService {
         // Get subscription engagement (active subscriptions, upgrades, etc.)
         const subscriptionEngagement = await this.db
             .select({
-            activeSubscriptions: sql `COUNT(CASE WHEN status = 'active' THEN 1 END)`,
-            recentStatusChanges: sql `COUNT(CASE WHEN updated_at >= ${thirtyDaysAgo} THEN 1 END)`,
+            activeSubscriptions: sql `COUNT(CASE WHEN status = 'active' THEN 1 END)`.mapWith(Number),
+            recentStatusChanges: sql `COUNT(CASE WHEN updated_at >= ${thirtyDaysAgo} THEN 1 END)`.mapWith(Number),
             lastSubscriptionUpdate: sql `MAX(updated_at)`.mapWith(this.subscriptions.updatedAt),
         })
             .from(this.subscriptions)

@@ -1,6 +1,7 @@
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import type { Instant } from '@arki/date';
 import type { MoneyJSON } from '@arki/money';
+import type { MoneyBag } from '@arki/money/bag';
 import type { CustomerId, PaymentId, SubscriptionId } from '../core/primitives.js';
 import type { CommunicationChannel, CommunicationStatus, CustomerSegmentId, DunningCampaignId, DunningCampaignStatus, DunningCampaignType, DunningTemplateId, ExecutionStatus } from './primitives.js';
 import type { DunningTables } from './tables.js';
@@ -175,31 +176,15 @@ export type DunningCampaignSummary = {
     lastExecuted?: Instant;
     createdAt: Instant;
 };
-export type DunningDashboardStats = {
-    totalCampaigns: number;
-    activeCampaigns: number;
-    executionsToday: number;
-    customersReachedToday: number;
-    revenueRecoveredToday: number;
-    revenueRecoveredThisMonth: number;
-    averageConversionRate: number;
-    topPerformingCampaign?: DunningCampaignSummary;
-    recentExecutions: {
-        campaignName: string;
-        customerCount: number;
-        status: ExecutionStatus;
-        executedAt: Instant;
-    }[];
-};
 export type CustomerData = {
     id: CustomerId;
     name?: string;
     email?: string;
     phone?: string;
-    communication_preferences?: {
+    communicationPreferences?: {
         unsubscribed?: boolean;
-        unsubscribed_channels?: string[];
-        preferred_channel?: string;
+        unsubscribedChannels?: string[];
+        preferredChannel?: string;
     };
     metadata?: Record<string, unknown>;
 };
@@ -405,5 +390,28 @@ export type EngagementMetrics = {
     loginFrequency: number;
     averageSessionDuration: number;
     score: number;
+};
+/** What the dunning dashboard shows. Money is a balance per currency: currencies are never added. */
+export type DunningDashboardStats = {
+    totalCampaigns: number;
+    activeCampaigns: number;
+    /** Counted since 00:00 UTC. */
+    executionsToday: number;
+    customersReachedToday: number;
+    revenueRecoveredToday: MoneyBag;
+    /** Since the first of the month, 00:00 UTC. */
+    revenueRecoveredThisMonth: MoneyBag;
+    /** Mean conversion rate over the last 30 days. */
+    averageConversionRate: number;
+    /** Most payments recovered in the last 30 days; null when none recovered any. */
+    topPerformingCampaign: {
+        id: DunningCampaignId;
+        name: string;
+        paymentsRecovered: number;
+        conversionRate: number;
+        revenueRecovered: MoneyBag;
+    } | null;
+    /** The ten newest, newest first. */
+    recentExecutions: DunningExecution[];
 };
 //# sourceMappingURL=types.d.ts.map

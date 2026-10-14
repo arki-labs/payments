@@ -23,6 +23,7 @@
  * rounded half-even to the currency's minor units.
  */
 import { userIdSchema } from '../core/user-id.js';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from '@arki/contracts';
 import { fromDate } from '@arki/date';
 import { CommandError } from '@arki/journal';
@@ -47,11 +48,17 @@ export const requestRefundInputSchema = z.object({
     /** A JSON string: the column is `text` */
     metadata: z.string().nullable().optional(),
 });
-export const approveRefundInputSchema = z.object({ refundId: refundIdSchema, approvedBy: userIdSchema });
+export const approveRefundInputSchema = z.object({
+    refundId: refundIdSchema,
+    approvedBy: userIdSchema,
+    /** The approver's notes. Left out or null: none. */
+    notes: z.string().nullable().optional(),
+});
 export const rejectRefundInputSchema = z.object({
     refundId: refundIdSchema,
     rejectedBy: userIdSchema,
-    rejectionReason: z.string(),
+    /** The customer-facing why. A blank reason says nothing, so it is turned down. */
+    rejectionReason: z.string().trim().min(1),
 });
 export const processRefundInputSchema = z.object({ refundId: refundIdSchema });
 export const completeRefundInputSchema = z.object({
@@ -72,6 +79,7 @@ function legacyMinor(amount, currency) {
     return toMinorColumn(fromStoredNumber(Number(amount.toFixed(2)), currency));
 }
 export function createRefundsJournal(j, tables) {
+    const { payments } = tables;
     const refundRequest = {
         paymentId: paymentIdSchema,
         reason: reasonSchema,
@@ -84,7 +92,8 @@ export function createRefundsJournal(j, tables) {
     const RefundRequested = j.event('RefundRequested', z.object({ ...refundRequest, originalAmount: z.number(), refundAmount: z.number(), currency: z.string() }));
     /** A refund was asked for. It is `pending`. Both amounts are exact `Money` JSON in the refund's currency. */
     const RefundRequestedV2 = j.event('RefundRequestedV2', z.object({ ...refundRequest, originalAmount: moneyJsonSchema, refundAmount: moneyJsonSchema }));
-    const RefundApproved = j.event('RefundApproved', z.object({ approvedBy: userIdSchema }));
+    // `notes` is optional: refunds approved before approval notes existed have events without it
+    const RefundApproved = j.event('RefundApproved', z.object({ approvedBy: userIdSchema, notes: z.string().nullable().optional() }));
     const RefundRejected = j.event('RefundRejected', z.object({ rejectedBy: userIdSchema, rejectionReason: z.string() }));
     /** The refund was handed to the provider. The provider's refund id is not known yet. */
     const RefundProcessed = j.event('RefundProcessed', z.object({}));
@@ -103,6 +112,7 @@ export function createRefundsJournal(j, tables) {
         approvedBy: null,
         rejectedBy: null,
         rejectionReason: null,
+        approvalNotes: null,
         requestedAt: at,
         approvedAt: null,
         processedAt: null,
@@ -120,6 +130,7 @@ export function createRefundsJournal(j, tables) {
         .on(RefundApproved, (_row, e) => ({
         status: 'approved',
         approvedBy: e.data.approvedBy,
+        approvalNotes: e.data.notes ?? null,
         approvedAt: fromDate(e.recordedAt),
         updatedAt: fromDate(e.recordedAt),
     }))
@@ -143,8 +154,30 @@ export function createRefundsJournal(j, tables) {
         providerResponse: JSON.stringify({ error: e.data.errorMessage }),
         updatedAt: fromDate(e.recordedAt),
     }));
-    const requestRefund = j.command('requestRefund', requestRefundInputSchema, (input, { write }) => {
+    /**
+     * The payment row is locked for the rest of the transaction, so two requests for one payment take
+     * turns: the second counts the first. Without the lock both could read the same total and together
+     * refund more than was paid. A refund that is pending, approved, processing or completed holds money.
+     */
+    const requestRefund = j.command('requestRefund', requestRefundInputSchema, async (input, { tx, write }) => {
         const refundId = input.refundId ?? createRefundId();
+        const [payment] = await tx
+            .select({ amountMinor: payments.amountMinor, currency: payments.currency })
+            .from(payments)
+            .where(eq(payments.id, input.paymentId))
+            .for('update');
+        if (!payment) {
+            throw new CommandError('NOT_FOUND', `Payment ${input.paymentId} not found`);
+        }
+        const refundMinor = toMinorColumn(input.refundAmount);
+        let exceedsPayment = false;
+        if (input.refundAmount.currency.code === payment.currency.toUpperCase()) {
+            const [held] = await tx
+                .select({ total: sql `SUM(${tables.refunds.refundAmountMinor})` })
+                .from(tables.refunds)
+                .where(and(eq(tables.refunds.paymentId, input.paymentId), eq(tables.refunds.currency, payment.currency.toUpperCase()), inArray(tables.refunds.status, ['pending', 'approved', 'processing', 'completed'])));
+            exceedsPayment = Number(held?.total ?? 0) + refundMinor > payment.amountMinor;
+        }
         return write(refund, refundId, row => {
             if (row) {
                 throw new CommandError('CONFLICT', `Refund ${refundId} already exists`);
@@ -157,6 +190,9 @@ export function createRefundsJournal(j, tables) {
             }
             if (!input.refundAmount.isPositive()) {
                 throw new CommandError('BAD_REQUEST', 'Refund amount must be positive');
+            }
+            if (exceedsPayment) {
+                throw new CommandError('CONFLICT', `Refund of ${input.refundAmount.toString()} exceeds what is left of the payment`);
             }
             return [
                 RefundRequestedV2({
@@ -177,7 +213,7 @@ export function createRefundsJournal(j, tables) {
         if (current.status !== 'pending') {
             throw new CommandError('CONFLICT', `Cannot approve refund with status ${current.status}`);
         }
-        return [RefundApproved({ approvedBy: input.approvedBy })];
+        return [RefundApproved({ approvedBy: input.approvedBy, notes: input.notes ?? null })];
     }));
     const rejectRefund = j.command('rejectRefund', rejectRefundInputSchema, (input, { write }) => write(refund, input.refundId, row => {
         const current = requireRefund(row, input.refundId);
@@ -195,6 +231,10 @@ export function createRefundsJournal(j, tables) {
     }));
     const completeRefund = j.command('completeRefund', completeRefundInputSchema, (input, { write }) => write(refund, input.refundId, row => {
         const current = requireRefund(row, input.refundId);
+        // The provider's webhook and the service both report the same refund: the second changes nothing
+        if (current.status === 'completed' && current.providerRefundId === input.providerRefundId) {
+            return [];
+        }
         if (current.status !== 'processing') {
             throw new CommandError('CONFLICT', `Cannot complete refund with status ${current.status}. Must be processing first.`);
         }

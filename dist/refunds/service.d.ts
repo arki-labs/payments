@@ -50,6 +50,8 @@ export declare class RefundService {
     requestRefund(data: RefundRequestData): Promise<Refund>;
     approveRefund(data: RefundApprovalData): Promise<Refund>;
     rejectRefund(data: RefundRejectionData): Promise<Refund>;
+    /** A refund that can still be approved or rejected. A missing one and one past `pending` are different errors. */
+    private requirePending;
     private processRefund;
     private validateRefundEligibility;
     /**

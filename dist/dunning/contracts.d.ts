@@ -185,6 +185,50 @@ export declare const riskScoreSchema: z.ZodObject<{
         timeframe: z.ZodNumber;
     }, z.core.$strip>;
 }, z.core.$strip>;
+/** One step of a campaign, as create and update accept it. */
+export declare const dunningCampaignTemplateInputSchema: z.ZodObject<{
+    name: z.ZodString;
+    stepNumber: z.ZodNumber;
+    delayHours: z.ZodNumber;
+    communication: z.ZodObject<{
+        channel: z.ZodEnum<{
+            email: "email";
+            in_app: "in_app";
+            sms: "sms";
+            webhook: "webhook";
+        }>;
+        subject: z.ZodOptional<z.ZodString>;
+        content: z.ZodString;
+        variables: z.ZodArray<z.ZodString>;
+        design: z.ZodOptional<z.ZodObject<{
+            theme: z.ZodOptional<z.ZodString>;
+            brandColors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+            logoUrl: z.ZodOptional<z.ZodURL>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+/** The full set of steps of a campaign. Step numbers are unique: update matches steps by number. */
+export declare const dunningCampaignTemplatesSchema: z.ZodArray<z.ZodObject<{
+    name: z.ZodString;
+    stepNumber: z.ZodNumber;
+    delayHours: z.ZodNumber;
+    communication: z.ZodObject<{
+        channel: z.ZodEnum<{
+            email: "email";
+            in_app: "in_app";
+            sms: "sms";
+            webhook: "webhook";
+        }>;
+        subject: z.ZodOptional<z.ZodString>;
+        content: z.ZodString;
+        variables: z.ZodArray<z.ZodString>;
+        design: z.ZodOptional<z.ZodObject<{
+            theme: z.ZodOptional<z.ZodString>;
+            brandColors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+            logoUrl: z.ZodOptional<z.ZodURL>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>;
+}, z.core.$strip>>;
 export declare const createDunningCampaignInputSchema: z.ZodObject<{
     name: z.ZodString;
     description: z.ZodOptional<z.ZodString>;
@@ -343,6 +387,27 @@ export declare const updateDunningCampaignInputSchema: z.ZodObject<{
         abTestVariant: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     targetSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+    templates: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        stepNumber: z.ZodNumber;
+        delayHours: z.ZodNumber;
+        communication: z.ZodObject<{
+            channel: z.ZodEnum<{
+                email: "email";
+                in_app: "in_app";
+                sms: "sms";
+                webhook: "webhook";
+            }>;
+            subject: z.ZodOptional<z.ZodString>;
+            content: z.ZodString;
+            variables: z.ZodArray<z.ZodString>;
+            design: z.ZodOptional<z.ZodObject<{
+                theme: z.ZodOptional<z.ZodString>;
+                brandColors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+                logoUrl: z.ZodOptional<z.ZodURL>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 export declare const createDunningTemplateInputSchema: z.ZodObject<{
     campaignId: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
@@ -610,6 +675,7 @@ export declare const customerRiskProfileInputSchema: z.ZodObject<{
         successfulPayments: z.ZodNumber;
         failedPayments: z.ZodNumber;
         averageAmount: z.ZodNumber;
+        currency: z.ZodOptional<z.ZodString>;
         lastPaymentDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         streakDays: z.ZodNumber;
     }, z.core.$strip>;
@@ -994,6 +1060,27 @@ export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
             abTestVariant: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>>;
         targetSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+        templates: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            name: z.ZodString;
+            stepNumber: z.ZodNumber;
+            delayHours: z.ZodNumber;
+            communication: z.ZodObject<{
+                channel: z.ZodEnum<{
+                    email: "email";
+                    in_app: "in_app";
+                    sms: "sms";
+                    webhook: "webhook";
+                }>;
+                subject: z.ZodOptional<z.ZodString>;
+                content: z.ZodString;
+                variables: z.ZodArray<z.ZodString>;
+                design: z.ZodOptional<z.ZodObject<{
+                    theme: z.ZodOptional<z.ZodString>;
+                    brandColors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+                    logoUrl: z.ZodOptional<z.ZodURL>;
+                }, z.core.$strip>>;
+            }, z.core.$strip>;
+        }, z.core.$strip>>>;
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const deleteCampaignInputSchema: z.ZodObject<{

@@ -1,5 +1,6 @@
 import type { AnyRelations } from 'drizzle-orm';
 import type { NodePgDatabase, NodePgTransaction } from 'drizzle-orm/node-postgres';
+import type { PgliteDatabase } from 'drizzle-orm/pglite';
 import type { Instant } from '@arki/date';
 import type { CustomerId } from '../core/primitives.js';
 import type { CreateCustomerSegmentInput, CreateDunningCampaignInput, CreateDunningTemplateInput, ListCommunicationsQuery, ListCustomerSegmentsQuery, ListDunningCampaignsQuery, ListExecutionsQuery, UpdateCustomerSegmentInput, UpdateDunningCampaignInput, UpdateDunningTemplateInput } from './contracts.js';
@@ -12,9 +13,10 @@ import type { CustomerRiskProfile, DunningCampaign, DunningCommunication, Dunnin
  * relations graph MUST register the dunning tables (`dunningCampaigns`,
  * `dunningTemplates`, `dunningExecutions`, `dunningCommunications`,
  * `customerSegments`, `customerRiskProfiles`) for the relational query
- * builder calls below to work at runtime.
+ * builder calls below to work at runtime. PGlite is accepted so the package
+ * can run these queries in its own tests.
  */
-export type DunningDatabase = NodePgDatabase<AnyRelations> | NodePgTransaction<AnyRelations>;
+export type DunningDatabase = NodePgDatabase<AnyRelations> | NodePgTransaction<AnyRelations> | PgliteDatabase<AnyRelations>;
 type CampaignTables = Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics'>;
 export declare class DunningCampaignRepository {
     private readonly db;
@@ -35,12 +37,37 @@ export declare class DunningCampaignRepository {
     findActiveForTrigger(triggerType: string, customerSegmentIds?: string[]): Promise<DunningCampaign[]>;
     updateStatus(id: DunningCampaignId, status: 'active' | 'draft' | 'archived' | 'paused', updatedBy: string): Promise<DunningCampaign | undefined>;
     getAnalyticsSummary(campaignId?: DunningCampaignId, days?: number): Promise<{
-        executions?: number | undefined;
-        customersReached?: number | undefined;
-        communicationsSent?: number | undefined;
-        paymentsRecovered?: number | undefined;
-        conversionRate?: number | undefined;
-        roi?: number | undefined;
+        executions: number;
+        customersReached: number;
+        communicationsSent: number;
+        paymentsRecovered: number;
+        conversionRate: number;
+        roi: number;
+        revenueRecovered: import("@arki/money/bag").MoneyBag;
+    }>;
+    /** How many campaigns exist, and how many of them are `active`. */
+    countCampaigns(): Promise<{
+        total: number;
+        active: number;
+    }>;
+    /**
+     * The campaign that recovered the most payments since `since`, its conversion rate the
+     * tie-break. Null when no campaign recovered a payment: there is no top to name. Ranked
+     * by count, not money, because campaigns recover in different currencies.
+     */
+    findTopPerformer(since: Instant): Promise<{
+        campaignId: DunningCampaignId;
+        paymentsRecovered: number;
+        conversionRate: number;
+    } | null>;
+    /** The analytics rows from `since` on, summed. Money stays one balance per currency. */
+    getAnalyticsSince(since: Instant, campaignId?: DunningCampaignId): Promise<{
+        executions: number;
+        customersReached: number;
+        communicationsSent: number;
+        paymentsRecovered: number;
+        conversionRate: number;
+        roi: number;
         revenueRecovered: import("@arki/money/bag").MoneyBag;
     }>;
 }
