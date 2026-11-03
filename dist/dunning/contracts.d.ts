@@ -63,7 +63,7 @@ export declare const campaignTriggerSchema: z.ZodObject<{
         renewalReminderDays: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>;
     filters: z.ZodOptional<z.ZodObject<{
-        customerSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+        customerSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
         planTiers: z.ZodOptional<z.ZodArray<z.ZodString>>;
         subscriptionAge: z.ZodOptional<z.ZodObject<{
             min: z.ZodOptional<z.ZodNumber>;
@@ -254,7 +254,7 @@ export declare const createDunningCampaignInputSchema: z.ZodObject<{
             renewalReminderDays: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>;
         filters: z.ZodOptional<z.ZodObject<{
-            customerSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+            customerSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
             planTiers: z.ZodOptional<z.ZodArray<z.ZodString>>;
             subscriptionAge: z.ZodOptional<z.ZodObject<{
                 min: z.ZodOptional<z.ZodNumber>;
@@ -293,7 +293,7 @@ export declare const createDunningCampaignInputSchema: z.ZodObject<{
         allowedDays: z.ZodOptional<z.ZodArray<z.ZodNumber>>;
         abTestVariant: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>;
-    targetSegments: z.ZodDefault<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+    targetSegments: z.ZodDefault<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
     templates: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         stepNumber: z.ZodNumber;
@@ -347,7 +347,7 @@ export declare const updateDunningCampaignInputSchema: z.ZodObject<{
             renewalReminderDays: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>;
         filters: z.ZodOptional<z.ZodObject<{
-            customerSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+            customerSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
             planTiers: z.ZodOptional<z.ZodArray<z.ZodString>>;
             subscriptionAge: z.ZodOptional<z.ZodObject<{
                 min: z.ZodOptional<z.ZodNumber>;
@@ -386,7 +386,7 @@ export declare const updateDunningCampaignInputSchema: z.ZodObject<{
         allowedDays: z.ZodOptional<z.ZodArray<z.ZodNumber>>;
         abTestVariant: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
-    targetSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+    targetSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
     templates: z.ZodOptional<z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         stepNumber: z.ZodNumber;
@@ -410,7 +410,7 @@ export declare const updateDunningCampaignInputSchema: z.ZodObject<{
     }, z.core.$strip>>>;
 }, z.core.$strip>;
 export declare const createDunningTemplateInputSchema: z.ZodObject<{
-    campaignId: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    campaignId: z.ZodTemplateLiteral<`dc${string}`>;
     name: z.ZodString;
     description: z.ZodOptional<z.ZodString>;
     stepNumber: z.ZodNumber;
@@ -579,16 +579,16 @@ export declare const updateCustomerSegmentInputSchema: z.ZodObject<{
     updateFrequency: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const executeCampaignInputSchema: z.ZodObject<{
-    campaignId: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    campaignId: z.ZodTemplateLiteral<`dc${string}`>;
     dryRun: z.ZodDefault<z.ZodBoolean>;
     customFilters: z.ZodOptional<z.ZodObject<{
-        customerIds: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>>>;
-        excludeCustomerIds: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>>>;
+        customerIds: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cust${string}`>>>;
+        excludeCustomerIds: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cust${string}`>>>;
         testMode: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const campaignAnalyticsInputSchema: z.ZodObject<{
-    campaignId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>>>;
+    campaignId: z.ZodOptional<z.ZodTemplateLiteral<`dc${string}`>>;
     period: z.ZodObject<{
         start: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
         end: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
@@ -602,7 +602,7 @@ export declare const campaignAnalyticsInputSchema: z.ZodObject<{
     metrics: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export declare const updateExecutionStatusInputSchema: z.ZodObject<{
-    executionId: z.ZodPipe<z.ZodString, z.ZodTransform<`de_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `de_${string}`, "out">, z.ZodTransform<`de_${string}`, string & z.$brand<`de_${string}`>>>;
+    executionId: z.ZodTemplateLiteral<`de${string}`>;
     status: z.ZodEnum<{
         cancelled: "cancelled";
         completed: "completed";
@@ -615,7 +615,7 @@ export declare const updateExecutionStatusInputSchema: z.ZodObject<{
         customersProcessed: z.ZodNumber;
         communicationsSent: z.ZodNumber;
         errors: z.ZodArray<z.ZodObject<{
-            customerId: z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>;
+            customerId: z.ZodTemplateLiteral<`cust${string}`>;
             error: z.ZodString;
             timestamp: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
         }, z.core.$strip>>;
@@ -626,7 +626,7 @@ export declare const updateExecutionStatusInputSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const updateCommunicationStatusInputSchema: z.ZodObject<{
-    communicationId: z.ZodPipe<z.ZodString, z.ZodTransform<`dcm_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dcm_${string}`, "out">, z.ZodTransform<`dcm_${string}`, string & z.$brand<`dcm_${string}`>>>;
+    communicationId: z.ZodTemplateLiteral<`dcm${string}`>;
     status: z.ZodEnum<{
         bounced: "bounced";
         clicked: "clicked";
@@ -646,7 +646,7 @@ export declare const updateCommunicationStatusInputSchema: z.ZodObject<{
     trackingData: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>;
 export declare const communicationWebhookSchema: z.ZodObject<{
-    communicationId: z.ZodPipe<z.ZodString, z.ZodTransform<`dcm_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dcm_${string}`, "out">, z.ZodTransform<`dcm_${string}`, string & z.$brand<`dcm_${string}`>>>;
+    communicationId: z.ZodTemplateLiteral<`dcm${string}`>;
     event: z.ZodEnum<{
         bounced: "bounced";
         clicked: "clicked";
@@ -659,17 +659,17 @@ export declare const communicationWebhookSchema: z.ZodObject<{
     providerData: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>;
 export declare const bulkExecuteCampaignInputSchema: z.ZodObject<{
-    campaignIds: z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>>;
+    campaignIds: z.ZodArray<z.ZodTemplateLiteral<`dc${string}`>>;
     dryRun: z.ZodDefault<z.ZodBoolean>;
     customFilters: z.ZodOptional<z.ZodObject<{
-        customerIds: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>>>;
-        excludeCustomerIds: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>>>;
+        customerIds: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cust${string}`>>>;
+        excludeCustomerIds: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cust${string}`>>>;
         testMode: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const customerRiskProfileInputSchema: z.ZodObject<{
-    customerId: z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>;
-    segmentIds: z.ZodDefault<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+    customerId: z.ZodTemplateLiteral<`cust${string}`>;
+    segmentIds: z.ZodDefault<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
     paymentHistory: z.ZodObject<{
         totalPayments: z.ZodNumber;
         successfulPayments: z.ZodNumber;
@@ -765,8 +765,8 @@ export declare const listCustomerSegmentsQuerySchema: z.ZodObject<{
 export declare const listExecutionsQuerySchema: z.ZodObject<{
     limit: z.ZodDefault<z.ZodNumber>;
     offset: z.ZodDefault<z.ZodNumber>;
-    campaignId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>>>;
-    customerId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>>>;
+    campaignId: z.ZodOptional<z.ZodTemplateLiteral<`dc${string}`>>;
+    customerId: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
     status: z.ZodOptional<z.ZodEnum<{
         cancelled: "cancelled";
         completed: "completed";
@@ -790,8 +790,8 @@ export declare const listExecutionsQuerySchema: z.ZodObject<{
 export declare const listCommunicationsQuerySchema: z.ZodObject<{
     limit: z.ZodDefault<z.ZodNumber>;
     offset: z.ZodDefault<z.ZodNumber>;
-    executionId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`de_${string}`, string>>>;
-    customerId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>>>;
+    executionId: z.ZodOptional<z.ZodTemplateLiteral<`de${string}`>>;
+    customerId: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
     channel: z.ZodOptional<z.ZodEnum<{
         email: "email";
         in_app: "in_app";
@@ -820,7 +820,7 @@ export declare const listCommunicationsQuerySchema: z.ZodObject<{
     }>>;
 }, z.core.$strip>;
 export declare const dunningCampaignResponseSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dc${string}`>;
     name: z.ZodString;
     description: z.ZodOptional<z.ZodString>;
     type: z.ZodEnum<{
@@ -851,7 +851,7 @@ export declare const dunningCampaignResponseSchema: z.ZodObject<{
             renewalReminderDays: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>;
         filters: z.ZodOptional<z.ZodObject<{
-            customerSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+            customerSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
             planTiers: z.ZodOptional<z.ZodArray<z.ZodString>>;
             subscriptionAge: z.ZodOptional<z.ZodObject<{
                 min: z.ZodOptional<z.ZodNumber>;
@@ -890,7 +890,7 @@ export declare const dunningCampaignResponseSchema: z.ZodObject<{
         allowedDays: z.ZodOptional<z.ZodArray<z.ZodNumber>>;
         abTestVariant: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>;
-    targetSegments: z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>;
+    targetSegments: z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>;
     createdBy: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
     updatedBy: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -898,7 +898,7 @@ export declare const dunningCampaignResponseSchema: z.ZodObject<{
     updatedAt: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
 }, z.core.$strip>;
 export declare const customerSegmentResponseSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
     name: z.ZodString;
     description: z.ZodOptional<z.ZodString>;
     type: z.ZodEnum<{
@@ -985,10 +985,10 @@ export type ListCommunicationsQuery = z.infer<typeof listCommunicationsQuerySche
 export type DunningCampaignResponse = z.infer<typeof dunningCampaignResponseSchema>;
 export type CustomerSegmentResponse = z.infer<typeof customerSegmentResponseSchema>;
 export declare const getCampaignInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dc${string}`>;
 }, z.core.$strip>;
 export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dc${string}`>;
     data: z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
         description: z.ZodOptional<z.ZodString>;
@@ -1020,7 +1020,7 @@ export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
                 renewalReminderDays: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strip>;
             filters: z.ZodOptional<z.ZodObject<{
-                customerSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+                customerSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
                 planTiers: z.ZodOptional<z.ZodArray<z.ZodString>>;
                 subscriptionAge: z.ZodOptional<z.ZodObject<{
                     min: z.ZodOptional<z.ZodNumber>;
@@ -1059,7 +1059,7 @@ export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
             allowedDays: z.ZodOptional<z.ZodArray<z.ZodNumber>>;
             abTestVariant: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>>;
-        targetSegments: z.ZodOptional<z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>>>;
+        targetSegments: z.ZodOptional<z.ZodArray<z.ZodTemplateLiteral<`cs${string}`>>>;
         templates: z.ZodOptional<z.ZodArray<z.ZodObject<{
             name: z.ZodString;
             stepNumber: z.ZodNumber;
@@ -1084,10 +1084,10 @@ export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const deleteCampaignInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dc${string}`>;
 }, z.core.$strip>;
 export declare const updateCampaignStatusInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dc_${string}`, "out">, z.ZodTransform<`dc_${string}`, string & z.$brand<`dc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dc${string}`>;
     status: z.ZodEnum<{
         active: "active";
         archived: "archived";
@@ -1096,14 +1096,14 @@ export declare const updateCampaignStatusInputSchema: z.ZodObject<{
     }>;
 }, z.core.$strip>;
 export declare const getCampaignAnalyticsInputSchema: z.ZodObject<{
-    campaignId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`dc_${string}`, string>>>;
+    campaignId: z.ZodOptional<z.ZodTemplateLiteral<`dc${string}`>>;
     days: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const getSegmentInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
 }, z.core.$strip>;
 export declare const updateSegmentWrapperInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
     data: z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
         description: z.ZodOptional<z.ZodString>;
@@ -1167,20 +1167,20 @@ export declare const updateSegmentWrapperInputSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const deleteSegmentInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
 }, z.core.$strip>;
 export declare const getSegmentCustomersInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
     limit: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const updateSegmentCustomerCountInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`cs_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cs_${string}`, "out">, z.ZodTransform<`cs_${string}`, string & z.$brand<`cs_${string}`>>>;
+    id: z.ZodTemplateLiteral<`cs${string}`>;
 }, z.core.$strip>;
 export declare const getRiskProfileByCustomerInputSchema: z.ZodObject<{
-    customerId: z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>;
+    customerId: z.ZodTemplateLiteral<`cust${string}`>;
 }, z.core.$strip>;
 export declare const updateRiskProfileForCustomerInputSchema: z.ZodObject<{
-    customerId: z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `cust_${string}`, "out">, z.ZodTransform<`cust_${string}`, string & z.$brand<`cust_${string}`>>>;
+    customerId: z.ZodTemplateLiteral<`cust${string}`>;
 }, z.core.$strip>;
 export declare const getRiskProfilesByCategoryInputSchema: z.ZodObject<{
     category: z.ZodEnum<{
@@ -1201,10 +1201,10 @@ export declare const retryFailedExecutionsInputSchema: z.ZodObject<{
     limit: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const getExecutionMetricsInputSchema: z.ZodObject<{
-    executionId: z.ZodPipe<z.ZodString, z.ZodTransform<`de_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `de_${string}`, "out">, z.ZodTransform<`de_${string}`, string & z.$brand<`de_${string}`>>>;
+    executionId: z.ZodTemplateLiteral<`de${string}`>;
 }, z.core.$strip>;
 export declare const getCommunicationInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`dcm_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `dcm_${string}`, "out">, z.ZodTransform<`dcm_${string}`, string & z.$brand<`dcm_${string}`>>>;
+    id: z.ZodTemplateLiteral<`dcm${string}`>;
 }, z.core.$strip>;
 export declare const processPendingCommunicationsInputSchema: z.ZodObject<{
     limit: z.ZodDefault<z.ZodNumber>;

@@ -13,7 +13,12 @@ import type { Instant } from '@arki/date';
 import { now } from '@arki/date';
 
 import type { CoreTables } from './tables.js';
+import type { FailureOf } from '@arki/failure';
 import type { NewWebhookEvent, WebhookEvent, WebhookId } from './types.js';
+import { WebhookClaimConflict } from './services/webhook-failures.js';
+
+/** A claimed webhook event: its row, and whether this caller's insert created it. */
+export type WebhookClaim = { event: WebhookEvent; created: boolean };
 
 /** The parts of a Drizzle Postgres database (or transaction) the claims use. */
 export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, 'insert' | 'select' | 'update'>;
@@ -25,12 +30,15 @@ export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations
  *
  * `onConflictDoNothing()` takes no target on purpose: it covers the unique
  * index on `provider_event_id` and the primary key alike.
+ *
+ * Returns `WebhookClaimConflict` (retryable) when the insert conflicted but no
+ * row holds the event's `providerEventId`.
  */
 export async function claimWebhookEvent(
   db: WebhookClaimDb,
   table: CoreTables['webhookEvents'],
   data: NewWebhookEvent,
-): Promise<{ event: WebhookEvent; created: boolean }> {
+): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict>> {
   const [inserted] = await db.insert(table).values(data).onConflictDoNothing().returning();
   if (inserted) {
     return { event: inserted, created: true };
@@ -43,7 +51,9 @@ export async function claimWebhookEvent(
   // Stripe), so this is accepted rather than paying for a composite index.
   const [existing] = await db.select().from(table).where(eq(table.providerEventId, data.providerEventId));
   if (!existing) {
-    throw new Error('Failed to claim webhook event');
+    // The insert conflicted on the primary key (a webhook id collision), or the winning row was
+    // deleted between the two queries. A resend claims the event again with a new id.
+    return WebhookClaimConflict({ providerEventId: data.providerEventId, retryable: true });
   }
   return { event: existing, created: false };
 }

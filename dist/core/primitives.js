@@ -1,9 +1,9 @@
-import { createIdFactory } from '@arki/db/id-factory';
-const planId = createIdFactory('plan');
-const subscriptionId = createIdFactory('sub');
-const paymentId = createIdFactory('pay');
-const customerId = createIdFactory('cust');
-const webhookId = createIdFactory('wh');
+import { defineId } from '@arki/contracts';
+const planId = defineId('plan');
+const subscriptionId = defineId('sub');
+const paymentId = defineId('pay');
+const customerId = defineId('cust');
+const webhookId = defineId('wh');
 export const createPlanId = planId.create;
 export const createSubscriptionId = subscriptionId.create;
 export const createPaymentId = paymentId.create;

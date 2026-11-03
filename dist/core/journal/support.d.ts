@@ -5,6 +5,9 @@
  * Plain TypeScript only: this file runs on Node, Bun, Deno, browsers and Hermes.
  */
 import type { Instant } from '@arki/date';
+import type { IdGenerationFailure } from '@arki/contracts';
+import type { Failure, SchemaFailure } from '@arki/failure';
+import type { CommandFailure } from '@arki/journal';
 /** Event data is stored as JSON, so a time travels as an ISO string. */
 export declare function toIso(value: Instant): string;
 /** Reducers build the `Instant` an `instant` column stores. */
@@ -27,12 +30,23 @@ export declare function storedReal(value: number): number;
  */
 export declare function sameJson(left: unknown, right: unknown): boolean;
 /**
- * The row a command hands back to a service. `version` is a storage detail of
- * the journal, so it never leaves the package's write functions.
+ * What a write function returns besides the row and its command's own refusals: the
+ * command runner's failures (`CommandFailure`), a failed id and a schema failure.
+ */
+export type JournalWriteFailure = CommandFailure | IdGenerationFailure | SchemaFailure;
+/**
+ * The row a command hands back to a service, or the failure the command
+ * returned when a rule said no. `version` is a storage detail of the journal,
+ * so it never leaves the package's write functions.
  */
 export declare function writtenRow<Row extends {
     version: number;
 }>(result: Promise<{
     readonly row: Row | null;
 }>, what: string): Promise<Omit<Row, 'version'>>;
+export declare function writtenRow<Row extends {
+    version: number;
+}, Refusal extends Failure>(result: Promise<{
+    readonly row: Row | null;
+} | Refusal>, what: string): Promise<Omit<Row, 'version'> | Refusal>;
 //# sourceMappingURL=support.d.ts.map

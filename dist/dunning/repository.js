@@ -1,34 +1,35 @@
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, lte, sql } from 'drizzle-orm';
+import { invariant } from '@arki/failure';
 import { fromDate, now, sub } from '@arki/date';
 import { sumMinorByCurrency } from './analytics-money.js';
 import { readCustomerRiskProfile } from './stored-risk-profile.js';
 export class DunningCampaignRepository {
     db;
-    q;
     dunningCampaigns;
     dunningCampaignAnalytics;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.dunningCampaigns = tables.dunningCampaigns;
         this.dunningCampaignAnalytics = tables.dunningCampaignAnalytics;
     }
     async findById(id) {
-        const result = await this.q.dunningCampaigns.findFirst({ where: { id } });
+        const [result] = await this.db
+            .select()
+            .from(this.dunningCampaigns)
+            .where(eq(this.dunningCampaigns.id, id))
+            .limit(1);
         return result ?? null;
     }
     async findMany(query) {
         const { limit, offset, type, status, search, sortBy, sortOrder } = query;
-        return this.q.dunningCampaigns.findMany({
-            where: {
-                ...(type && { type }),
-                ...(status && { status }),
-                ...(search && { name: { ilike: `%${search}%` } }),
-            },
-            orderBy: (table, { asc, desc }) => (sortOrder === 'asc' ? asc(table[sortBy]) : desc(table[sortBy])),
-            limit,
-            offset,
-        });
+        const sortColumn = this.dunningCampaigns[sortBy];
+        return this.db
+            .select()
+            .from(this.dunningCampaigns)
+            .where(and(type ? eq(this.dunningCampaigns.type, type) : undefined, status ? eq(this.dunningCampaigns.status, status) : undefined, search ? ilike(this.dunningCampaigns.name, `%${search}%`) : undefined))
+            .orderBy(sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn))
+            .limit(limit)
+            .offset(offset);
     }
     async create(input) {
         const [campaign] = await this.db
@@ -43,9 +44,7 @@ export class DunningCampaignRepository {
             createdBy: input.createdBy,
         })
             .returning();
-        if (!campaign) {
-            throw new Error('Failed to create dunning campaign');
-        }
+        invariant(campaign, 'Failed to create dunning campaign');
         return campaign;
     }
     async update(id, input) {
@@ -60,25 +59,25 @@ export class DunningCampaignRepository {
         await this.db.delete(this.dunningCampaigns).where(eq(this.dunningCampaigns.id, id));
     }
     async findByType(type) {
-        return this.q.dunningCampaigns.findMany({ where: { type, status: 'active' } });
+        return this.db
+            .select()
+            .from(this.dunningCampaigns)
+            .where(and(eq(this.dunningCampaigns.type, type), eq(this.dunningCampaigns.status, 'active')));
     }
     async findActiveForTrigger(triggerType, customerSegmentIds) {
         // The trigger-type lookup hits a JSONB field (`trigger->>'type'`) and the
         // segment intersection uses a JSONB EXISTS subquery — both have no
         // structured-filter equivalent and stay as RAW.
         const hasSegments = customerSegmentIds && customerSegmentIds.length > 0;
-        return this.q.dunningCampaigns.findMany({
-            where: {
-                status: 'active',
-                RAW: table => {
-                    const triggerTypePredicate = sql `${table.trigger}->>'type' = ${triggerType}`;
-                    return hasSegments
-                        ? and(triggerTypePredicate, sql `EXISTS (SELECT 1 FROM jsonb_array_elements_text(${table.targetSegments}) AS segment WHERE segment IN ${customerSegmentIds})`)
-                        : triggerTypePredicate;
-                },
-            },
-            orderBy: table => desc(sql `${table.settings}->>'priority'`),
-        });
+        const table = this.dunningCampaigns;
+        const triggerTypePredicate = sql `${table.trigger}->>'type' = ${triggerType}`;
+        return this.db
+            .select()
+            .from(table)
+            .where(and(eq(table.status, 'active'), hasSegments
+            ? and(triggerTypePredicate, sql `EXISTS (SELECT 1 FROM jsonb_array_elements_text(${table.targetSegments}) AS segment WHERE segment IN ${customerSegmentIds})`)
+            : triggerTypePredicate))
+            .orderBy(desc(sql `${table.settings}->>'priority'`));
     }
     async updateStatus(id, status, updatedBy) {
         const [campaign] = await this.db
@@ -142,9 +141,7 @@ export class DunningCampaignRepository {
             .from(this.dunningCampaignAnalytics)
             .where(inRange);
         // An aggregate without GROUP BY always answers one row
-        if (!counters) {
-            throw new Error('Campaign analytics aggregate returned no row');
-        }
+        invariant(counters, 'Campaign analytics aggregate returned no row');
         // Money is summed per currency: rows of different currencies never add up.
         const recovered = await this.db
             .select({
@@ -159,22 +156,25 @@ export class DunningCampaignRepository {
 }
 export class DunningTemplateRepository {
     db;
-    q;
     dunningTemplates;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.dunningTemplates = tables.dunningTemplates;
     }
     async findById(id) {
-        const result = await this.q.dunningTemplates.findFirst({ where: { id } });
+        const [result] = await this.db
+            .select()
+            .from(this.dunningTemplates)
+            .where(eq(this.dunningTemplates.id, id))
+            .limit(1);
         return result ?? null;
     }
     async findByCampaignId(campaignId) {
-        return this.q.dunningTemplates.findMany({
-            where: { campaignId },
-            orderBy: (t) => t.stepNumber,
-        });
+        return this.db
+            .select()
+            .from(this.dunningTemplates)
+            .where(eq(this.dunningTemplates.campaignId, campaignId))
+            .orderBy(this.dunningTemplates.stepNumber);
     }
     async create(input) {
         const [template] = await this.db
@@ -189,9 +189,7 @@ export class DunningTemplateRepository {
             abTestVariant: input.abTestVariant,
         })
             .returning();
-        if (!template) {
-            throw new Error('Failed to create dunning template');
-        }
+        invariant(template, 'Failed to create dunning template');
         return template;
     }
     async update(id, input) {
@@ -206,10 +204,11 @@ export class DunningTemplateRepository {
         await this.db.delete(this.dunningTemplates).where(eq(this.dunningTemplates.id, id));
     }
     async findActiveTemplates(campaignId) {
-        return this.q.dunningTemplates.findMany({
-            where: { campaignId, isActive: true },
-            orderBy: (t) => t.stepNumber,
-        });
+        return this.db
+            .select()
+            .from(this.dunningTemplates)
+            .where(and(eq(this.dunningTemplates.campaignId, campaignId), eq(this.dunningTemplates.isActive, true)))
+            .orderBy(this.dunningTemplates.stepNumber);
     }
     async updateStatus(id, isActive) {
         const [template] = await this.db
@@ -222,36 +221,29 @@ export class DunningTemplateRepository {
 }
 export class DunningExecutionRepository {
     db;
-    q;
     dunningExecutions;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.dunningExecutions = tables.dunningExecutions;
     }
     async findById(id) {
-        const result = await this.q.dunningExecutions.findFirst({ where: { id } });
+        const [result] = await this.db
+            .select()
+            .from(this.dunningExecutions)
+            .where(eq(this.dunningExecutions.id, id))
+            .limit(1);
         return result ?? null;
     }
     async findMany(query) {
         const { limit, offset, campaignId, customerId, status, scheduledAfter, scheduledBefore, sortBy, sortOrder } = query;
-        const scheduledAt = scheduledAfter || scheduledBefore
-            ? {
-                ...(scheduledAfter && { gte: scheduledAfter }),
-                ...(scheduledBefore && { lte: scheduledBefore }),
-            }
-            : undefined;
-        return this.q.dunningExecutions.findMany({
-            where: {
-                ...(campaignId && { campaignId }),
-                ...(customerId && { customerId }),
-                ...(status && { status }),
-                ...(scheduledAt && { scheduledAt }),
-            },
-            orderBy: (table, { asc, desc }) => (sortOrder === 'asc' ? asc(table[sortBy]) : desc(table[sortBy])),
-            limit,
-            offset,
-        });
+        const sortColumn = this.dunningExecutions[sortBy];
+        return this.db
+            .select()
+            .from(this.dunningExecutions)
+            .where(and(campaignId ? eq(this.dunningExecutions.campaignId, campaignId) : undefined, customerId ? eq(this.dunningExecutions.customerId, customerId) : undefined, status ? eq(this.dunningExecutions.status, status) : undefined, scheduledAfter ? gte(this.dunningExecutions.scheduledAt, scheduledAfter) : undefined, scheduledBefore ? lte(this.dunningExecutions.scheduledAt, scheduledBefore) : undefined))
+            .orderBy(sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn))
+            .limit(limit)
+            .offset(offset);
     }
     async create(input) {
         const [execution] = await this.db
@@ -275,9 +267,7 @@ export class DunningExecutionRepository {
             metadata: input.metadata,
         })
             .returning();
-        if (!execution) {
-            throw new Error('Failed to create dunning execution');
-        }
+        invariant(execution, 'Failed to create dunning execution');
         return execution;
     }
     async updateStatus(id, status, result, errorMessage, customScheduledAt) {
@@ -319,24 +309,20 @@ export class DunningExecutionRepository {
         return execution;
     }
     async findScheduledExecutions(limit = 100) {
-        return this.q.dunningExecutions.findMany({
-            where: {
-                status: 'scheduled',
-                scheduledAt: { lte: now() },
-            },
-            orderBy: (t) => t.scheduledAt,
-            limit,
-        });
+        return this.db
+            .select()
+            .from(this.dunningExecutions)
+            .where(and(eq(this.dunningExecutions.status, 'scheduled'), lte(this.dunningExecutions.scheduledAt, now())))
+            .orderBy(this.dunningExecutions.scheduledAt)
+            .limit(limit);
     }
     async findRetryableExecutions(limit = 50) {
-        return this.q.dunningExecutions.findMany({
-            where: {
-                status: 'failed',
-                nextRetryAt: { lte: now() },
-            },
-            orderBy: (t) => t.nextRetryAt,
-            limit,
-        });
+        return this.db
+            .select()
+            .from(this.dunningExecutions)
+            .where(and(eq(this.dunningExecutions.status, 'failed'), lte(this.dunningExecutions.nextRetryAt, now())))
+            .orderBy(this.dunningExecutions.nextRetryAt)
+            .limit(limit);
     }
     async incrementRetryCount(id, nextRetryAt) {
         const [execution] = await this.db
@@ -352,49 +338,38 @@ export class DunningExecutionRepository {
     }
     async findRecentForCustomer(customerId, campaignId, hours = 24) {
         const since = sub(now(), { hours });
-        return this.q.dunningExecutions.findMany({
-            where: {
-                customerId,
-                campaignId,
-                createdAt: { gte: since },
-            },
-            orderBy: (t, helpers) => helpers.desc(t.createdAt),
-        });
+        return this.db
+            .select()
+            .from(this.dunningExecutions)
+            .where(and(eq(this.dunningExecutions.customerId, customerId), eq(this.dunningExecutions.campaignId, campaignId), gte(this.dunningExecutions.createdAt, since)))
+            .orderBy(desc(this.dunningExecutions.createdAt));
     }
 }
 export class DunningCommunicationRepository {
     db;
-    q;
     dunningCommunications;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.dunningCommunications = tables.dunningCommunications;
     }
     async findById(id) {
-        const result = await this.q.dunningCommunications.findFirst({ where: { id } });
+        const [result] = await this.db
+            .select()
+            .from(this.dunningCommunications)
+            .where(eq(this.dunningCommunications.id, id))
+            .limit(1);
         return result ?? null;
     }
     async findMany(query) {
         const { limit, offset, executionId, customerId, channel, status, sentAfter, sentBefore, sortBy, sortOrder } = query;
-        const sentAt = sentAfter || sentBefore
-            ? {
-                ...(sentAfter && { gte: sentAfter }),
-                ...(sentBefore && { lte: sentBefore }),
-            }
-            : undefined;
-        return this.q.dunningCommunications.findMany({
-            where: {
-                ...(executionId && { executionId }),
-                ...(customerId && { customerId }),
-                ...(channel && { channel }),
-                ...(status && { status }),
-                ...(sentAt && { sentAt }),
-            },
-            orderBy: (table, { asc, desc }) => (sortOrder === 'asc' ? asc(table[sortBy]) : desc(table[sortBy])),
-            limit,
-            offset,
-        });
+        const sortColumn = this.dunningCommunications[sortBy];
+        return this.db
+            .select()
+            .from(this.dunningCommunications)
+            .where(and(executionId ? eq(this.dunningCommunications.executionId, executionId) : undefined, customerId ? eq(this.dunningCommunications.customerId, customerId) : undefined, channel ? eq(this.dunningCommunications.channel, channel) : undefined, status ? eq(this.dunningCommunications.status, status) : undefined, sentAfter ? gte(this.dunningCommunications.sentAt, sentAfter) : undefined, sentBefore ? lte(this.dunningCommunications.sentAt, sentBefore) : undefined))
+            .orderBy(sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn))
+            .limit(limit)
+            .offset(offset);
     }
     async create(input) {
         const [communication] = await this.db
@@ -419,9 +394,7 @@ export class DunningCommunicationRepository {
             metadata: input.metadata,
         })
             .returning();
-        if (!communication) {
-            throw new Error('Failed to create dunning communication');
-        }
+        invariant(communication, 'Failed to create dunning communication');
         return communication;
     }
     async updateStatus(id, status, updates = {}) {
@@ -437,14 +410,20 @@ export class DunningCommunicationRepository {
         return (communication) ?? null;
     }
     async findPendingCommunications(limit = 100) {
-        return this.q.dunningCommunications.findMany({
-            where: { status: 'pending' },
-            orderBy: (t) => t.createdAt,
-            limit,
-        });
+        return this.db
+            .select()
+            .from(this.dunningCommunications)
+            .where(eq(this.dunningCommunications.status, 'pending'))
+            .orderBy(this.dunningCommunications.createdAt)
+            .limit(limit);
     }
     async findByProviderMessageId(providerMessageId) {
-        return this.q.dunningCommunications.findFirst({ where: { providerMessageId } });
+        const [communication] = await this.db
+            .select()
+            .from(this.dunningCommunications)
+            .where(eq(this.dunningCommunications.providerMessageId, providerMessageId))
+            .limit(1);
+        return communication;
     }
     async getMetricsForExecution(executionId) {
         const [result] = await this.db
@@ -463,28 +442,29 @@ export class DunningCommunicationRepository {
 }
 export class CustomerSegmentRepository {
     db;
-    q;
     customerSegments;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.customerSegments = tables.customerSegments;
     }
     async findById(id) {
-        return this.q.customerSegments.findFirst({ where: { id } });
+        const [segment] = await this.db
+            .select()
+            .from(this.customerSegments)
+            .where(eq(this.customerSegments.id, id))
+            .limit(1);
+        return segment;
     }
     async findMany(query) {
         const { limit, offset, type, isActive, search, sortBy, sortOrder } = query;
-        return this.q.customerSegments.findMany({
-            where: {
-                ...(type && { type }),
-                ...(isActive !== undefined && { isActive }),
-                ...(search && { name: { ilike: `%${search}%` } }),
-            },
-            orderBy: (table, { asc, desc }) => (sortOrder === 'asc' ? asc(table[sortBy]) : desc(table[sortBy])),
-            limit,
-            offset,
-        });
+        const sortColumn = this.customerSegments[sortBy];
+        return this.db
+            .select()
+            .from(this.customerSegments)
+            .where(and(type ? eq(this.customerSegments.type, type) : undefined, isActive === undefined ? undefined : eq(this.customerSegments.isActive, isActive), search ? ilike(this.customerSegments.name, `%${search}%`) : undefined))
+            .orderBy(sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn))
+            .limit(limit)
+            .offset(offset);
     }
     async create(input) {
         const [segment] = await this.db
@@ -531,26 +511,26 @@ export class CustomerSegmentRepository {
         // boolean filters.
         // A raw `sql` parameter bypasses the column codec, so it stays a `Date`.
         const current = new Date();
-        return this.q.customerSegments.findMany({
-            where: {
-                isActive: true,
-                autoUpdate: true,
-                RAW: table => sql `${table.lastCalculated} IS NULL OR ${table.lastCalculated} + INTERVAL '1 hour' * ${table.updateFrequency} <= ${current}`,
-            },
-        });
+        const table = this.customerSegments;
+        return this.db
+            .select()
+            .from(table)
+            .where(and(eq(table.isActive, true), eq(table.autoUpdate, true), sql `(${table.lastCalculated} IS NULL OR ${table.lastCalculated} + INTERVAL '1 hour' * ${table.updateFrequency} <= ${current})`));
     }
 }
 export class CustomerRiskProfileRepository {
     db;
-    q;
     customerRiskProfiles;
     constructor(db, tables) {
         this.db = db;
-        this.q = db.query;
         this.customerRiskProfiles = tables.customerRiskProfiles;
     }
     async findByCustomerId(customerId) {
-        const profile = await this.q.customerRiskProfiles.findFirst({ where: { customerId } });
+        const [profile] = await this.db
+            .select()
+            .from(this.customerRiskProfiles)
+            .where(eq(this.customerRiskProfiles.customerId, customerId))
+            .limit(1);
         return profile && readCustomerRiskProfile(profile);
     }
     async create(input) {
@@ -587,20 +567,22 @@ export class CustomerRiskProfileRepository {
         }
     }
     async findByRiskCategory(category, limit = 100) {
-        const profiles = await this.q.customerRiskProfiles.findMany({
-            where: { RAW: table => sql `${table.riskScore}->>'category' = ${category}` },
-            orderBy: table => desc(sql `(${table.riskScore}->>'overall')::numeric`),
-            limit,
-        });
+        const table = this.customerRiskProfiles;
+        const profiles = await this.db
+            .select()
+            .from(table)
+            .where(sql `${table.riskScore}->>'category' = ${category}`)
+            .orderBy(desc(sql `(${table.riskScore}->>'overall')::numeric`))
+            .limit(limit);
         return profiles.map(profile => readCustomerRiskProfile(profile));
     }
     async findBySegmentId(segmentId, limit = 100) {
-        const profiles = await this.q.customerRiskProfiles.findMany({
-            where: {
-                RAW: table => sql `${table.segmentIds} @> ${JSON.stringify([segmentId])}`,
-            },
-            limit,
-        });
+        const table = this.customerRiskProfiles;
+        const profiles = await this.db
+            .select()
+            .from(table)
+            .where(sql `${table.segmentIds} @> ${JSON.stringify([segmentId])}`)
+            .limit(limit);
         return profiles.map(profile => readCustomerRiskProfile(profile));
     }
     async updateSegments(customerId, segmentIds) {

@@ -1,0 +1,434 @@
+[
+  {
+    "code": "payments.card_declined",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The card or payment method was refused. Ask for another one. Returned, not thrown, by the provider calls that charge or check a card. `providerCode` is the provider's own code, such as Stripe's `card_declined` or `expired_card`; `declineCode` is the bank's reason when it gave one.",
+    "fix": "Ask the customer for another card or payment method. The same one is likely refused again.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:14"
+  },
+  {
+    "code": "payments.configuration_invalid",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The host app's setup of a payments service cannot work: a capability a configured step needs was not passed, or a setting is empty or malformed. Thrown when the service is built (at boot), never returned later as a silent no-op.",
+    "fix": "Pass the capability or setting that `setting` names when the app builds the service.",
+    "verify": "bun run test -- src/core/services/dunning-service.test.ts src/dunning/communication-service.test.ts",
+    "source": "src/core/failures.ts:179"
+  },
+  {
+    "code": "payments.customer_conflict",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A new customer clashes with a stored one: the user already has a customer with another provider id (`existingCustomerId` is that customer), or the provider id belongs to another user's customer (`existingCustomerId` is null). Nothing was written.",
+    "fix": "Use the user's stored customer (`findCustomerByUserId`), or check which user the provider customer belongs to.",
+    "verify": "bun run test -- src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:124"
+  },
+  {
+    "code": "payments.customer_segment_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No customer segment has this id.",
+    "fix": "Check the segment id; list the segments to find it.",
+    "verify": "bun run test -- src/dunning/segmentation-service.test.ts",
+    "source": "src/dunning/failures.ts:57"
+  },
+  {
+    "code": "payments.dunning_campaign_not_active",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The campaign exists but is not active, so it cannot run. Nothing was written.",
+    "fix": "Set the campaign status to `active` first.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:31"
+  },
+  {
+    "code": "payments.dunning_campaign_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No dunning campaign has this id.",
+    "fix": "Check the campaign id; list the campaigns to find it.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:18"
+  },
+  {
+    "code": "payments.dunning_campaign_without_steps",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The campaign is active but has no active step (template) to send. Nothing was written.",
+    "fix": "Add a step to the campaign, or activate one of its steps.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:44"
+  },
+  {
+    "code": "payments.dunning_template_in_use",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A campaign update removes a step that already sent a communication. The sent message keeps its step (its history points at it), so the update was refused and nothing changed.",
+    "fix": "Keep the step in `templates` (change its content or delay instead), or deactivate the campaign and create a new one.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:71"
+  },
+  {
+    "code": "payments.duplicate_pending_refund",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The payment already has a refund waiting for a decision. Nothing was written.",
+    "fix": "Approve or reject the pending refund first.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:41"
+  },
+  {
+    "code": "payments.effective_date_outside_period",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A plan change was asked to take effect outside the subscription's current period. Times are ISO instants.",
+    "fix": "Pick an effective date between `periodStart` and `periodEnd`, or leave it out to mean now.",
+    "verify": "bun run test -- src/core/services/proration-service.test.ts",
+    "source": "src/core/failures.ts:89"
+  },
+  {
+    "code": "payments.idempotency_conflict",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The same idempotency key was used with different parameters. Returned by the calls that take an `idempotencyKey`.",
+    "fix": "Use a new idempotency key for a different request, or resend the first request unchanged.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:28"
+  },
+  {
+    "code": "payments.invalid_signature",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A webhook delivery's signature does not match the body and the webhook secret: it was not sent by the provider, the body changed after signing, the signature header is missing or malformed, or the signature timestamp is outside the tolerance. Returned by `StripeProvider.constructWebhookEvent`.",
+    "fix": "Answer the delivery with HTTP 400. Check the webhook secret, and pass the raw request body, not re-serialized JSON.",
+    "verify": "bun run test -- src/core/providers src/presets",
+    "source": "src/core/providers/provider-error.ts:77"
+  },
+  {
+    "code": "payments.notification_channel_unavailable",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A dunning step uses a channel that has no provider registered in this app. The communication was not written.",
+    "fix": "Configure the channel in `createCommunicationOrchestrationService` (or `registerProvider`), or change the step's channel.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:85"
+  },
+  {
+    "code": "payments.notification_failed",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A notification was not delivered: the mail transport returned a failure (the `cause`), the Slack webhook answered with a non-2xx `status`, or the request failed or timed out (the `cause`).",
+    "fix": "Check the transport or the Slack webhook URL and its status page, then send the notification again.",
+    "verify": "bun run test -- src/core/notifications/service.test.ts",
+    "source": "src/core/failures.ts:157"
+  },
+  {
+    "code": "payments.notification_provider_rejected",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The notification provider answered with an error status (4xx or 5xx). The message was not sent. `upstreamMessage` is the provider's own error text when its body had one.",
+    "fix": "Read `upstreamStatus` and `upstreamMessage`: a 4xx is our request (recipient, sender, key); a 5xx is the provider's fault and a later retry can work.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:105"
+  },
+  {
+    "code": "payments.notification_provider_response_invalid",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The notification provider answered with a success status, but the body is not the shape its API documents. The message may have been sent. `cause` holds the schema failure.",
+    "fix": "Check the provider's API version and its status page; read `cause` for the field that did not match.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:135"
+  },
+  {
+    "code": "payments.notification_provider_timeout",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The notification provider did not answer within the provider's `timeoutMs`. The message may or may not have been sent.",
+    "fix": "Retry later, or raise `timeoutMs` in the provider config.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:121"
+  },
+  {
+    "code": "payments.notification_webhook_host_not_allowed",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A webhook recipient URL names a host that is not on the operator's `allowedHosts` list. Nothing was sent. The URL comes from customer metadata, so only hosts the operator listed may be reached.",
+    "fix": "Add the host to `webhook.allowedHosts` if the operator trusts it, or correct the customer's `webhookUrl`.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:152"
+  },
+  {
+    "code": "payments.payment_method_required",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "An automatic payment (`automatic: true`, charged with the customer absent) was asked for without a `paymentMethodId`. Returned by `createPaymentIntent` before any provider request.",
+    "fix": "Pass the saved payment method to charge, or use `automatic: false` and let the customer finish in the client.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:91"
+  },
+  {
+    "code": "payments.payment_without_subscription",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The payment belongs to no subscription, so there is no subscription to keep alive with retries. Nothing was scheduled.",
+    "fix": "Retry a one-off payment by asking the customer to pay again.",
+    "verify": "bun run test -- src/core/services/payment-retry-service.test.ts",
+    "source": "src/core/failures.ts:109"
+  },
+  {
+    "code": "payments.plan_currency_mismatch",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The two plans of a plan change are priced in different currencies, so a credit on one cannot be set against a charge on the other.",
+    "fix": "Move the subscription to a plan in the same currency, or cancel it and start a new one.",
+    "verify": "bun run test -- src/core/services/proration-service.test.ts",
+    "source": "src/core/failures.ts:70"
+  },
+  {
+    "code": "payments.plan_inactive",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The plan exists but is no longer offered (`isActive` is false). Nothing was sent to the provider or written.",
+    "fix": "Pick an active plan (`findActivePlans`).",
+    "verify": "bun run test -- src/core/services/subscription-manager.test.ts",
+    "source": "src/core/failures.ts:56"
+  },
+  {
+    "code": "payments.plan_price_not_flat",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The provider price a plan row points at is not a flat recurring price (a tiered, metered or one-time price), so it has no single amount and interval to read a plan from. The price comes from the provider, so this is outside data, not a bug. Returned by `getPlan`, `updatePlan` and `listPlans`.",
+    "fix": "Point the plan at a flat recurring price in the provider dashboard, or remove the price's `planId` metadata.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:62"
+  },
+  {
+    "code": "payments.price_not_configured",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A Stripe price id that is not one of the subscription preset's `prices`. Returned by `createCheckoutSession` before any provider request, and by `handleWebhook` for a subscription on a price the app does not sell, so no plan nobody configured is granted.",
+    "fix": "Add the price to `prices` with the plan row it sells, or check the price id the client sent.",
+    "verify": "bun run test -- src/presets",
+    "source": "src/presets/failures.ts:12"
+  },
+  {
+    "code": "payments.reference_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no provider id (`missing: 'provider_id'`, such as a plan without a Stripe price). Returned before any provider request is made.",
+    "fix": "Check the id, or create the row with the provider first.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:42"
+  },
+  {
+    "code": "payments.refund_amount_exceeded",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The refund and what the payment already gives back add up to more than was paid. Amounts are decimal text in `currency`, such as `'12.50'`. Nothing was written.",
+    "fix": "Ask for at most the refundable amount.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:68"
+  },
+  {
+    "code": "payments.refund_currency_mismatch",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The refund is in another currency than the payment. A refund pays back the payment's own money, so it must be in the payment's currency. Nothing was written.",
+    "fix": "Ask for the refund in `paymentCurrency`.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:95"
+  },
+  {
+    "code": "payments.refund_invalid_state",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The refund was already decided, so it can no longer be approved or rejected. Nothing was written.",
+    "fix": "Read the refund again to see its decision. Only a pending refund can be approved or rejected.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:54"
+  },
+  {
+    "code": "payments.refund_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No refund has this id.",
+    "fix": "Check the refund id.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:15"
+  },
+  {
+    "code": "payments.refund_window_exceeded",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The payment is older than the refund window. Nothing was written.",
+    "fix": "Refund it outside this workflow, or not at all. The default window is 90 days (`refundWindowMs`).",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:81"
+  },
+  {
+    "code": "payments.stored_tax_invalid",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A payment's stored `taxAmount` metadata cannot be added up: it is not `Money` JSON (`problem: 'not_money'`), or it is in another currency than the payment (`'other_currency'`). A wrong total must not pass, so the report stops here.",
+    "fix": "Correct the payment's `metadata.taxAmount` to `Money` JSON in the payment's currency.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:65"
+  },
+  {
+    "code": "payments.subscription_already_active",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The user already has an active subscription, so a second one is not created. Nothing was sent to the provider or written.",
+    "fix": "Change the plan of the existing subscription instead (`updateSubscription`).",
+    "verify": "bun run test -- src/core/services/subscription-manager.test.ts",
+    "source": "src/core/failures.ts:43"
+  },
+  {
+    "code": "payments.subscription_invalid_state",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The subscription's status does not allow the change: an update or a pause needs `active`, a resume needs `paused`, a reactivation needs `canceled` or `past_due`, and a canceled subscription cannot be canceled or flagged again. Nothing was sent to the provider or written.",
+    "fix": "Read the subscription again and ask only for a change its status allows.",
+    "verify": "bun run test -- src/core/services/subscription-manager.test.ts",
+    "source": "src/core/failures.ts:28"
+  },
+  {
+    "code": "payments.subscription_without_items",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A provider subscription event has no subscription items, so it has no price and no billing period to store. Returned by `handleWebhook` and `projectStripeSubscription` before anything is written.",
+    "fix": "Check the subscription in the provider dashboard: a Stripe subscription always has at least one item.",
+    "verify": "bun run test -- src/presets",
+    "source": "src/presets/failures.ts:41"
+  },
+  {
+    "code": "payments.tax_address_incomplete",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A customer address given for a tax calculation has no country, so no tax jurisdiction can be found. Returned by `calculateTax` and `createTaxTransaction` before any provider request.",
+    "fix": "Ask for the customer's country, or leave the address out to use the one the provider holds.",
+    "verify": "bun run test -- src/core/providers",
+    "source": "src/core/providers/provider-error.ts:104"
+  },
+  {
+    "code": "payments.tax_currency_mismatch",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A tax line is in another currency than the transaction it belongs to. Nothing was recorded and the provider was not called.",
+    "fix": "Pass the breakdown that `calculateTax` returned for this transaction, in its currency.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:28"
+  },
+  {
+    "code": "payments.tax_reference_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No tax configuration, jurisdiction or exemption has this id. Nothing was written.",
+    "fix": "Check the id. Read the row first if it may have been deleted.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:14"
+  },
+  {
+    "code": "payments.tax_refund_sale_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A tax refund names no recorded sale to reverse: `originalReference` is missing (`null` here), or no sale was recorded under it. Nothing was recorded and the provider was not called.",
+    "fix": "Record the sale first, and pass its `reference` as `originalReference`.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:47"
+  },
+  {
+    "code": "payments.transaction_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The payment to refund does not exist. Nothing was written.",
+    "fix": "Check the payment id.",
+    "verify": "bun run test -- src/refunds",
+    "source": "src/refunds/failures.ts:28"
+  },
+  {
+    "code": "payments.unknown_provider_customer",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A provider subscription event names a provider customer with no local customer row, so no user owns it. The row is made at checkout; a subscription made outside checkout (in the Stripe dashboard) has none. Returned by `projectStripeSubscription` before anything is written.",
+    "fix": "Start subscriptions through `createCheckoutSession`, or create the customer row for the provider customer first.",
+    "verify": "bun run test -- src/presets",
+    "source": "src/presets/failures.ts:27"
+  },
+  {
+    "code": "payments.unknown_subscription_status",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A provider subscription status this package does not model, such as one Stripe added after this release. Returned by `projectStripeSubscription` instead of guessing a status.",
+    "fix": "Upgrade `@arki/payments`, or add the status to `subscriptionStatusValues`.",
+    "verify": "bun run test -- src/presets",
+    "source": "src/presets/failures.ts:55"
+  },
+  {
+    "code": "payments.webhook_claim_conflict",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The claim insert conflicted, yet no row holds the event's provider id: the new webhook id collided with another row's, or the winning row was deleted between the two queries. Nothing was processed.",
+    "fix": "Nothing; a resend claims the event again with a new webhook id.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:98"
+  },
+  {
+    "code": "payments.webhook_event_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No webhook event has this id. Nothing was written.",
+    "fix": "Check the webhook event id. Ids come from `claimWebhookEvent` or `findWebhookEventByProviderEventId`.",
+    "verify": "bun run test -- src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:140"
+  },
+  {
+    "code": "payments.webhook_in_progress",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "Another delivery of the same event is running it now, inside its lease. This copy did not run it. Not a success: if the running attempt crashes, only a resend processes the event.",
+    "fix": "Nothing; answer non-2xx so the provider resends later.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:64"
+  },
+  {
+    "code": "payments.webhook_payload_invalid",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The event body does not have the fields the handler reads: no `id` or `type`, or a `data.object` that does not match the event type (a Stripe subscription with no items, a PaymentIntent with no id). `cause` holds the schema's `InvalidInput` when a schema refused it.",
+    "fix": "Nothing to do per event; a resend carries the same body. Check the provider's API version if it repeats.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:36"
+  },
+  {
+    "code": "payments.webhook_rejected",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The webhook validator refused the delivery: a bad or missing signature, a source address that is not allowed, a timestamp outside the window, a replayed delivery, or no webhook secret. `reason` is the validator's own text, for logs only; branch on the code. Nothing was stored.",
+    "fix": "Check the webhook secret and the provider's signing setup. A resend of the same delivery is refused again.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:20"
+  },
+  {
+    "code": "payments.webhook_retries_exhausted",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The event has been attempted `maxRetries` times and every attempt failed. The handler gives up, so the provider is told to stop resending.",
+    "fix": "Read the stored `errorMessage` of the webhook event, fix its cause, then replay the event by hand.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:50"
+  },
+  {
+    "code": "payments.webhook_target_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The event is about a payment or subscription with no local row for its provider id. Retryable on purpose: the provider can send the webhook before the app's own insert of that row commits, and a later resend then finds it. A subscription made outside the app keeps failing until `maxRetries` gives it up (`WebhookRetriesExhausted`); no owner is invented.",
+    "fix": "Nothing for a row about to commit. For a payment or subscription made outside the app, create it locally first.",
+    "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
+    "source": "src/core/services/webhook-failures.ts:80"
+  }
+]

@@ -5,6 +5,8 @@
  * Plain TypeScript only: this file runs on Node, Bun, Deno, browsers and Hermes.
  */
 import { instant } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
+import { is, recordSchema } from '@arki/schema';
 /** Event data is stored as JSON, so a time travels as an ISO string. */
 export function toIso(value) {
     return value.toString();
@@ -35,9 +37,6 @@ export function storedReal(value) {
     }
     return stored;
 }
-function isPlainObject(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 /**
  * Deep equality for JSON values. Key order does not matter: a `jsonb` column
  * returns object keys in its own order. A key holding `undefined` equals a
@@ -50,21 +49,18 @@ export function sameJson(left, right) {
     if (Array.isArray(left) && Array.isArray(right)) {
         return left.length === right.length && left.every((item, index) => sameJson(item, right[index]));
     }
-    if (isPlainObject(left) && isPlainObject(right)) {
+    if (is(left, recordSchema) && is(right, recordSchema)) {
         const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
         return [...keys].every(key => sameJson(left[key], right[key]));
     }
     return false;
 }
-/**
- * The row a command hands back to a service. `version` is a storage detail of
- * the journal, so it never leaves the package's write functions.
- */
 export async function writtenRow(result, what) {
-    const { row } = await result;
-    if (!row) {
-        throw new Error(`[@arki/payments] ${what}: the journal returned no row`);
-    }
+    const written = await result;
+    if (isFailure(written))
+        return written;
+    const { row } = written;
+    invariant(row, () => `[@arki/payments] ${what}: the journal returned no row`);
     const { version, ...rest } = row;
     void version;
     return rest;

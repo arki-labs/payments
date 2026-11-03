@@ -82,15 +82,17 @@ export class RefundRepository {
         const baseQuery = conditions.length > 0
             ? this.db.select().from(this.refunds).where(and(...conditions))
             : this.db.select().from(this.refunds);
-        const allRefunds = (await baseQuery);
+        const allRefunds = await baseQuery;
+        const byStatus = {};
+        const byReason = {};
         const metrics = {
             totalCount: allRefunds.length,
             totalAmount: MoneyBag.empty().plus(...allRefunds.map(refund => refundAmountOf(refund))),
-            byStatus: {},
-            byReason: {},
+            byStatus,
+            byReason,
         };
         for (const refund of allRefunds) {
-            const status = refund.status;
+            const status = String(refund.status);
             metrics.byStatus[status] = (metrics.byStatus[status] || 0) + 1;
             metrics.byReason[refund.reason] = (metrics.byReason[refund.reason] || 0) + 1;
         }

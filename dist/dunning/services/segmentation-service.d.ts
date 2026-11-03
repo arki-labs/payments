@@ -1,3 +1,5 @@
+import type { FailureOf } from '@arki/failure';
+import type { MoneyFailure } from '@arki/money';
 import type { CoreTables } from '../../core/tables.js';
 import type { Customer, CustomerId } from '../../core/types.js';
 import type { CreateCustomerSegmentInput, ListCustomerSegmentsQuery, UpdateCustomerSegmentInput } from '../contracts.js';
@@ -5,6 +7,8 @@ import type { CustomerSegmentId } from '../primitives.js';
 import type { DunningDatabase } from '../repository.js';
 import type { DunningTables } from '../tables.js';
 import type { CustomerRiskProfile, CustomerSegment, RiskScore, SegmentCriteria } from '../types.js';
+import type { DunningTickReport } from '../failures.js';
+import { CustomerSegmentNotFound } from '../failures.js';
 /** The customer columns a segment listing returns. */
 export type SegmentCustomer = Pick<Customer, 'id' | 'userId' | 'email' | 'name' | 'createdAt'>;
 /**
@@ -23,13 +27,16 @@ export declare class CustomerSegmentationService {
     private readonly plans;
     constructor(db: DunningDatabase, coreTables: SegmentationCoreTables, dunningTables: SegmentationDunningTables);
     /**
-     * Create a new customer segment
+     * Create a new customer segment. The criteria are checked first: a spend range that is not valid money
+     * returns its `MoneyFailure` and nothing is written. After a good write, the count can only fail with a
+     * database error, which throws (this service holds no transaction, so the saved row stays).
      */
-    createSegment(input: CreateCustomerSegmentInput, createdBy: string): Promise<CustomerSegment>;
+    createSegment(input: CreateCustomerSegmentInput, createdBy: string): Promise<CustomerSegment | MoneyFailure | FailureOf<typeof CustomerSegmentNotFound>>;
     /**
-     * Update an existing segment
+     * Update an existing segment. As in `createSegment`, new criteria with a spend range that is not valid
+     * money return their `MoneyFailure` before anything is written.
      */
-    updateSegment(segmentId: CustomerSegmentId, input: UpdateCustomerSegmentInput): Promise<CustomerSegment | null>;
+    updateSegment(segmentId: CustomerSegmentId, input: UpdateCustomerSegmentInput): Promise<CustomerSegment | null | MoneyFailure | FailureOf<typeof CustomerSegmentNotFound>>;
     /**
      * Get segment by ID
      */
@@ -43,23 +50,29 @@ export declare class CustomerSegmentationService {
      */
     deleteSegment(segmentId: CustomerSegmentId): Promise<void>;
     /**
-     * Calculate and update customer count for a segment
+     * Calculate and update customer count for a segment, and return the new count. An unknown segment returns
+     * `CustomerSegmentNotFound`; a stored spend range that is not valid money returns its `MoneyFailure`.
      */
-    updateSegmentCustomerCount(segmentId: CustomerSegmentId): Promise<void>;
+    updateSegmentCustomerCount(segmentId: CustomerSegmentId): Promise<number | import("@arki/failure").Failure<"payments.customer_segment_not_found", {
+        segmentId: string;
+    }> | MoneyFailure>;
     /**
      * Calculate customer count for segment criteria
      */
     private calculateSegmentCustomerCount;
     /**
-     * Get customers matching segment criteria
+     * Get customers matching segment criteria. An unknown segment returns `CustomerSegmentNotFound`.
      */
-    getCustomersInSegment(segmentId: CustomerSegmentId, limit?: number): Promise<SegmentCustomer[]>;
+    getCustomersInSegment(segmentId: CustomerSegmentId, limit?: number): Promise<SegmentCustomer[] | import("@arki/failure").Failure<"payments.customer_segment_not_found", {
+        segmentId: string;
+    }> | MoneyFailure>;
     /**
      * Get customers matching specific criteria
      */
-    getCustomersMatchingCriteria(criteria: SegmentCriteria, limit?: number): Promise<SegmentCustomer[]>;
+    getCustomersMatchingCriteria(criteria: SegmentCriteria, limit?: number): Promise<SegmentCustomer[] | MoneyFailure>;
     /**
-     * Build SQL conditions from segment criteria
+     * Build SQL conditions from segment criteria. The spend range comes from a stored jsonb column, so
+     * an amount `@arki/money` refuses is returned as that `MoneyFailure`, never turned into a wrong filter.
      */
     private buildSegmentConditions;
     /**
@@ -125,23 +138,22 @@ export declare class CustomerSegmentationService {
     /**
      * Update or create customer risk profile
      */
-    updateCustomerRiskProfile(customerId: CustomerId): Promise<CustomerRiskProfile>;
+    updateCustomerRiskProfile(customerId: CustomerId): Promise<CustomerRiskProfile | MoneyFailure>;
     /**
      * Get segments that a customer belongs to
      */
-    getCustomerSegments(customerId: CustomerId): Promise<string[]>;
+    getCustomerSegments(customerId: CustomerId): Promise<CustomerSegmentId[] | MoneyFailure>;
     /**
      * Validate and sanitize risk calculation results
      */
     private validateRiskCalculation;
     /**
-     * Bulk update all customer risk profiles with enhanced error handling
+     * Recalculate the risk profile of up to `limit` customers. Returns how many were tried and each
+     * customer whose profile was not updated (a stored range money refuses, or a thrown error).
      */
-    bulkUpdateRiskProfiles(limit?: number): Promise<void>;
-    /**
-     * Process auto-update segments
-     */
-    processAutoUpdateSegments(): Promise<void>;
+    bulkUpdateRiskProfiles(limit?: number): Promise<DunningTickReport>;
+    /** Recount the auto-update segments. Returns how many were tried and each segment that was not counted. */
+    processAutoUpdateSegments(): Promise<DunningTickReport>;
     /**
      * Get risk profile for a customer
      */

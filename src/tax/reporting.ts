@@ -1,6 +1,7 @@
 import type { Instant } from '@arki/date';
 import { compareAsc, fromDate, now, sub } from '@arki/date';
 import { getLogger } from '@arki/log';
+import { isFailure, unreachable } from '@arki/failure';
 import { Money, sum } from '@arki/money';
 
 import type { PaymentRepository } from '../core/repository.js';
@@ -13,8 +14,10 @@ import type {
   TaxJurisdictionRepository,
   TaxRecordRepository,
 } from './repository.js';
+import type { ExportTaxDataInput } from './contracts.js';
 import type { TaxExemption } from './types.js';
 import { moneyJsonSchema } from '../core/money.js';
+import { StoredTaxInvalid } from './failures.js';
 
 /**
  * Tax compliance and reporting periods
@@ -147,19 +150,23 @@ function totalsByCurrency(amounts: readonly Money[]): Money[] {
 /**
  * The tax a payment recorded in its metadata at checkout (`taxAmount`, `Money` JSON), as `Money`
  * in the payment's currency. No `taxAmount` means no tax was recorded: zero. One that is not
- * `Money` JSON, or is in another currency than the payment, throws: a wrong total must not pass.
+ * `Money` JSON, or is in another currency than the payment, is returned as `StoredTaxInvalid`: a wrong
+ * total must not pass.
+ * `Money` JSON that `@arki/money` refuses (an unknown currency, too many decimals) is a stored value
+ * from outside: it is returned as that `MoneyFailure`.
  */
-function recordedTax(paymentId: string, metadata: Record<string, unknown> | null, currency: string): Money {
+function recordedTax(paymentId: string, metadata: Record<string, unknown> | null, currency: string) {
   const recorded = metadata?.taxAmount;
   if (recorded === undefined || recorded === null) return Money.zero(currency);
 
   const parsed = moneyJsonSchema.safeParse(recorded);
   if (!parsed.success) {
-    throw new Error(`Payment ${paymentId} has a taxAmount that is not money: ${JSON.stringify(recorded)}`);
+    return StoredTaxInvalid({ paymentId, problem: 'not_money', paymentCurrency: currency, taxCurrency: null }, { cause: parsed.error });
   }
   const tax = Money.fromJSON(parsed.data);
+  if (isFailure(tax)) return tax;
   if (tax.currency.code !== currency) {
-    throw new Error(`Payment ${paymentId} is in ${currency} but records tax in ${tax.currency.code}`);
+    return StoredTaxInvalid({ paymentId, problem: 'other_currency', paymentCurrency: currency, taxCurrency: tax.currency.code });
   }
 
   return tax;
@@ -210,7 +217,7 @@ export class TaxReportingService {
    * Get customer tax summary for a specific year (UTC): the customer's succeeded payments with the
    * tax recorded on each, and the exemptions in force during the year.
    */
-  async getCustomerTaxSummary(customerId: CustomerId, year: number): Promise<CustomerTaxSummary> {
+  async getCustomerTaxSummary(customerId: CustomerId, year: number) {
     const startDate = fromDate(new Date(Date.UTC(year, 0, 1)));
     const endDate = sub(fromDate(new Date(Date.UTC(year + 1, 0, 1))), { nanoseconds: 1 });
 
@@ -228,11 +235,13 @@ export class TaxReportingService {
 
       for (const payment of page) {
         const amount = Money.fromMinor(payment.amountMinor, payment.currency.toUpperCase());
+        const tax = recordedTax(payment.id, payment.metadata, amount.currency.code);
+        if (isFailure(tax)) return tax;
         transactions.push({
           id: payment.id,
           date: payment.createdAt,
           amount,
-          tax: recordedTax(payment.id, payment.metadata, amount.currency.code),
+          tax,
           type: payment.subscriptionId ? 'subscription' : 'one_time',
           description: payment.description ?? '',
         });
@@ -243,7 +252,7 @@ export class TaxReportingService {
 
     const exemptions = await this.reads.exemptions.findCustomerExemptionsInRange(customerId, startDate, endDate);
 
-    return {
+    const summary: CustomerTaxSummary = {
       customerId,
       year,
       totalPaid: totalsByCurrency(transactions.map((t) => t.amount)),
@@ -257,6 +266,7 @@ export class TaxReportingService {
         validTo: exemption.validTo,
       })),
     };
+    return summary;
   }
 
   /**
@@ -324,7 +334,9 @@ export class TaxReportingService {
     const deadlines = [];
     for (const jurisdiction of jurisdictions) {
       if (!jurisdiction.registrationRequired || !registered.has(jurisdiction.countryCode.toUpperCase())) continue;
-      const length = lengths[(jurisdiction.filingFrequency ?? '').toLowerCase()];
+      const frequency = (jurisdiction.filingFrequency ?? '').toLowerCase();
+      // Own keys only: a stored frequency such as `constructor` must not find Object.prototype members
+      const length = Object.hasOwn(lengths, frequency) ? lengths[frequency] : undefined;
       if (!length) {
         logger.debug('Jurisdiction {code} has no filing frequency this service can schedule', { code: jurisdiction.code });
         continue;
@@ -425,7 +437,7 @@ export class TaxReportingService {
    * prefixed with a quote. XML text is escaped, and characters XML 1.0 cannot hold are dropped.
    */
   async exportTaxData(params: {
-    format: 'csv' | 'json' | 'xml';
+    format: ExportTaxDataInput['format'];
     period: ReportingPeriod;
     includeExemptions?: boolean;
   }): Promise<{
@@ -474,7 +486,8 @@ export class TaxReportingService {
         break;
       }
       default: {
-        throw new Error('Unsupported export format');
+        // `exportTaxDataInputSchema` lets only these formats in
+        return unreachable(params.format, `Unsupported export format: ${String(params.format)}`);
       }
     }
 

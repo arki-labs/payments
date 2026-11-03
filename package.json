@@ -1,6 +1,6 @@
 {
   "name": "@arki/payments",
-  "version": "0.3.2",
+  "version": "0.5.0",
   "description": "Payments for ARKI apps — Stripe provider, plans, customers, subscriptions, payments, refunds, dunning and tax, as Drizzle table factories, repositories, services and @arki/journal commands.",
   "license": "MIT",
   "repository": {
@@ -74,6 +74,11 @@
       "types": "./dist/core/derived-schemas.d.ts",
       "import": "./dist/core/derived-schemas.js",
       "default": "./dist/core/derived-schemas.js"
+    },
+    "./core/failures": {
+      "types": "./dist/core/failures.d.ts",
+      "import": "./dist/core/failures.js",
+      "default": "./dist/core/failures.js"
     },
     "./core/index": {
       "types": "./dist/core/index.d.ts",
@@ -300,6 +305,11 @@
       "import": "./dist/refunds/contracts.js",
       "default": "./dist/refunds/contracts.js"
     },
+    "./refunds/effects": {
+      "types": "./dist/refunds/effects.d.ts",
+      "import": "./dist/refunds/effects.js",
+      "default": "./dist/refunds/effects.js"
+    },
     "./refunds/index": {
       "types": "./dist/refunds/index.d.ts",
       "import": "./dist/refunds/index.js",
@@ -334,6 +344,11 @@
       "types": "./dist/refunds/types.d.ts",
       "import": "./dist/refunds/types.js",
       "default": "./dist/refunds/types.js"
+    },
+    "./refunds/workflow": {
+      "types": "./dist/refunds/workflow.d.ts",
+      "import": "./dist/refunds/workflow.js",
+      "default": "./dist/refunds/workflow.js"
     },
     "./tax/contracts": {
       "types": "./dist/tax/contracts.d.ts",
@@ -391,17 +406,25 @@
     "!src/**/*test-support.ts",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
+    "llms.txt",
+    "docs/agent-guide.md",
+    "docs/api-reference.md",
     "package.json"
   ],
   "dependencies": {
-    "@arki/contracts": "0.1.0",
-    "@arki/date": "0.2.0",
-    "@arki/db": "0.3.1",
-    "@arki/env": "0.0.11",
-    "@arki/journal": "0.2.1",
-    "@arki/kv": "0.2.1",
-    "@arki/log": "0.1.0",
-    "@arki/money": "0.0.4",
+    "@arki/contracts": "0.4.1",
+    "@arki/date": "0.5.0",
+    "@arki/db": "0.5.1",
+    "@arki/env": "0.2.0",
+    "@arki/failure": "0.3.0",
+    "@arki/http": "0.4.1",
+    "@arki/journal": "0.4.1",
+    "@arki/kv": "0.5.0",
+    "@arki/log": "0.4.0",
+    "@arki/money": "0.2.0",
+    "@arki/schema": "0.3.0",
+    "@opentelemetry/api": "^1.9.1",
     "@t3-oss/env-core": "^0.13.11",
     "drizzle-orm": "1.0.0-rc.4",
     "stripe": "23.0.0",

@@ -1,10 +1,10 @@
-import { createIdFactory } from '@arki/db/id-factory';
-const dunningCampaignId = createIdFactory('dc');
-const dunningTemplateId = createIdFactory('dt');
-const dunningExecutionId = createIdFactory('de');
-const dunningCommunicationId = createIdFactory('dcm');
-const customerSegmentId = createIdFactory('cs');
-const customerRiskProfileId = createIdFactory('crp');
+import { defineId } from '@arki/contracts';
+const dunningCampaignId = defineId('dc');
+const dunningTemplateId = defineId('dt');
+const dunningExecutionId = defineId('de');
+const dunningCommunicationId = defineId('dcm');
+const customerSegmentId = defineId('cs');
+const customerRiskProfileId = defineId('crp');
 export const createDunningCampaignId = dunningCampaignId.create;
 export const createDunningTemplateId = dunningTemplateId.create;
 export const createDunningExecutionId = dunningExecutionId.create;

@@ -1,10 +1,17 @@
 import { EventEmitter } from 'node:events';
+import { z } from '@arki/contracts';
 import { now, sub } from '@arki/date';
+import { InvalidInput, isFailure } from '@arki/failure';
 import { getLogger } from '@arki/log';
 import { fromStripeAmount } from '@arki/money/stripe';
+import { parse } from '@arki/schema';
 import { refundIdSchema } from '../../refunds/primitives.js';
-import { createWebhookId } from '../primitives.js';
+import { REFUND_SETTLED_STATUSES, refundRunId } from '../../refunds/workflow.js';
+import { createWebhookId, webhookEventTypeValues } from '../primitives.js';
+import { observePayments } from '../telemetry.js';
 import { parseStripeCharge, parseStripeDispute, parseStripePaymentIntent, parseStripeRefund, parseStripeSubscription, } from './webhook-event-payloads.js';
+import { WebhookInProgress, WebhookPayloadInvalid, WebhookRejected, WebhookRetriesExhausted, WebhookTargetNotFound, } from './webhook-failures.js';
+export * from './webhook-failures.js';
 /** Logs ids and event types only, never event data. */
 const logger = getLogger('arki:payments:webhook');
 /**
@@ -18,13 +25,17 @@ const paymentMovesFrom = {
     failed: ['pending', 'processing', 'requires_action'],
     requires_action: ['pending', 'processing'],
 };
+/** The two fields of a provider event the claim needs. */
+const eventEnvelopeSchema = z.object({ id: z.string().min(1), type: z.string().min(1) });
+// eslint-disable-next-line unicorn/prefer-event-target -- public API: apps subscribe with `.on('payment:refunded', ...)`; Node's EventEmitter is what they listen on
 export class WebhookHandler extends EventEmitter {
     paymentRepository;
     webhookSecurity;
     writes;
     refunds;
     config;
-    eventHandlers = new Map();
+    /** Handlers the app registered. One replaces the built-in handling of its event type. */
+    customHandlers = new Map();
     constructor(paymentRepository, webhookSecurity, 
     /** Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`. */
     writes, config = {}, refunds) {
@@ -42,89 +53,90 @@ export class WebhookHandler extends EventEmitter {
             skipIpValidation: false,
             ...config,
         };
-        this.setupEventHandlers();
     }
+    /**
+     * Validate, claim and process one delivery, in a `payments.webhook.process` span.
+     *
+     * Returns a `WebhookProcessingResult` (`processed`, `queued`, `duplicate` or `ignored`) when the
+     * route may answer 2xx. Otherwise a returned failure: one of `WEBHOOK_FAILURES`, whose
+     * `data.retryable` says whether a resend can succeed; a refused journal write, a money failure
+     * or a refund signal failure, all of which a resend may get past (answer non-2xx); or a webhook
+     * id failure. A fault (the database, a registered handler) throws after it is recorded on the
+     * event's row; answer non-2xx.
+     */
     async processWebhook(provider, payload, signature, timestamp, sourceIp, webhookSecret) {
-        try {
-            // 1. Validate webhook security
-            const validation = await this.webhookSecurity.validateWebhook(provider, payload, signature, timestamp, sourceIp, webhookSecret, { skipIpValidation: this.config.skipIpValidation });
-            if (!validation.isValid) {
-                return {
-                    success: false,
-                    error: validation.error || 'Webhook validation failed',
-                    retryable: false,
-                };
-            }
-            // 2. Parse event data
-            const eventData = this.parseEventData(payload);
-            if (!eventData.type || !eventData.id) {
-                return {
-                    success: false,
-                    error: 'Invalid webhook payload: missing type or id',
-                    retryable: false,
-                };
-            }
-            // 3. An event type we do not handle: acknowledge it, store nothing.
-            const eventType = validation.eventType;
-            if (!eventType) {
-                logger.debug('Ignoring unhandled webhook event type {type}', { type: eventData.type });
-                return { success: true, error: `Unhandled event type: ${eventData.type}` };
-            }
-            // 4. Claim the event. Only the delivery whose insert wins goes on to
-            //    process it; the database's unique index decides, so this holds
-            //    across concurrent requests and across server instances.
-            //    `attempts` counts started attempts.
-            const data = validation.data || {};
-            const { event, created } = await this.paymentRepository.claimWebhookEvent({
-                id: createWebhookId(),
-                provider,
-                eventType,
-                providerEventId: eventData.id,
-                data,
-                processed: false,
-                attempts: 1,
-                lastAttemptAt: now(),
-                sourceIp,
-                createdAt: now(),
-                updatedAt: now(),
-            });
-            const webhookId = event.id;
-            if (!created) {
-                if (event.processed) {
-                    return { success: true, webhookId, error: 'Event already processed' };
-                }
-                if (event.attempts >= this.config.maxRetries) {
-                    logger.error('Webhook {webhookId} given up after {attempts} attempts', {
-                        webhookId,
-                        attempts: event.attempts,
-                    });
-                    return { success: false, webhookId, retryable: false, error: 'Max retry attempts exceeded' };
-                }
-                // A resend of an event that failed or whose attempt crashed takes it
-                // over; a resend of one still inside its lease asks to be resent later.
-                const reclaimed = await this.paymentRepository.reclaimWebhookEvent(webhookId, event.attempts, this.leaseCutoff());
-                if (!reclaimed) {
-                    logger.debug('Webhook {webhookId} is being processed; asking for a resend', { webhookId });
-                    return { success: false, webhookId, retryable: true, error: 'Event is being processed' };
-                }
-            }
-            // 5. Process the event. A failure is recorded on the row and answered
-            //    as retryable, so the provider's resend takes it over.
-            if (this.config.enableAsync) {
-                void this.processEventAsync(webhookId, eventType, provider, data);
-            }
-            else {
-                await this.runClaimed(webhookId, eventType, provider, data);
-            }
-            return { success: true, webhookId };
+        return observePayments('webhook.process', { 'payments.provider': provider }, () => this.receive(provider, payload, signature, timestamp, sourceIp, webhookSecret));
+    }
+    async receive(provider, payload, signature, timestamp, sourceIp, webhookSecret) {
+        // 1. Validate webhook security
+        const validation = await this.webhookSecurity.validateWebhook(provider, payload, signature, timestamp, sourceIp, webhookSecret, { skipIpValidation: this.config.skipIpValidation });
+        if (!validation.isValid) {
+            return WebhookRejected({ reason: validation.error ?? 'Webhook validation failed', retryable: false });
         }
-        catch (error) {
-            return {
-                success: false,
-                error: `Webhook processing error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                retryable: true,
-            };
+        // 2. Read the event's id and type
+        const envelope = this.readEnvelope(payload);
+        if (isFailure(envelope))
+            return envelope;
+        // 3. An event type we do not handle: acknowledge it, store nothing.
+        const eventType = validation.eventType;
+        if (!eventType) {
+            logger.debug('Ignoring unhandled webhook event type {type}', { type: envelope.type });
+            return { status: 'ignored' };
         }
+        // 4. Claim the event. Only the delivery whose insert wins goes on to
+        //    process it; the database's unique index decides, so this holds
+        //    across concurrent requests and across server instances.
+        //    `attempts` counts started attempts.
+        const webhookIdResult = createWebhookId();
+        if (isFailure(webhookIdResult))
+            return webhookIdResult;
+        const data = validation.data ?? {};
+        const claim = await this.paymentRepository.claimWebhookEvent({
+            id: webhookIdResult,
+            provider,
+            eventType,
+            providerEventId: envelope.id,
+            data,
+            processed: false,
+            attempts: 1,
+            lastAttemptAt: now(),
+            sourceIp,
+            createdAt: now(),
+            updatedAt: now(),
+        });
+        if (isFailure(claim))
+            return claim;
+        const { event, created } = claim;
+        const webhookId = event.id;
+        if (!created) {
+            if (event.processed) {
+                return { status: 'duplicate', webhookId };
+            }
+            if (event.attempts >= this.config.maxRetries) {
+                logger.error('Webhook {webhookId} given up after {attempts} attempts', {
+                    webhookId,
+                    attempts: event.attempts,
+                });
+                return WebhookRetriesExhausted({ webhookId, attempts: event.attempts, retryable: false });
+            }
+            // A resend of an event that failed or whose attempt crashed takes it
+            // over; a resend of one still inside its lease asks to be resent later.
+            const reclaimed = await this.paymentRepository.reclaimWebhookEvent(webhookId, event.attempts, this.leaseCutoff());
+            if (!reclaimed) {
+                logger.debug('Webhook {webhookId} is being processed; asking for a resend', { webhookId });
+                return WebhookInProgress({ webhookId, retryable: true });
+            }
+        }
+        // 5. Process the event. A failure is recorded on the row and returned,
+        //    so the provider's resend takes it over.
+        if (this.config.enableAsync) {
+            this.processEventAsync(webhookId, eventType, provider, data);
+            return { status: 'queued', webhookId };
+        }
+        const outcome = await this.runClaimed(webhookId, eventType, provider, data);
+        if (isFailure(outcome))
+            return outcome;
+        return { status: 'processed', webhookId };
     }
     /**
      * Re-run failed or crashed events without waiting for a resend. Optional:
@@ -141,7 +153,15 @@ export class WebhookHandler extends EventEmitter {
                         continue;
                     }
                     try {
-                        await this.runClaimed(event.id, event.eventType, event.provider, event.data);
+                        const outcome = await this.runClaimed(event.id, event.eventType, event.provider, event.data);
+                        if (isFailure(outcome)) {
+                            this.emit('webhook:processing_error', {
+                                webhookId: event.id,
+                                eventType: event.eventType,
+                                provider: event.provider,
+                                error: outcome.code,
+                            });
+                        }
                     }
                     catch (error) {
                         this.emit('webhook:processing_error', {
@@ -154,9 +174,12 @@ export class WebhookHandler extends EventEmitter {
                 }
                 else {
                     // Mark as failed after max retries
-                    await this.paymentRepository.updateWebhookEvent(event.id, {
+                    const marked = await this.paymentRepository.updateWebhookEvent(event.id, {
                         errorMessage: 'Max retry attempts exceeded',
                     });
+                    if (isFailure(marked)) {
+                        continue;
+                    }
                     this.emit('webhook:failed', {
                         webhookId: event.id,
                         eventType: event.eventType,
@@ -172,458 +195,339 @@ export class WebhookHandler extends EventEmitter {
             });
         }
     }
-    async processEventAsync(webhookId, eventType, provider, data) {
-        // Process in background
-        setImmediate(async () => {
-            try {
-                await this.runClaimed(webhookId, eventType, provider, data);
-            }
-            catch (error) {
+    processEventAsync(webhookId, eventType, provider, data) {
+        // Process in background. Every outcome, and every throw, is reported as an event.
+        setImmediate(() => {
+            this.runClaimed(webhookId, eventType, provider, data).then(outcome => {
+                if (isFailure(outcome)) {
+                    this.emit('webhook:processing_error', { webhookId, eventType, provider, error: outcome.code });
+                }
+            }, (error) => {
                 this.emit('webhook:processing_error', {
                     webhookId,
                     eventType,
                     provider,
                     error: error instanceof Error ? error.message : 'Unknown error',
                 });
-            }
+            });
         });
     }
     /** The moment before which an attempt with no recorded error counts as crashed. */
     leaseCutoff() {
         return sub(now(), { milliseconds: this.config.processingLeaseMs });
     }
-    /**
-     * Run an event this caller has claimed. On failure, record the error on the
-     * row, so the next resend may take the event over, and rethrow.
-     */
-    async runClaimed(webhookId, eventType, provider, data) {
+    /** The event's `id` and `type` from the raw body, or `WebhookPayloadInvalid` when it has none. */
+    readEnvelope(payload) {
+        let body;
         try {
-            await this.processEvent(webhookId, eventType, provider, data);
+            body = JSON.parse(typeof payload === 'string' ? payload : payload.toString());
         }
         catch (error) {
-            await this.paymentRepository.updateWebhookEvent(webhookId, {
-                errorMessage: error instanceof Error ? error.message : 'Unknown error',
-            });
-            logger.warn('Webhook {webhookId} failed; a resend may retry it', { webhookId });
-            throw error;
+            return WebhookPayloadInvalid({ retryable: false }, { cause: error });
+        }
+        const envelope = parse(eventEnvelopeSchema, body);
+        return isFailure(envelope) ? WebhookPayloadInvalid({ retryable: false }, { cause: envelope }) : envelope;
+    }
+    /**
+     * Run an event this caller has claimed, in a `payments.webhook.event` span. A returned failure is
+     * recorded on the row as `<code>: <message>` and returned: the event is not marked processed, so
+     * the next resend may take it over. A thrown error is recorded the same way and rethrown.
+     */
+    async runClaimed(webhookId, eventType, provider, data) {
+        return observePayments('webhook.event', { 'payments.provider': provider, 'payments.event_type': eventType }, async () => {
+            try {
+                const outcome = await this.processEvent(webhookId, eventType, provider, data);
+                if (isFailure(outcome)) {
+                    await this.recordError(webhookId, `${outcome.code}: ${outcome.message}`);
+                    logger.warn('Webhook {webhookId} was not processed: {code}', { webhookId, code: outcome.code });
+                }
+                return outcome;
+            }
+            catch (error) {
+                await this.recordError(webhookId, error instanceof Error ? error.message : 'Unknown error');
+                logger.warn('Webhook {webhookId} failed; a resend may retry it', { webhookId });
+                throw error;
+            }
+        });
+    }
+    /**
+     * Store why the attempt failed, so the next resend may take the event over. A row deleted
+     * meanwhile has nothing to take over: that is logged, and the attempt's own outcome still stands.
+     */
+    async recordError(webhookId, errorMessage) {
+        const recorded = await this.paymentRepository.updateWebhookEvent(webhookId, { errorMessage });
+        if (isFailure(recorded)) {
+            logger.warn('Webhook {webhookId} has no row to record its error on: {code}', { webhookId, code: recorded.code });
         }
     }
     async processEvent(webhookId, eventType, provider, data) {
-        try {
-            const eventData = {
-                type: eventType,
-                provider,
-                data,
-                webhookId,
-            };
-            // Execute specific event handler
-            const handler = this.eventHandlers.get(eventType);
-            if (handler) {
-                await handler(eventData);
-            }
-            else {
-                logger.warn('No handler for webhook event type {eventType}', { eventType });
-            }
-            // Mark as processed
-            await this.paymentRepository.markWebhookEventAsProcessed(webhookId);
-            // Emit success event
-            if (this.config.enableEventEmitter) {
-                this.emit('webhook:processed', eventData);
-                this.emit(`webhook:${eventType}`, eventData);
-            }
+        const eventData = { type: eventType, provider, data, webhookId };
+        logger.debug('Handling {eventType} (webhook {webhookId})', { eventType, webhookId });
+        const custom = this.customHandlers.get(eventType);
+        const handled = custom ? await custom(eventData) : await this.handleEvent(eventData);
+        // A body the event's schema refuses is final: every resend carries the same body.
+        if (InvalidInput.is(handled))
+            return WebhookPayloadInvalid({ retryable: false }, { cause: handled });
+        if (isFailure(handled))
+            return handled;
+        const marked = await this.paymentRepository.markWebhookEventAsProcessed(webhookId);
+        if (isFailure(marked))
+            return marked;
+        if (this.config.enableEventEmitter) {
+            this.emit('webhook:processed', eventData);
+            this.emit(`webhook:${eventType}`, eventData);
         }
-        catch (error) {
-            throw error;
-        }
+        return;
     }
-    parseEventData(payload) {
-        try {
-            const payloadStr = typeof payload === 'string' ? payload : payload.toString();
-            return JSON.parse(payloadStr);
+    /** The built-in handling of each event type. A failure is returned, never thrown. */
+    async handleEvent(data) {
+        const { webhookId } = data;
+        switch (data.type) {
+            case 'subscription.created': {
+                return this.applySubscriptionEvent(data, 'subscription:created');
+            }
+            case 'subscription.updated': {
+                return this.applySubscriptionEvent(data, 'subscription:updated');
+            }
+            case 'subscription.canceled': {
+                return this.applySubscriptionEvent(data, 'subscription:canceled');
+            }
+            case 'subscription.trial_will_end': {
+                this.emit('subscription:trial_ending', { subscriptionData: data.data, webhookId });
+                return;
+            }
+            case 'payment.succeeded': {
+                return this.applyPaymentEvent(data, 'succeeded');
+            }
+            case 'payment.failed': {
+                return this.applyPaymentEvent(data, 'failed');
+            }
+            case 'payment.requires_action': {
+                return this.applyPaymentEvent(data, 'requires_action');
+            }
+            case 'payment.refunded': {
+                return this.handlePaymentRefunded(data);
+            }
+            case 'refund.updated': {
+                return this.handleRefundUpdated(data);
+            }
+            case 'payment.dispute_created': {
+                return this.handlePaymentDisputeCreated(data);
+            }
+            case 'customer.created': {
+                this.emit('customer:created', { customerData: data.data, webhookId });
+                return;
+            }
+            case 'customer.updated': {
+                this.emit('customer:updated', { customerData: data.data, webhookId });
+                return;
+            }
+            case 'customer.deleted': {
+                this.emit('customer:deleted', { customerData: data.data, webhookId });
+                return;
+            }
+            case 'invoice.created': {
+                this.emit('invoice:created', { invoiceData: data.data, webhookId });
+                return;
+            }
+            case 'invoice.finalized': {
+                this.emit('invoice:finalized', { invoiceData: data.data, webhookId });
+                return;
+            }
+            case 'invoice.paid': {
+                this.emit('invoice:paid', { invoiceData: data.data, webhookId });
+                return;
+            }
+            case 'invoice.payment_failed': {
+                this.emit('invoice:payment_failed', { invoiceData: data.data, webhookId });
+                return;
+            }
         }
-        catch {
-            return { type: '', id: '', data: {} };
-        }
-    }
-    setupEventHandlers() {
-        // Subscription events
-        this.eventHandlers.set('subscription.created', async (data) => {
-            await this.handleSubscriptionCreated(data);
-        });
-        this.eventHandlers.set('subscription.updated', async (data) => {
-            await this.handleSubscriptionUpdated(data);
-        });
-        this.eventHandlers.set('subscription.canceled', async (data) => {
-            await this.handleSubscriptionCanceled(data);
-        });
-        this.eventHandlers.set('subscription.trial_will_end', async (data) => {
-            await this.handleSubscriptionTrialWillEnd(data);
-        });
-        // Payment events
-        this.eventHandlers.set('payment.refunded', async (data) => {
-            await this.handlePaymentRefunded(data);
-        });
-        this.eventHandlers.set('refund.updated', async (data) => {
-            await this.handleRefundUpdated(data);
-        });
-        this.eventHandlers.set('payment.dispute_created', async (data) => {
-            await this.handlePaymentDisputeCreated(data);
-        });
-        this.eventHandlers.set('payment.succeeded', async (data) => {
-            await this.handlePaymentSucceeded(data);
-        });
-        this.eventHandlers.set('payment.failed', async (data) => {
-            await this.handlePaymentFailed(data);
-        });
-        this.eventHandlers.set('payment.requires_action', async (data) => {
-            await this.handlePaymentRequiresAction(data);
-        });
-        // Customer events
-        this.eventHandlers.set('customer.created', async (data) => {
-            await this.handleCustomerCreated(data);
-        });
-        this.eventHandlers.set('customer.updated', async (data) => {
-            await this.handleCustomerUpdated(data);
-        });
-        this.eventHandlers.set('customer.deleted', async (data) => {
-            await this.handleCustomerDeleted(data);
-        });
-        // Invoice events
-        this.eventHandlers.set('invoice.created', async (data) => {
-            await this.handleInvoiceCreated(data);
-        });
-        this.eventHandlers.set('invoice.finalized', async (data) => {
-            await this.handleInvoiceFinalized(data);
-        });
-        this.eventHandlers.set('invoice.paid', async (data) => {
-            await this.handleInvoicePaid(data);
-        });
-        this.eventHandlers.set('invoice.payment_failed', async (data) => {
-            await this.handleInvoicePaymentFailed(data);
-        });
     }
     /**
      * Bring the local subscription in line with Stripe. The row must exist: a
-     * subscription made outside the app has no owner here, so the event fails
-     * and is retried (open item D4). `planId` and `metadata` stay as they are.
-     * A delivery that changes nothing writes no event.
+     * subscription made outside the app has no owner here, so the event returns
+     * `WebhookTargetNotFound` and is retried (open item D4). `planId` and
+     * `metadata` stay as they are. A delivery that changes nothing writes no event.
      */
-    async applySubscriptionEvent(data) {
+    async applySubscriptionEvent(data, emitted) {
         const snapshot = parseStripeSubscription(data.data);
+        if (isFailure(snapshot))
+            return snapshot;
         const row = await this.paymentRepository.findSubscriptionByProviderSubscriptionId(snapshot.providerSubscriptionId);
         if (!row) {
-            throw new Error(`No local subscription for provider subscription ${snapshot.providerSubscriptionId}`);
+            return WebhookTargetNotFound({
+                kind: 'subscription',
+                providerId: snapshot.providerSubscriptionId,
+                retryable: true,
+            });
         }
-        await this.writes.syncSubscription({
+        const synced = await this.writes.syncSubscription({
             userId: row.userId,
             planId: row.planId,
             customerId: row.customerId,
             ...snapshot,
         });
+        if (isFailure(synced))
+            return synced;
+        this.emit(emitted, { subscriptionData: data.data, webhookId: data.webhookId });
+        return;
     }
     /**
      * Move the local payment to what Stripe reports, following
      * `paymentMovesFrom`. A payment already where the event would put it, or
      * settled past it, is left alone and the event counts as done.
+     *
+     * A write the journal refuses is returned (AGENTS.md law 9): the event is
+     * not processed, and the route answers non-2xx so the provider resends it.
      */
     async applyPaymentEvent(data, outcome) {
         const intent = parseStripePaymentIntent(data.data);
+        if (isFailure(intent))
+            return intent;
         const row = await this.paymentRepository.findPaymentByProviderPaymentId(intent.providerPaymentId);
         if (!row) {
-            throw new Error(`No local payment for provider payment ${intent.providerPaymentId}`);
+            return WebhookTargetNotFound({ kind: 'payment', providerId: intent.providerPaymentId, retryable: true });
         }
-        if (!paymentMovesFrom[outcome].includes(row.status)) {
+        if (paymentMovesFrom[outcome].includes(row.status)) {
+            const moved = await (outcome === 'succeeded'
+                ? this.writes.completePayment({ paymentId: row.id })
+                : outcome === 'failed'
+                    ? this.writes.failPayment({ paymentId: row.id, failureReason: intent.failureReason ?? 'payment_failed' })
+                    : this.writes.markPaymentRequiresAction({ paymentId: row.id }));
+            if (isFailure(moved))
+                return moved;
+        }
+        else {
             logger.debug('Payment {paymentId} is {status}; webhook {webhookId} changes nothing', {
                 paymentId: row.id,
                 status: row.status,
                 webhookId: data.webhookId,
             });
-            return;
         }
-        switch (outcome) {
-            case 'succeeded': {
-                await this.writes.completePayment({ paymentId: row.id });
-                break;
-            }
-            case 'failed': {
-                await this.writes.failPayment({ paymentId: row.id, failureReason: intent.failureReason ?? 'payment_failed' });
-                break;
-            }
-            case 'requires_action': {
-                await this.writes.markPaymentRequiresAction({ paymentId: row.id });
-                break;
-            }
-        }
+        this.emit(`payment:${outcome}`, { paymentData: data.data, webhookId: data.webhookId });
+        return;
     }
     /**
      * Stripe reports the total refunded so far on the charge, so a resent or out-of-order event
      * cannot double or lower the amount. A charge made outside a PaymentIntent has no local payment.
      */
     async handlePaymentRefunded(data) {
-        try {
-            const charge = parseStripeCharge(data.data);
-            if (charge.providerPaymentId === null) {
-                logger.warn('Refund webhook {webhookId} is for a charge without a payment intent; nothing to record', {
-                    webhookId: data.webhookId,
-                });
-                return;
-            }
-            const row = await this.paymentRepository.findPaymentByProviderPaymentId(charge.providerPaymentId);
-            if (!row) {
-                throw new Error(`No local payment for provider payment ${charge.providerPaymentId}`);
-            }
-            const refundedAmount = fromStripeAmount(charge.amountRefunded, charge.currency).toJSON();
-            await this.writes.recordPaymentRefund({ paymentId: row.id, refundedAmount });
-            await this.reconcileRefunds(charge.refunds);
-            this.emit('payment:refunded', { paymentData: data.data, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle payment refunded: ${error instanceof Error ? error.message : 'Unknown error'}`, {
-                cause: error,
+        const charge = parseStripeCharge(data.data);
+        if (isFailure(charge))
+            return charge;
+        if (charge.providerPaymentId === null) {
+            logger.warn('Refund webhook {webhookId} is for a charge without a payment intent; nothing to record', {
+                webhookId: data.webhookId,
             });
+            return;
         }
+        const row = await this.paymentRepository.findPaymentByProviderPaymentId(charge.providerPaymentId);
+        if (!row) {
+            return WebhookTargetNotFound({ kind: 'payment', providerId: charge.providerPaymentId, retryable: true });
+        }
+        // Stripe's amount is outside data: one `@arki/money` refuses is returned, and no refund is recorded
+        const refunded = fromStripeAmount(charge.amountRefunded, charge.currency);
+        if (isFailure(refunded))
+            return refunded;
+        const recorded = await this.writes.recordPaymentRefund({ paymentId: row.id, refundedAmount: refunded.toJSON() });
+        if (isFailure(recorded))
+            return recorded;
+        const signalled = await this.reconcileRefunds(charge.refunds, data.webhookId);
+        if (isFailure(signalled))
+            return signalled;
+        this.emit('payment:refunded', { paymentData: data.data, webhookId: data.webhookId });
+        return;
     }
     /**
-     * Lines each refund Stripe lists on the charge up with our `refunds` row:
-     * - one we hold by its Stripe id is already linked, nothing to do (a resent event lands here);
-     * - one `RefundService` made (its `metadata.refundId`) that is still `processing` is completed
-     *   with Stripe's id: the service asked Stripe but died before it stored the answer;
-     * - one made at Stripe, outside the service, has no row, and none is invented for it.
-     * Refunds Stripe has not succeeded yet are left for the next event.
+     * Tells the workflow run of each refund `RefundService` made (its `metadata.refundId`) where Stripe settled it.
+     * The run completes or fails the row; the handler writes no refund itself.
+     * - `deliveryId` is `<webhookId>:<Stripe refund id>`: a resend of this event is the same delivery, so the run
+     *   reports it `duplicate` and changes nothing.
+     * - A refund made at Stripe, outside the service, has no `refundId` and is not signalled.
+     * - No run for the refund (`no-run`) or a finished one is still a 2xx: a failure would make Stripe resend forever.
+     * - A failure the signal returns is returned, so the event is not processed and Stripe resends it.
+     * Refunds Stripe has not settled yet (`pending`, `requires_action`) wait for a later event.
      */
-    async reconcileRefunds(listed) {
+    async reconcileRefunds(listed, webhookId) {
         if (!this.refunds) {
             return;
         }
-        for (const listedRefund of listed) {
-            if (listedRefund.status !== 'succeeded') {
+        for (const { providerRefundId, status, refundId } of listed) {
+            const settled = REFUND_SETTLED_STATUSES.find(final => final === status);
+            if (settled === undefined) {
                 continue;
             }
-            if (await this.refunds.reads.findByProviderRefundId(listedRefund.providerRefundId)) {
-                continue;
-            }
-            const parsed = refundIdSchema.safeParse(listedRefund.refundId);
-            const ours = parsed.success ? await this.refunds.reads.findById(parsed.data) : null;
-            if (!ours) {
-                logger.debug('Refund {providerRefundId} was made outside RefundService; no refunds row to complete', {
-                    providerRefundId: listedRefund.providerRefundId,
+            const parsed = refundIdSchema.safeParse(refundId);
+            if (!parsed.success) {
+                logger.debug('Refund {providerRefundId} was made outside RefundService; nothing to signal', {
+                    providerRefundId,
                 });
                 continue;
             }
-            if (ours.status !== 'processing') {
-                logger.warn('Refund {refundId} is {status} but Stripe refunded it as {providerRefundId}; left as it is', {
-                    refundId: ours.id,
-                    status: ours.status,
-                    providerRefundId: listedRefund.providerRefundId,
-                });
-                continue;
-            }
-            await this.refunds.writes.completeRefund({
-                refundId: ours.id,
-                providerRefundId: listedRefund.providerRefundId,
+            const delivered = await this.refunds.signal({
+                runId: refundRunId(parsed.data),
+                deliveryId: `${webhookId}:${providerRefundId}`,
+                payload: { providerRefundId, status: settled },
+            });
+            if (isFailure(delivered))
+                return delivered;
+            logger.debug('Refund {refundId} settled as {status}; its run answered {delivery}', {
+                refundId: parsed.data,
+                status,
+                delivery: delivered.status,
             });
         }
+        return;
     }
     /**
      * A refund on its own, for Stripe API versions that do not list refunds on the charge.
      * It lines up with our `refunds` row the same way as a refund listed on a charge.
      */
     async handleRefundUpdated(data) {
-        try {
-            await this.reconcileRefunds([parseStripeRefund(data.data)]);
-        }
-        catch (error) {
-            throw new Error(`Failed to handle refund update: ${error instanceof Error ? error.message : 'Unknown error'}`, {
-                cause: error,
-            });
-        }
+        const refund = parseStripeRefund(data.data);
+        if (isFailure(refund))
+            return refund;
+        return this.reconcileRefunds([refund], data.webhookId);
     }
     async handlePaymentDisputeCreated(data) {
-        try {
-            const dispute = parseStripeDispute(data.data);
-            if (dispute.providerPaymentId === null) {
-                logger.warn('Dispute webhook {webhookId} is for a charge without a payment intent; nothing to record', {
-                    webhookId: data.webhookId,
-                });
-                return;
-            }
-            const row = await this.paymentRepository.findPaymentByProviderPaymentId(dispute.providerPaymentId);
-            if (!row) {
-                throw new Error(`No local payment for provider payment ${dispute.providerPaymentId}`);
-            }
-            await this.writes.recordPaymentDispute({
-                paymentId: row.id,
-                disputeId: dispute.disputeId,
-                status: dispute.status,
-                reason: dispute.reason,
+        const dispute = parseStripeDispute(data.data);
+        if (isFailure(dispute))
+            return dispute;
+        if (dispute.providerPaymentId === null) {
+            logger.warn('Dispute webhook {webhookId} is for a charge without a payment intent; nothing to record', {
+                webhookId: data.webhookId,
             });
-            this.emit('payment:dispute_created', { paymentData: data.data, webhookId: data.webhookId });
+            return;
         }
-        catch (error) {
-            throw new Error(`Failed to handle payment dispute created: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
+        const row = await this.paymentRepository.findPaymentByProviderPaymentId(dispute.providerPaymentId);
+        if (!row) {
+            return WebhookTargetNotFound({ kind: 'payment', providerId: dispute.providerPaymentId, retryable: true });
         }
+        const recorded = await this.writes.recordPaymentDispute({
+            paymentId: row.id,
+            disputeId: dispute.disputeId,
+            status: dispute.status,
+            reason: dispute.reason,
+        });
+        if (isFailure(recorded))
+            return recorded;
+        this.emit('payment:dispute_created', { paymentData: data.data, webhookId: data.webhookId });
+        return;
     }
-    // Event handler implementations
-    async handleSubscriptionCreated(data) {
-        try {
-            const subscriptionData = data.data;
-            logger.debug('Subscription created (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applySubscriptionEvent(data);
-            this.emit('subscription:created', { subscriptionData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle subscription created: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleSubscriptionUpdated(data) {
-        try {
-            const subscriptionData = data.data;
-            logger.debug('Subscription updated (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applySubscriptionEvent(data);
-            this.emit('subscription:updated', { subscriptionData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle subscription updated: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleSubscriptionCanceled(data) {
-        try {
-            const subscriptionData = data.data;
-            logger.debug('Subscription canceled (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applySubscriptionEvent(data);
-            this.emit('subscription:canceled', { subscriptionData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle subscription canceled: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleSubscriptionTrialWillEnd(data) {
-        try {
-            const subscriptionData = data.data;
-            logger.debug('Subscription trial will end (webhook {webhookId})', { webhookId: data.webhookId });
-            // Send trial ending notifications
-            // Update user about upcoming charges
-            this.emit('subscription:trial_ending', { subscriptionData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle trial will end: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handlePaymentSucceeded(data) {
-        try {
-            const paymentData = data.data;
-            logger.debug('Payment succeeded (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applyPaymentEvent(data, 'succeeded');
-            this.emit('payment:succeeded', { paymentData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle payment succeeded: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handlePaymentFailed(data) {
-        try {
-            const paymentData = data.data;
-            logger.debug('Payment failed (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applyPaymentEvent(data, 'failed');
-            this.emit('payment:failed', { paymentData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle payment failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handlePaymentRequiresAction(data) {
-        try {
-            const paymentData = data.data;
-            logger.debug('Payment requires action (webhook {webhookId})', { webhookId: data.webhookId });
-            await this.applyPaymentEvent(data, 'requires_action');
-            this.emit('payment:requires_action', { paymentData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle payment requires action: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleCustomerCreated(data) {
-        try {
-            const customerData = data.data;
-            logger.debug('Customer created (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('customer:created', { customerData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle customer created: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleCustomerUpdated(data) {
-        try {
-            const customerData = data.data;
-            logger.debug('Customer updated (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('customer:updated', { customerData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle customer updated: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleCustomerDeleted(data) {
-        try {
-            const customerData = data.data;
-            logger.debug('Customer deleted (webhook {webhookId})', { webhookId: data.webhookId });
-            // Clean up customer data and subscriptions
-            this.emit('customer:deleted', { customerData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle customer deleted: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleInvoiceCreated(data) {
-        try {
-            const invoiceData = data.data;
-            logger.debug('Invoice created (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('invoice:created', { invoiceData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle invoice created: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleInvoiceFinalized(data) {
-        try {
-            const invoiceData = data.data;
-            logger.debug('Invoice finalized (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('invoice:finalized', { invoiceData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle invoice finalized: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleInvoicePaid(data) {
-        try {
-            const invoiceData = data.data;
-            logger.debug('Invoice paid (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('invoice:paid', { invoiceData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle invoice paid: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async handleInvoicePaymentFailed(data) {
-        try {
-            const invoiceData = data.data;
-            logger.debug('Invoice payment failed (webhook {webhookId})', { webhookId: data.webhookId });
-            this.emit('invoice:payment_failed', { invoiceData, webhookId: data.webhookId });
-        }
-        catch (error) {
-            throw new Error(`Failed to handle invoice payment failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    // Public utility methods
+    /** Replace the built-in handling of `eventType` with `handler`. A throw from it is a fault: recorded, then rethrown. */
     registerEventHandler(eventType, handler) {
-        this.eventHandlers.set(eventType, handler);
+        this.customHandlers.set(eventType, handler);
     }
+    /** Remove a handler `registerEventHandler` set; the built-in handling of `eventType` applies again. */
     removeEventHandler(eventType) {
-        this.eventHandlers.delete(eventType);
+        this.customHandlers.delete(eventType);
     }
+    /** Every event type has built-in handling, so every type is supported. */
     getProcessingStats() {
         return {
-            totalHandlers: this.eventHandlers.size,
-            supportedEventTypes: [...this.eventHandlers.keys()],
+            totalHandlers: webhookEventTypeValues.length,
+            supportedEventTypes: [...webhookEventTypeValues],
         };
     }
 }

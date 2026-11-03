@@ -1,11 +1,19 @@
 import type { Instant } from '@arki/date';
 import { fromDate, isSameOrBefore, now, toDate, toMillis } from '@arki/date';
+import type { Failure } from '@arki/failure';
+import { z } from '@arki/contracts';
+import { isFailure } from '@arki/failure';
+import { getLogger } from '@arki/log';
 
 import type { CoreWrites } from '../journal.js';
 import type { BasePaymentProvider } from '../providers/base-provider.js';
 import type { PaymentRepository } from '../repository.js';
 import type { PaymentId, SubscriptionId } from '../types.js';
+import { misconfigured } from '../failures.js';
 import { paymentAmount } from '../money.js';
+import { ReferenceNotFound } from '../providers/provider-error.js';
+
+const logger = getLogger('arki:payments:dunning');
 
 export type DunningRule = {
   id: string;
@@ -42,6 +50,8 @@ export type DunningEvent = {
   paymentId?: PaymentId;
   userId: string;
   eventType: 'payment_failed' | 'retry_scheduled' | 'grace_period_ended' | 'subscription_recovered';
+  /** The rule step a scheduled event runs. A recovery event has none. */
+  action?: DunningRule['action'];
   data: Record<string, unknown>;
   scheduledFor?: Instant;
   processedAt?: Instant;
@@ -53,9 +63,59 @@ export type DunningStats = {
   recoveredPayments: number;
   recoveryRate: number;
   subscriptionsInDunning: number;
-  averageRecoveryTime: number; // days
   revenueAtRisk: number;
-  revenueRecovered: number;
+}
+
+/** The email an `email` step sends: the customer's address, the step's template, and what it is about. */
+export type DunningEmail = {
+  to: string;
+  template: string;
+  subscriptionId: SubscriptionId;
+  paymentId: PaymentId | undefined;
+  userId: string;
+};
+
+/** The call a `webhook` step makes: the step's own config, and the subscription, payment and user it is about. */
+export type DunningWebhookCall = {
+  eventId: string;
+  subscriptionId: SubscriptionId;
+  paymentId: PaymentId | undefined;
+  userId: string;
+  config: Record<string, unknown>;
+};
+
+/**
+ * How the app delivers the steps the package cannot send itself. Each returns `undefined` once
+ * delivered, or a failure when the transport refused (logged, and the step counts as done); a
+ * thrown error leaves the step scheduled for the next run. A rule whose step needs a sender that is
+ * missing fails when the service is built.
+ */
+export type DunningSenders = {
+  sendEmail?: (email: DunningEmail) => Promise<Failure | undefined>;
+  sendWebhook?: (call: DunningWebhookCall) => Promise<Failure | undefined>;
+};
+
+/** An `email` step's config: the template the app's mailer sends. */
+const emailStepConfigSchema = z.looseObject({ template: z.string().min(1) });
+
+/**
+ * Throws `payments.configuration_invalid` when an enabled rule needs a sender the app did not pass,
+ * or an `email` rule names no template. Runs when the service is built and when its rules change.
+ */
+function checkRulesHaveSenders(rules: readonly DunningRule[], senders: DunningSenders): void {
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    const { type, config } = rule.action;
+    if (type === 'email') {
+      if (!senders.sendEmail) throw misconfigured('senders.sendEmail', `rule ${rule.id} sends email`);
+      if (!emailStepConfigSchema.safeParse(config).success) {
+        throw misconfigured(`rules.${rule.id}.action.config.template`, 'an email step needs a template name');
+      }
+    }
+    if (type === 'webhook' && !senders.sendWebhook) {
+      throw misconfigured('senders.sendWebhook', `rule ${rule.id} calls a webhook`);
+    }
+  }
 }
 
 const DEFAULT_DUNNING_CONFIG: DunningConfiguration = {
@@ -156,7 +216,7 @@ type DunningProvider = Pick<BasePaymentProvider, 'confirmPayment' | 'pauseSubscr
 /** The repository reads dunning makes. A `PaymentRepository` fits. */
 type DunningReads = Pick<
   PaymentRepository,
-  'findPaymentById' | 'findSubscriptionById' | 'getPaymentStats' | 'getSubscriptionStats'
+  'findPaymentById' | 'findSubscriptionById' | 'findCustomerById' | 'getPaymentStats' | 'getSubscriptionStats'
 >;
 
 /**
@@ -167,66 +227,69 @@ export class DunningService {
   private config: DunningConfiguration;
   private dunningEvents = new Map<string, DunningEvent>();
 
+  /** Throws `payments.configuration_invalid` when an enabled rule needs a sender that `senders` lacks. */
   constructor(
     private readonly paymentProvider: DunningProvider,
     private readonly paymentRepository: DunningReads,
     private readonly writes: CoreWrites,
     config: Partial<DunningConfiguration> = {},
+    private readonly senders: DunningSenders = {},
   ) {
     this.config = { ...DEFAULT_DUNNING_CONFIG, ...config };
+    checkRulesHaveSenders(this.config.rules, senders);
   }
 
   /**
-   * Handle a payment failure and initiate dunning process
+   * Handle a payment failure and initiate dunning process. Returns nothing, or a failure:
+   * `ReferenceNotFound` for an unknown payment or subscription (nothing is scheduled or written),
+   * or the refusal of the journal write.
    */
   async handlePaymentFailure(
     paymentId: PaymentId,
     subscriptionId: SubscriptionId,
     failureReason?: string,
-  ): Promise<void> {
-    try {
-      const payment = await this.paymentRepository.findPaymentById(paymentId);
-      const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+  ) {
+    const payment = await this.paymentRepository.findPaymentById(paymentId);
+    if (!payment) return ReferenceNotFound({ kind: 'payment', id: paymentId, missing: 'row' });
+    const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+    if (!subscription) return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
 
-      if (!payment || !subscription) {
-        throw new Error('Payment or subscription not found');
-      }
+    // Create dunning events based on configured rules
+    const failureDate = now();
+    for (const rule of this.config.rules.filter(r => r.enabled && r.trigger.event === 'payment_failed')) {
+      // Local-time calendar days, as before: the working value stays a `Date` until it is stored.
+      const scheduledDate = toDate(failureDate);
+      scheduledDate.setDate(scheduledDate.getDate() + rule.trigger.delayDays);
 
-      // Create dunning events based on configured rules
-      const failureDate = now();
-      for (const rule of this.config.rules.filter(r => r.enabled && r.trigger.event === 'payment_failed')) {
-        // Local-time calendar days, as before: the working value stays a `Date` until it is stored.
-        const scheduledDate = toDate(failureDate);
-        scheduledDate.setDate(scheduledDate.getDate() + rule.trigger.delayDays);
+      const dunningEvent: DunningEvent = {
+        id: `${paymentId}_${rule.id}_${Date.now()}`,
+        subscriptionId,
+        paymentId,
+        userId: subscription.userId,
+        eventType: 'payment_failed',
+        action: rule.action,
+        data: {
+          ruleId: rule.id,
+          ruleName: rule.name,
+          failureReason,
+          attempt: rule.retryCount || 0,
+        },
+        scheduledFor: fromDate(scheduledDate),
+        createdAt: failureDate,
+      };
 
-        const dunningEvent: DunningEvent = {
-          id: `${paymentId}_${rule.id}_${Date.now()}`,
-          subscriptionId,
-          paymentId,
-          userId: subscription.userId,
-          eventType: 'payment_failed',
-          data: {
-            ruleId: rule.id,
-            ruleName: rule.name,
-            action: rule.action,
-            failureReason,
-            attempt: rule.retryCount || 0,
-          },
-          scheduledFor: fromDate(scheduledDate),
-          createdAt: failureDate,
-        };
-
-        this.dunningEvents.set(dunningEvent.id, dunningEvent);
-      }
-
-      // Update subscription status to past_due
-      await this.writes.markSubscriptionPastDue({ subscriptionId });
-
-      console.log(`Initiated dunning process for payment ${paymentId} on subscription ${subscriptionId}`);
-    } catch (error) {
-      console.error('Error handling payment failure:', error);
-      throw error;
+      this.dunningEvents.set(dunningEvent.id, dunningEvent);
     }
+
+    // Update subscription status to past_due
+    const marked = await this.writes.markSubscriptionPastDue({ subscriptionId });
+    if (isFailure(marked)) return marked;
+
+    logger.debug('Initiated dunning for payment {paymentId} on subscription {subscriptionId}', {
+      paymentId,
+      subscriptionId,
+    });
+    return;
   }
 
   /**
@@ -236,34 +299,42 @@ export class DunningService {
     const current = now();
     const eventsToProcess = [...this.dunningEvents.values()]
       .filter(event => !event.processedAt && event.scheduledFor && isSameOrBefore(event.scheduledFor, current))
-      .sort((a, b) => (a.scheduledFor ? toMillis(a.scheduledFor) : 0) - (b.scheduledFor ? toMillis(b.scheduledFor) : 0));
+      .toSorted((a, b) => (a.scheduledFor ? toMillis(a.scheduledFor) : 0) - (b.scheduledFor ? toMillis(b.scheduledFor) : 0));
 
+    // One broken step must not stop the others. A step that threw stays unprocessed and runs again next time.
     for (const event of eventsToProcess) {
       try {
-        await this.processEvent(event);
+        const processed = await this.processEvent(event);
+        if (isFailure(processed)) {
+          logger.warn('Dunning event {eventId} was refused: {code}', {
+            eventId: event.id,
+            code: processed.code,
+            failure: processed,
+          });
+        }
         event.processedAt = now();
-        console.log(`Processed dunning event ${event.id}`);
+        logger.debug('Processed dunning event {eventId}', { eventId: event.id });
       } catch (error) {
-        console.error(`Failed to process dunning event ${event.id}:`, error);
+        logger.error('Dunning event {eventId} failed and stays scheduled: {error}', {
+          eventId: event.id,
+          error: error instanceof Error ? error : String(error),
+        });
       }
     }
   }
 
-  /**
-   * Process an individual dunning event
-   */
-  private async processEvent(event: DunningEvent): Promise<void> {
-    const { action } = event.data as { action: DunningRule['action'] };
+  /** Process an individual dunning event. Nothing, or the failure that refused it. */
+  private async processEvent(event: DunningEvent) {
+    const { action } = event;
+    if (action === undefined) return;
 
     switch (action.type) {
       case 'email': {
-        await this.sendDunningEmail(event, action.config);
-        break;
+        return this.sendDunningEmail(event, action.config);
       }
 
       case 'retry_payment': {
-        await this.retryPayment(event, action.config);
-        break;
+        return this.retryPayment(event, action.config);
       }
 
       case 'pause_subscription': {
@@ -277,120 +348,176 @@ export class DunningService {
       }
 
       case 'webhook': {
-        await this.triggerWebhook(event, action.config);
-        break;
+        return this.triggerWebhook(event, action.config);
       }
 
       default: {
-        console.warn(`Unknown dunning action type: ${action.type}`);
+        logger.warn('Unknown dunning action type {type} in event {eventId}', { type: action.type, eventId: event.id });
       }
     }
+    return;
   }
 
   /**
-   * Send dunning email to customer
+   * Send the step's email to the subscription's customer through the app's `sendEmail`. Nothing, the
+   * sender's failure, or `ReferenceNotFound` when the subscription or its customer is gone.
    */
-  private async sendDunningEmail(event: DunningEvent, config: Record<string, unknown>): Promise<void> {
-    // In a real implementation, this would integrate with your email service
-    console.log(`Sending dunning email for subscription ${event.subscriptionId}`, {
-      template: config['template'],
+  private async sendDunningEmail(event: DunningEvent, config: Record<string, unknown>) {
+    const { sendEmail } = this.senders;
+    // Checked when the rules were set: an enabled email rule always has a sender and a template
+    const step = emailStepConfigSchema.safeParse(config);
+    if (!sendEmail || !step.success) throw misconfigured('senders.sendEmail', 'an email step ran without a sender');
+
+    const subscription = await this.paymentRepository.findSubscriptionById(event.subscriptionId);
+    if (!subscription) return ReferenceNotFound({ kind: 'subscription', id: event.subscriptionId, missing: 'row' });
+    const customer = await this.paymentRepository.findCustomerById(subscription.customerId);
+    if (!customer) return ReferenceNotFound({ kind: 'customer', id: subscription.customerId, missing: 'row' });
+
+    return sendEmail({
+      to: customer.email,
+      template: step.data.template,
+      subscriptionId: event.subscriptionId,
+      paymentId: event.paymentId,
       userId: event.userId,
     });
-
-    // Example email integration:
-    // await emailService.sendTemplate({
-    //   to: subscription.customer.email,
-    //   template: config.template as string,
-    //   data: {
-    //     subscriptionId: event.subscriptionId,
-    //     amount: payment.amount,
-    //     retryDate: nextRetryDate,
-    //   }
-    // });
   }
 
   /**
-   * Retry failed payment
+   * Retry failed payment. Nothing, or `ReferenceNotFound` when the event names no payment or an
+   * unknown one. A refused retry or write is logged and ends the step.
    */
-  private async retryPayment(event: DunningEvent, _config: Record<string, unknown>): Promise<void> {
+  private async retryPayment(event: DunningEvent, _config: Record<string, unknown>) {
     if (!event.paymentId) {
-      throw new Error('Payment ID required for retry');
+      return ReferenceNotFound({ kind: 'payment', id: event.id, missing: 'row' });
     }
 
-    try {
-      const payment = await this.paymentRepository.findPaymentById(event.paymentId);
-      if (!payment) {
-        throw new Error('Payment not found');
-      }
-
-      // Attempt to retry the payment through the provider
-      const retryResult = await this.paymentProvider.confirmPayment(event.paymentId);
-
-      if (retryResult.status === 'succeeded') {
-        // Payment recovered - update subscription status.
-        // A canceled subscription stays canceled: the command rejects and the catch below logs it.
-        await this.writes.activateSubscription({ subscriptionId: event.subscriptionId });
-
-        // Remove remaining dunning events for this subscription
-        this.cancelDunningEventsForSubscription(event.subscriptionId);
-
-        console.log(`Payment ${event.paymentId} recovered on retry`);
-      } else {
-        console.log(`Payment retry failed for ${event.paymentId}: ${retryResult.status}`);
-      }
-    } catch (error) {
-      console.error(`Payment retry error for ${event.paymentId}:`, error);
+    const payment = await this.paymentRepository.findPaymentById(event.paymentId);
+    if (!payment) {
+      return ReferenceNotFound({ kind: 'payment', id: event.paymentId, missing: 'row' });
     }
+
+    // Attempt to retry the payment through the provider
+    const retryResult = await this.paymentProvider.confirmPayment(event.paymentId);
+    if (isFailure(retryResult)) {
+      logger.warn('Payment retry failed for {paymentId}: {code}', {
+        paymentId: event.paymentId,
+        code: retryResult.code,
+        failure: retryResult,
+      });
+      return;
+    }
+
+    if (retryResult.status === 'succeeded') {
+      // Payment recovered - update subscription status.
+      // A canceled subscription stays canceled: the command refuses, and the refusal is logged.
+      const activated = await this.writes.activateSubscription({ subscriptionId: event.subscriptionId });
+      if (isFailure(activated)) {
+        logger.warn('Could not reactivate subscription {subscriptionId}: {code}', {
+          subscriptionId: event.subscriptionId,
+          code: activated.code,
+          failure: activated,
+        });
+        return;
+      }
+
+      // Remove remaining dunning events for this subscription
+      this.cancelDunningEventsForSubscription(event.subscriptionId);
+
+      logger.info('Payment {paymentId} recovered on retry', { paymentId: event.paymentId });
+    } else {
+      logger.info('Payment retry for {paymentId} ended {status}', {
+        paymentId: event.paymentId,
+        status: retryResult.status,
+      });
+    }
+    return;
   }
 
   /**
    * Pause subscription due to payment failure
    */
   private async pauseSubscription(event: DunningEvent): Promise<void> {
-    try {
-      await this.paymentProvider.pauseSubscription(event.subscriptionId);
-
-      // Update local database
-      await this.writes.pauseSubscription({ subscriptionId: event.subscriptionId });
-
-      console.log(`Paused subscription ${event.subscriptionId} due to payment failure`);
-    } catch (error) {
-      console.error(`Failed to pause subscription ${event.subscriptionId}:`, error);
+    const paused = await this.paymentProvider.pauseSubscription(event.subscriptionId);
+    // The provider did not pause it, so the row must not say paused
+    if (isFailure(paused)) {
+      logger.warn('Could not pause subscription {subscriptionId}: {code}', {
+        subscriptionId: event.subscriptionId,
+        code: paused.code,
+        failure: paused,
+      });
+      return;
     }
+
+    // Update local database
+    const stored = await this.writes.pauseSubscription({ subscriptionId: event.subscriptionId });
+    if (isFailure(stored)) {
+      logger.warn('Could not store the pause of subscription {subscriptionId}: {code}', {
+        subscriptionId: event.subscriptionId,
+        code: stored.code,
+        failure: stored,
+      });
+      return;
+    }
+
+    logger.info('Paused subscription {subscriptionId} after a failed payment', {
+      subscriptionId: event.subscriptionId,
+    });
   }
 
   /**
    * Cancel subscription due to payment failure
    */
   private async cancelSubscription(event: DunningEvent, config: Record<string, unknown>): Promise<void> {
-    try {
-      await this.paymentProvider.cancelSubscription(event.subscriptionId, {
-        immediately: true,
-        reason: config['reason'] as string || 'payment_failure',
-      });
-
-      // Update local database
-      await this.writes.cancelSubscription({
+    const canceled = await this.paymentProvider.cancelSubscription(event.subscriptionId, {
+      immediately: true,
+      reason: config['reason'] as string || 'payment_failure',
+    });
+    // The provider did not cancel it, so the row must not say canceled
+    if (isFailure(canceled)) {
+      logger.warn('Could not cancel subscription {subscriptionId}: {code}', {
         subscriptionId: event.subscriptionId,
-        status: 'canceled',
-        canceledAt: now(),
+        code: canceled.code,
+        failure: canceled,
       });
-
-      // Remove remaining dunning events
-      this.cancelDunningEventsForSubscription(event.subscriptionId);
-
-      console.log(`Canceled subscription ${event.subscriptionId} due to payment failure`);
-    } catch (error) {
-      console.error(`Failed to cancel subscription ${event.subscriptionId}:`, error);
+      return;
     }
+
+    // Update local database
+    const stored = await this.writes.cancelSubscription({
+      subscriptionId: event.subscriptionId,
+      status: 'canceled',
+      canceledAt: now(),
+    });
+    if (isFailure(stored)) {
+      logger.warn('Could not store the cancellation of subscription {subscriptionId}: {code}', {
+        subscriptionId: event.subscriptionId,
+        code: stored.code,
+        failure: stored,
+      });
+      return;
+    }
+
+    // Remove remaining dunning events
+    this.cancelDunningEventsForSubscription(event.subscriptionId);
+
+    logger.info('Canceled subscription {subscriptionId} after a failed payment', {
+      subscriptionId: event.subscriptionId,
+    });
   }
 
-  /**
-   * Trigger external webhook for custom dunning logic
-   */
-  private async triggerWebhook(event: DunningEvent, config: Record<string, unknown>): Promise<void> {
-    // In a real implementation, this would call an external webhook
-    console.log(`Triggering webhook for dunning event ${event.id}`, config);
+  /** Hand the step to the app's `sendWebhook`. Nothing, or the sender's failure. */
+  private async triggerWebhook(event: DunningEvent, config: Record<string, unknown>) {
+    const { sendWebhook } = this.senders;
+    // Checked when the rules were set: an enabled webhook rule always has a sender
+    if (!sendWebhook) throw misconfigured('senders.sendWebhook', 'a webhook step ran without a sender');
+
+    return sendWebhook({
+      eventId: event.id,
+      subscriptionId: event.subscriptionId,
+      paymentId: event.paymentId,
+      userId: event.userId,
+      config,
+    });
   }
 
   /**
@@ -406,18 +533,20 @@ export class DunningService {
   /**
    * Handle subscription recovery (payment succeeded after failure)
    */
-  async handleSubscriptionRecovery(subscriptionId: SubscriptionId): Promise<void> {
+  /** Nothing, or the failure of the write: a canceled subscription is not brought back. */
+  async handleSubscriptionRecovery(subscriptionId: SubscriptionId) {
     // Cancel remaining dunning events
     this.cancelDunningEventsForSubscription(subscriptionId);
 
-    // Update subscription status. A canceled subscription is not brought back: the command rejects.
-    await this.writes.activateSubscription({ subscriptionId });
+    // Update subscription status. A canceled subscription is not brought back: the command refuses.
+    const activated = await this.writes.activateSubscription({ subscriptionId });
+    if (isFailure(activated)) return activated;
 
     // Create recovery event for analytics
     const recoveryEvent: DunningEvent = {
       id: `recovery_${subscriptionId}_${Date.now()}`,
       subscriptionId,
-      userId: '', // Would need to get from subscription
+      userId: activated.userId,
       eventType: 'subscription_recovered',
       data: { recoveredAt: now() },
       createdAt: now(),
@@ -425,7 +554,8 @@ export class DunningService {
 
     this.dunningEvents.set(recoveryEvent.id, recoveryEvent);
 
-    console.log(`Subscription ${subscriptionId} recovered from dunning`);
+    logger.info('Subscription {subscriptionId} recovered from dunning', { subscriptionId });
+    return;
   }
 
   /**
@@ -448,19 +578,13 @@ export class DunningService {
     const recoveryRate = totalFailedPayments > 0 ? (recoveredPayments / totalFailedPayments) * 100 : 0;
 
     const revenueAtRisk = failedPayments.reduce((sum, p) => sum + paymentAmount(p).toNumber(), 0);
-    const revenueRecovered = recoveredPayments * (revenueAtRisk / totalFailedPayments || 0);
-
-    // Calculate average recovery time (simplified)
-    const averageRecoveryTime = recoveryEvents.length > 0 ? 5 : 0; // Days - would calculate from actual data
 
     return {
       totalFailedPayments,
       recoveredPayments,
       recoveryRate: Math.round(recoveryRate * 100) / 100,
       subscriptionsInDunning: pastDueSubscriptions.length,
-      averageRecoveryTime,
       revenueAtRisk: Math.round(revenueAtRisk * 100) / 100,
-      revenueRecovered: Math.round(revenueRecovered * 100) / 100,
     };
   }
 
@@ -470,14 +594,17 @@ export class DunningService {
   getPendingEventsForSubscription(subscriptionId: SubscriptionId): DunningEvent[] {
     return [...this.dunningEvents.values()]
       .filter(event => event.subscriptionId === subscriptionId && !event.processedAt)
-      .sort((a, b) => (a.scheduledFor ? toMillis(a.scheduledFor) : 0) - (b.scheduledFor ? toMillis(b.scheduledFor) : 0));
+      .toSorted((a, b) => (a.scheduledFor ? toMillis(a.scheduledFor) : 0) - (b.scheduledFor ? toMillis(b.scheduledFor) : 0));
   }
 
   /**
    * Update dunning configuration
    */
+  /** Throws `payments.configuration_invalid`, and keeps the old rules, when a new rule needs a missing sender. */
   updateConfiguration(config: Partial<DunningConfiguration>): void {
-    this.config = { ...this.config, ...config };
+    const next = { ...this.config, ...config };
+    checkRulesHaveSenders(next.rules, this.senders);
+    this.config = next;
   }
 
   /**
@@ -493,6 +620,7 @@ export function createDunningService(
   paymentRepository: PaymentRepository,
   writes: CoreWrites,
   config?: Partial<DunningConfiguration>,
+  senders?: DunningSenders,
 ) {
-  return new DunningService(paymentProvider, paymentRepository, writes, config);
+  return new DunningService(paymentProvider, paymentRepository, writes, config, senders);
 }

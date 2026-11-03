@@ -1,5 +1,9 @@
 import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { now } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
+import { parse } from '@arki/schema';
+import { exemptionTargetSchema } from './contracts.js';
+import { TaxReferenceNotFound } from './failures.js';
 /**
  * Tax Configuration Repository
  * Manages global tax settings and configurations
@@ -12,11 +16,9 @@ export class TaxConfigurationRepository {
         this.taxConfigurations = tables.taxConfigurations;
     }
     async createConfiguration(data) {
-        const result = await this.db.insert(this.taxConfigurations).values(data).returning();
-        if (!result[0]) {
-            throw new Error('Failed to create tax configuration');
-        }
-        return result[0];
+        const [created] = await this.db.insert(this.taxConfigurations).values(data).returning();
+        invariant(created, 'the tax configuration insert returned no row');
+        return created;
     }
     async findConfigurationById(id) {
         const results = await this.db
@@ -41,33 +43,33 @@ export class TaxConfigurationRepository {
             .where(eq(this.taxConfigurations.status, 'active'))
             .orderBy(desc(this.taxConfigurations.isDefault), this.taxConfigurations.name);
     }
+    /** The updated row, or `TaxReferenceNotFound` when no configuration has `id`. */
     async updateConfiguration(id, data) {
-        const result = await this.db
+        const [updated] = await this.db
             .update(this.taxConfigurations)
             .set({ ...data, updatedAt: now() })
             .where(eq(this.taxConfigurations.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to update tax configuration or configuration not found');
-        }
-        return result[0];
+        return updated ?? TaxReferenceNotFound({ kind: 'configuration', id });
     }
+    /**
+     * Makes `id` the one default configuration. An unknown `id` returns `TaxReferenceNotFound` and
+     * leaves the current default as it is: the new default is set before the old one is cleared.
+     */
     async setDefaultConfiguration(id) {
-        // First, remove default flag from all configurations
-        await this.db
-            .update(this.taxConfigurations)
-            .set({ isDefault: false, updatedAt: now() })
-            .where(eq(this.taxConfigurations.isDefault, true));
-        // Then set the new default
-        const result = await this.db
+        const [updated] = await this.db
             .update(this.taxConfigurations)
             .set({ isDefault: true, updatedAt: now() })
             .where(eq(this.taxConfigurations.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to set default tax configuration');
+        if (!updated) {
+            return TaxReferenceNotFound({ kind: 'configuration', id });
         }
-        return result[0];
+        await this.db
+            .update(this.taxConfigurations)
+            .set({ isDefault: false, updatedAt: now() })
+            .where(and(eq(this.taxConfigurations.isDefault, true), ne(this.taxConfigurations.id, id)));
+        return updated;
     }
     async deleteConfiguration(id) {
         await this.db.delete(this.taxConfigurations).where(eq(this.taxConfigurations.id, id));
@@ -85,11 +87,9 @@ export class TaxJurisdictionRepository {
         this.taxJurisdictions = tables.taxJurisdictions;
     }
     async createJurisdiction(data) {
-        const result = await this.db.insert(this.taxJurisdictions).values(data).returning();
-        if (!result || !Array.isArray(result) || !result[0]) {
-            throw new Error('Failed to create tax jurisdiction');
-        }
-        return result[0];
+        const [created] = await this.db.insert(this.taxJurisdictions).values(data).returning();
+        invariant(created, 'the tax jurisdiction insert returned no row');
+        return created;
     }
     async findJurisdictionById(id) {
         const results = await this.db
@@ -127,29 +127,28 @@ export class TaxJurisdictionRepository {
         if (!jurisdiction)
             return [];
         const hierarchy = [jurisdiction];
+        // `parentId` is stored data an update can point anywhere: a chain that comes back to itself stops there
+        const seen = new Set([jurisdiction.id]);
         // Walk up the parent chain
         let current = jurisdiction;
-        const parentIdKey = 'parentId';
-        while (current && parentIdKey in current && current[parentIdKey]) {
-            const parentId = current[parentIdKey];
-            const parent = await this.findJurisdictionById(parentId);
+        while (current.parentId !== null && !seen.has(current.parentId)) {
+            const parent = await this.findJurisdictionById(current.parentId);
             if (!parent)
                 break;
+            seen.add(parent.id);
             hierarchy.unshift(parent); // Add to beginning
             current = parent;
         }
         return hierarchy;
     }
+    /** The updated row, or `TaxReferenceNotFound` when no jurisdiction has `id`. */
     async updateJurisdiction(id, data) {
-        const result = await this.db
+        const [updated] = await this.db
             .update(this.taxJurisdictions)
             .set({ ...data, updatedAt: now() })
             .where(eq(this.taxJurisdictions.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to update tax jurisdiction or jurisdiction not found');
-        }
-        return result[0];
+        return updated ?? TaxReferenceNotFound({ kind: 'jurisdiction', id });
     }
     async deleteJurisdiction(id) {
         await this.db.delete(this.taxJurisdictions).where(eq(this.taxJurisdictions.id, id));
@@ -166,15 +165,17 @@ export class TaxExemptionRepository {
         this.db = db;
         this.taxExemptions = tables.taxExemptions;
     }
+    /**
+     * The new row. One that names no customer, product code or jurisdiction would exempt every sale:
+     * `exemptionTargetSchema` refuses it with `InvalidInput`, and nothing is written.
+     */
     async createExemption(data) {
-        if (!data.customerId && !data.productCode && !data.jurisdictionId) {
-            throw new Error('A tax exemption needs a customer, a product code or a jurisdiction');
-        }
-        const result = await this.db.insert(this.taxExemptions).values(data).returning();
-        if (!result[0]) {
-            throw new Error('Failed to create tax exemption');
-        }
-        return result[0];
+        const target = parse(exemptionTargetSchema, data);
+        if (isFailure(target))
+            return target;
+        const [created] = await this.db.insert(this.taxExemptions).values(data).returning();
+        invariant(created, 'the tax exemption insert returned no row');
+        return created;
     }
     async findExemptionById(id) {
         const results = await this.db
@@ -249,19 +250,18 @@ export class TaxExemptionRepository {
             .where(and(eq(this.taxExemptions.status, 'active'), sql `${this.taxExemptions.validTo} IS NOT NULL`, sql `${this.taxExemptions.validTo} <= ${futureDate.toISOString()}`, sql `${this.taxExemptions.validTo} > NOW()`))
             .orderBy(this.taxExemptions.validTo);
     }
+    /** The updated row, or `TaxReferenceNotFound` when no exemption has `id`. */
     async updateExemption(id, data) {
-        const result = await this.db
+        const [updated] = await this.db
             .update(this.taxExemptions)
             .set({ ...data, updatedAt: now() })
             .where(eq(this.taxExemptions.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to update tax exemption or exemption not found');
-        }
-        return result[0];
+        return updated ?? TaxReferenceNotFound({ kind: 'exemption', id });
     }
+    /** The approved row, or `TaxReferenceNotFound` when no exemption has `id`. */
     async approveExemption(id, approvedBy) {
-        const result = await this.db
+        const [approved] = await this.db
             .update(this.taxExemptions)
             .set({
             status: 'active',
@@ -271,21 +271,16 @@ export class TaxExemptionRepository {
         })
             .where(eq(this.taxExemptions.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to approve tax exemption');
-        }
-        return result[0];
+        return approved ?? TaxReferenceNotFound({ kind: 'exemption', id });
     }
+    /** The revoked row, or `TaxReferenceNotFound` when no exemption has `id`. */
     async revokeExemption(id) {
-        const result = await this.db
+        const [revoked] = await this.db
             .update(this.taxExemptions)
             .set({ status: 'revoked', updatedAt: now() })
             .where(eq(this.taxExemptions.id, id))
             .returning();
-        if (!result[0]) {
-            throw new Error('Failed to revoke tax exemption');
-        }
-        return result[0];
+        return revoked ?? TaxReferenceNotFound({ kind: 'exemption', id });
     }
     async deleteExemption(id) {
         await this.db.delete(this.taxExemptions).where(eq(this.taxExemptions.id, id));
@@ -336,8 +331,7 @@ export class TaxAuditRepository {
     }
     async record(entry) {
         const [row] = await this.db.insert(this.taxAuditEntries).values(entry).returning();
-        if (!row)
-            throw new Error('Failed to record tax audit entry');
+        invariant(row, 'the tax audit insert returned no row');
         return row;
     }
     /** The entries about one entity, oldest first. */

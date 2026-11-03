@@ -1,4 +1,5 @@
 import type { Instant } from '@arki/date';
+import { MoneyBag } from '@arki/money/bag';
 import type { CoreWrites } from '../journal.js';
 import type { BasePaymentProvider } from '../providers/base-provider.js';
 import type { PaymentRepository } from '../repository.js';
@@ -34,7 +35,8 @@ export type RetryAnalytics = {
     averageRetryTime: number;
     retrySuccessByAttempt: Record<number, number>;
     commonFailureReasons: Record<string, number>;
-    revenueRecovered: number;
+    /** The stored amounts of the payments a retry recovered, each payment once, one balance per currency. */
+    revenueRecovered: MoneyBag;
 };
 /** The provider call a retry makes. A `BasePaymentProvider` fits. */
 type RetryProvider = Pick<BasePaymentProvider, 'confirmPayment'>;
@@ -51,12 +53,25 @@ export declare class PaymentRetryService {
     private retryAttempts;
     private strategies;
     constructor(paymentProvider: RetryProvider, paymentRepository: RetryReads, writes: CoreWrites, strategies?: RetryStrategy[]);
-    scheduleRetries(paymentId: PaymentId, failureReason: string): Promise<RetryAttempt[]>;
+    /**
+     * Schedule the retries of a failed subscription payment by the first strategy that fits it.
+     * Returns the scheduled attempts (none when no strategy fits), or a failure:
+     * `ReferenceNotFound` (payment or subscription) or `PaymentWithoutSubscription`.
+     */
+    scheduleRetries(paymentId: PaymentId, failureReason: string): Promise<RetryAttempt[] | import("@arki/failure").Failure<"payments.payment_without_subscription", {
+        paymentId: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription";
+        id: string;
+        missing: "provider_id" | "row";
+    }>>;
     processRetries(): Promise<void>;
+    /** Nothing, or the failure of a journal write; `attempt` then says `failed` with its message. */
     private executeRetry;
     private selectRetryStrategy;
     private calculateDelay;
     private isLastAttempt;
+    /** Nothing, or the failure of the write: a subscription that is not there. */
     private handleFinalFailure;
     cancelRetries(paymentId: PaymentId, excludeId?: string): Promise<void>;
     getRetryAttempts(paymentId: PaymentId): RetryAttempt[];

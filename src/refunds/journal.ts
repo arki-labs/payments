@@ -24,22 +24,27 @@
  */
 
 import type { Instant } from '@arki/date';
-import type { CommandRunner, JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
+import type { CommandRunner, EventDef, JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
+import type { SchemaOutput, StandardSchemaV1 } from '@arki/schema';
 import { userIdSchema } from '../core/user-id.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { z } from '@arki/contracts';
 import { fromDate } from '@arki/date';
-import { CommandError } from '@arki/journal';
+import { isFailure, orThrow } from '@arki/failure';
+import { CommandConflict, CommandInvalid, CommandNotFound } from '@arki/journal';
 import { Money } from '@arki/money';
 import { anyMoneySchema } from '@arki/money/zod';
 
 import type { CoreTables } from '../core/tables.js';
 import type { RefundsTables } from './tables.js';
 import type { Refund } from './types.js';
+import type { JournalWriteFailure } from '../core/journal/support.js';
 import { writtenRow } from '../core/journal/support.js';
 import { fromStoredNumber, moneyJsonSchema, toMinorColumn } from '../core/money.js';
 import { paymentIdSchema } from '../core/primitives.js';
+import { refundRejectionReasonSchema } from './contracts.js';
+import { RefundCurrencyMismatch } from './failures.js';
 import { createRefundId, refundIdSchema, refundReasonValues } from './primitives.js';
 
 type RefundRow = RefundsTables['refunds']['$inferSelect'];
@@ -72,7 +77,7 @@ export const rejectRefundInputSchema = z.object({
   refundId: refundIdSchema,
   rejectedBy: userIdSchema,
   /** The customer-facing why. A blank reason says nothing, so it is turned down. */
-  rejectionReason: z.string().trim().min(1),
+  rejectionReason: refundRejectionReasonSchema,
 });
 
 export const processRefundInputSchema = z.object({ refundId: refundIdSchema });
@@ -95,20 +100,74 @@ export type FailRefundInput = z.input<typeof failRefundInputSchema>;
 
 /**
  * What `RefundService` calls to change a refund. Each function runs one
- * command and returns the row as it is after the write.
+ * command and returns the row after the write, or the command's canonical
+ * schema, rule or transaction failure. An uncertain commit may already be durable.
  */
 export type RefundWrites = {
-  requestRefund(input: RequestRefundInput): Promise<Refund>;
-  approveRefund(input: ApproveRefundInput): Promise<Refund>;
-  rejectRefund(input: RejectRefundInput): Promise<Refund>;
-  processRefund(input: ProcessRefundInput): Promise<Refund>;
-  completeRefund(input: CompleteRefundInput): Promise<Refund>;
-  failRefund(input: FailRefundInput): Promise<Refund>;
+  requestRefund: (
+    input: RequestRefundInput,
+  ) => Promise<
+    Refund | JournalWriteFailure | CommandNotFound | CommandInvalid | ReturnType<typeof RefundCurrencyMismatch>
+  >;
+  approveRefund: (input: ApproveRefundInput) => Promise<Refund | JournalWriteFailure | CommandNotFound>;
+  rejectRefund: (input: RejectRefundInput) => Promise<Refund | JournalWriteFailure | CommandNotFound>;
+  processRefund: (input: ProcessRefundInput) => Promise<Refund | JournalWriteFailure | CommandNotFound>;
+  completeRefund: (input: CompleteRefundInput) => Promise<Refund | JournalWriteFailure | CommandNotFound>;
+  failRefund: (input: FailRefundInput) => Promise<Refund | JournalWriteFailure | CommandNotFound>;
 };
 
-function requireRefund(row: RefundRow | null, refundId: string): RefundRow {
+const refundRequest = {
+  paymentId: paymentIdSchema,
+  reason: reasonSchema,
+  customerNote: z.string().nullable(),
+  internalNotes: z.string().nullable(),
+  requestedBy: userIdSchema,
+  metadata: z.string().nullable(),
+};
+const refundRequestedSchema = z.object({
+  ...refundRequest,
+  originalAmount: z.number(),
+  refundAmount: z.number(),
+  currency: z.string(),
+});
+const refundRequestedV2Schema = z.object({
+  ...refundRequest,
+  originalAmount: moneyJsonSchema,
+  refundAmount: moneyJsonSchema,
+});
+const refundApprovedSchema = z.object({ approvedBy: userIdSchema, notes: z.string().nullable().optional() });
+const refundRejectedSchema = z.object({ rejectedBy: userIdSchema, rejectionReason: z.string() });
+const refundProcessedSchema = z.object({});
+const refundCompletedSchema = z.object({ providerRefundId: z.string(), providerResponse: z.string().nullable() });
+const refundFailedSchema = z.object({ errorMessage: z.string() });
+
+// The events have names (interfaces over `EventDef`), so the journal's types say `RefundApprovedEvent`
+// instead of the event's whole schema type, in declaration files and editor hovers alike.
+/** Before minor units: a refund was asked for, its amounts JS numbers of major units. Replay only. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundRequestedEvent extends EventDef<'RefundRequested', typeof refundRequestedSchema> {}
+/** A refund was asked for. It is `pending`. Both amounts are exact `Money` JSON in the refund's currency. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundRequestedV2Event extends EventDef<'RefundRequestedV2', typeof refundRequestedV2Schema> {}
+/** A person approved the refund. `notes` is optional: refunds approved before approval notes existed have events without it. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundApprovedEvent extends EventDef<'RefundApproved', typeof refundApprovedSchema> {}
+/** A person rejected the refund. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundRejectedEvent extends EventDef<'RefundRejected', typeof refundRejectedSchema> {}
+/** The refund was handed to the provider. The provider's refund id is not known yet. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundProcessedEvent extends EventDef<'RefundProcessed', typeof refundProcessedSchema> {}
+/** The provider refunded the money. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundCompletedEvent extends EventDef<'RefundCompleted', typeof refundCompletedSchema> {}
+/** The provider could not refund the money. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface RefundFailedEvent extends EventDef<'RefundFailed', typeof refundFailedSchema> {}
+
+function requireRefund(row: RefundRow | null, refundId: string): RefundRow | CommandNotFound {
   if (!row) {
-    throw new CommandError('NOT_FOUND', `Refund ${refundId} not found`);
+    return CommandNotFound({ detail: `Refund ${refundId} not found` });
   }
 
   return row;
@@ -119,39 +178,19 @@ function legacyMinor(amount: number, currency: string): number {
   return toMinorColumn(fromStoredNumber(Number(amount.toFixed(2)), currency));
 }
 
-export function createRefundsJournal<Meta extends z.ZodObject, Tx extends TransactionSource<Tx>, AppDb extends RootDb>(
-  j: JournalDefinitions<Meta, Tx, AppDb>,
-  tables: Pick<RefundsTables, 'refunds'> & Pick<CoreTables, 'payments'>,
-) {
+export function createRefundsJournal<
+  Meta extends StandardSchemaV1<unknown, Record<string, unknown>>,
+  Tx extends TransactionSource<Tx>,
+  AppDb extends RootDb,
+>(j: JournalDefinitions<Meta, Tx, AppDb>, tables: Pick<RefundsTables, 'refunds'> & Pick<CoreTables, 'payments'>) {
   const { payments } = tables;
-  const refundRequest = {
-    paymentId: paymentIdSchema,
-    reason: reasonSchema,
-    customerNote: z.string().nullable(),
-    internalNotes: z.string().nullable(),
-    requestedBy: userIdSchema,
-    metadata: z.string().nullable(),
-  };
-  /** Before minor units: a refund was asked for, its amounts JS numbers of major units. Replay only. */
-  const RefundRequested = j.event(
-    'RefundRequested',
-    z.object({ ...refundRequest, originalAmount: z.number(), refundAmount: z.number(), currency: z.string() }),
-  );
-  /** A refund was asked for. It is `pending`. Both amounts are exact `Money` JSON in the refund's currency. */
-  const RefundRequestedV2 = j.event(
-    'RefundRequestedV2',
-    z.object({ ...refundRequest, originalAmount: moneyJsonSchema, refundAmount: moneyJsonSchema }),
-  );
-  // `notes` is optional: refunds approved before approval notes existed have events without it
-  const RefundApproved = j.event('RefundApproved', z.object({ approvedBy: userIdSchema, notes: z.string().nullable().optional() }));
-  const RefundRejected = j.event('RefundRejected', z.object({ rejectedBy: userIdSchema, rejectionReason: z.string() }));
-  /** The refund was handed to the provider. The provider's refund id is not known yet. */
-  const RefundProcessed = j.event('RefundProcessed', z.object({}));
-  const RefundCompleted = j.event(
-    'RefundCompleted',
-    z.object({ providerRefundId: z.string(), providerResponse: z.string().nullable() }),
-  );
-  const RefundFailed = j.event('RefundFailed', z.object({ errorMessage: z.string() }));
+  const RefundRequested: RefundRequestedEvent = j.event('RefundRequested', refundRequestedSchema);
+  const RefundRequestedV2: RefundRequestedV2Event = j.event('RefundRequestedV2', refundRequestedV2Schema);
+  const RefundApproved: RefundApprovedEvent = j.event('RefundApproved', refundApprovedSchema);
+  const RefundRejected: RefundRejectedEvent = j.event('RefundRejected', refundRejectedSchema);
+  const RefundProcessed: RefundProcessedEvent = j.event('RefundProcessed', refundProcessedSchema);
+  const RefundCompleted: RefundCompletedEvent = j.event('RefundCompleted', refundCompletedSchema);
+  const RefundFailed: RefundFailedEvent = j.event('RefundFailed', refundFailedSchema);
 
   type RequestData = Pick<z.output<typeof RefundRequestedV2.schema>, keyof typeof refundRequest>;
   const requested = (
@@ -196,11 +235,13 @@ export function createRefundsJournal<Meta extends z.ZodObject, Tx extends Transa
         fromDate(e.recordedAt),
       ),
     )
+    // The `orThrow` reads fold an event this journal wrote itself, from `Money#toJSON()` after the command's
+    // schema accepted the amounts. A fold cannot return a failure; a refusal is a corrupt log (a bug), so it throws.
     .create(RefundRequestedV2, e =>
       requested(
         e.data,
-        toMinorColumn(Money.fromJSON(e.data.originalAmount)),
-        toMinorColumn(Money.fromJSON(e.data.refundAmount)),
+        toMinorColumn(orThrow(Money.fromJSON(e.data.originalAmount))),
+        toMinorColumn(orThrow(Money.fromJSON(e.data.refundAmount))),
         e.data.refundAmount.currency,
         fromDate(e.recordedAt),
       ),
@@ -238,153 +279,179 @@ export function createRefundsJournal<Meta extends z.ZodObject, Tx extends Transa
    * turns: the second counts the first. Without the lock both could read the same total and together
    * refund more than was paid. A refund that is pending, approved, processing or completed holds money.
    */
-  const requestRefund = j.command('requestRefund', requestRefundInputSchema, async (input, { tx, write }) => {
-    const refundId = input.refundId ?? createRefundId();
+  const requestRefund = j.command(
+    'requestRefund',
+    requestRefundInputSchema,
+    { writes: [RefundRequestedV2] },
+    async (input, { tx, write }) => {
+      const refundId = input.refundId ?? createRefundId();
+      if (isFailure(refundId)) return refundId;
 
-    const [payment] = await tx
-      .select({ amountMinor: payments.amountMinor, currency: payments.currency })
-      .from(payments)
-      .where(eq(payments.id, input.paymentId))
-      .for('update');
-    if (!payment) {
-      throw new CommandError('NOT_FOUND', `Payment ${input.paymentId} not found`);
-    }
+      const [payment] = await tx
+        .select({ amountMinor: payments.amountMinor, currency: payments.currency })
+        .from(payments)
+        .where(eq(payments.id, input.paymentId))
+        .for('update');
+      if (!payment) {
+        return CommandNotFound({ detail: `Payment ${input.paymentId} not found` });
+      }
+      // The same rule as `RefundService`: a refund pays back the payment's own money
+      const paymentCurrency = payment.currency.toUpperCase();
+      if (input.refundAmount.currency.code !== paymentCurrency) {
+        return RefundCurrencyMismatch({
+          paymentId: input.paymentId,
+          refundCurrency: input.refundAmount.currency.code,
+          paymentCurrency,
+        });
+      }
 
-    const refundMinor = toMinorColumn(input.refundAmount);
-    let exceedsPayment = false;
-    if (input.refundAmount.currency.code === payment.currency.toUpperCase()) {
+      const refundMinor = toMinorColumn(input.refundAmount);
       const [held] = await tx
         .select({ total: sql<string | null>`SUM(${tables.refunds.refundAmountMinor})` })
         .from(tables.refunds)
         .where(
           and(
             eq(tables.refunds.paymentId, input.paymentId),
-            eq(tables.refunds.currency, payment.currency.toUpperCase()),
+            eq(tables.refunds.currency, paymentCurrency),
             inArray(tables.refunds.status, ['pending', 'approved', 'processing', 'completed']),
           ),
         );
+      const exceedsPayment = Number(held?.total ?? 0) + refundMinor > payment.amountMinor;
 
-      exceedsPayment = Number(held?.total ?? 0) + refundMinor > payment.amountMinor;
-    }
+      return write(refund, refundId, row => {
+        if (row) {
+          return CommandConflict({ detail: `Refund ${refundId} already exists` });
+        }
 
-    return write(refund, refundId, row => {
-      if (row) {
-        throw new CommandError('CONFLICT', `Refund ${refundId} already exists`);
-      }
+        if (!input.refundAmount.hasSameCurrency(input.originalAmount)) {
+          return CommandInvalid({
+            detail: `Refund currency (${input.refundAmount.currency.code}) differs from the original currency (${input.originalAmount.currency.code})`,
+          });
+        }
 
-      if (!input.refundAmount.hasSameCurrency(input.originalAmount)) {
-        throw new CommandError(
-          'BAD_REQUEST',
-          `Refund currency (${input.refundAmount.currency.code}) differs from the original currency (${input.originalAmount.currency.code})`,
-        );
-      }
+        if (input.refundAmount.gt(input.originalAmount)) {
+          return CommandInvalid({
+            detail: `Refund amount (${input.refundAmount.toString()}) cannot exceed original amount (${input.originalAmount.toString()})`,
+          });
+        }
 
-      if (input.refundAmount.gt(input.originalAmount)) {
-        throw new CommandError(
-          'BAD_REQUEST',
-          `Refund amount (${input.refundAmount.toString()}) cannot exceed original amount (${input.originalAmount.toString()})`,
-        );
-      }
+        if (!input.refundAmount.isPositive()) {
+          return CommandInvalid({ detail: 'Refund amount must be positive' });
+        }
 
-      if (!input.refundAmount.isPositive()) {
-        throw new CommandError('BAD_REQUEST', 'Refund amount must be positive');
-      }
+        if (exceedsPayment) {
+          return CommandConflict({
+            detail: `Refund of ${input.refundAmount.toString()} exceeds what is left of the payment`,
+          });
+        }
 
-      if (exceedsPayment) {
-        throw new CommandError(
-          'CONFLICT',
-          `Refund of ${input.refundAmount.toString()} exceeds what is left of the payment`,
-        );
-      }
-
-      return [
-        RefundRequestedV2({
-          paymentId: input.paymentId,
-          originalAmount: input.originalAmount.toJSON(),
-          refundAmount: input.refundAmount.toJSON(),
-          reason: input.reason,
-          customerNote: input.customerNote ?? null,
-          internalNotes: input.internalNotes ?? null,
-          requestedBy: input.requestedBy,
-          metadata: input.metadata ?? null,
-        }),
-      ];
-    });
-  });
-
-  const approveRefund = j.command('approveRefund', approveRefundInputSchema, (input, { write }) =>
-    write(refund, input.refundId, row => {
-      const current = requireRefund(row, input.refundId);
-
-      if (current.status !== 'pending') {
-        throw new CommandError('CONFLICT', `Cannot approve refund with status ${current.status}`);
-      }
-
-      return [RefundApproved({ approvedBy: input.approvedBy, notes: input.notes ?? null })];
-    }),
+        return [
+          RefundRequestedV2({
+            paymentId: input.paymentId,
+            originalAmount: input.originalAmount.toJSON(),
+            refundAmount: input.refundAmount.toJSON(),
+            reason: input.reason,
+            customerNote: input.customerNote ?? null,
+            internalNotes: input.internalNotes ?? null,
+            requestedBy: input.requestedBy,
+            metadata: input.metadata ?? null,
+          }),
+        ];
+      });
+    },
   );
 
-  const rejectRefund = j.command('rejectRefund', rejectRefundInputSchema, (input, { write }) =>
-    write(refund, input.refundId, row => {
-      const current = requireRefund(row, input.refundId);
+  const approveRefund = j.command(
+    'approveRefund',
+    approveRefundInputSchema,
+    { writes: [RefundApproved] },
+    (input, { write }) =>
+      write(refund, input.refundId, row => {
+        const current = requireRefund(row, input.refundId);
+        if (isFailure(current)) return current;
 
-      if (current.status !== 'pending') {
-        throw new CommandError('CONFLICT', `Cannot reject refund with status ${current.status}`);
-      }
+        if (current.status !== 'pending') {
+          return CommandConflict({ detail: `Cannot approve refund with status ${current.status}` });
+        }
 
-      return [RefundRejected({ rejectedBy: input.rejectedBy, rejectionReason: input.rejectionReason })];
-    }),
+        return [RefundApproved({ approvedBy: input.approvedBy, notes: input.notes ?? null })];
+      }),
   );
 
-  const processRefund = j.command('processRefund', processRefundInputSchema, (input, { write }) =>
-    write(refund, input.refundId, row => {
-      const current = requireRefund(row, input.refundId);
+  const rejectRefund = j.command(
+    'rejectRefund',
+    rejectRefundInputSchema,
+    { writes: [RefundRejected] },
+    (input, { write }) =>
+      write(refund, input.refundId, row => {
+        const current = requireRefund(row, input.refundId);
+        if (isFailure(current)) return current;
 
-      if (current.status !== 'approved') {
-        throw new CommandError(
-          'CONFLICT',
-          `Cannot process refund with status ${current.status}. Must be approved first.`,
-        );
-      }
+        if (current.status !== 'pending') {
+          return CommandConflict({ detail: `Cannot reject refund with status ${current.status}` });
+        }
 
-      return [RefundProcessed({})];
-    }),
+        return [RefundRejected({ rejectedBy: input.rejectedBy, rejectionReason: input.rejectionReason })];
+      }),
   );
 
-  const completeRefund = j.command('completeRefund', completeRefundInputSchema, (input, { write }) =>
+  const processRefund = j.command(
+    'processRefund',
+    processRefundInputSchema,
+    { writes: [RefundProcessed] },
+    (input, { write }) =>
+      write(refund, input.refundId, row => {
+        const current = requireRefund(row, input.refundId);
+        if (isFailure(current)) return current;
+
+        if (current.status !== 'approved') {
+          return CommandConflict({
+            detail: `Cannot process refund with status ${current.status}. Must be approved first.`,
+          });
+        }
+
+        return [RefundProcessed({})];
+      }),
+  );
+
+  const completeRefund = j.command(
+    'completeRefund',
+    completeRefundInputSchema,
+    { writes: [RefundCompleted] },
+    (input, { write }) =>
+      write(refund, input.refundId, row => {
+        const current = requireRefund(row, input.refundId);
+        if (isFailure(current)) return current;
+
+        // The provider's webhook and the service both report the same refund: the second changes nothing
+        if (current.status === 'completed' && current.providerRefundId === input.providerRefundId) {
+          return [];
+        }
+
+        if (current.status !== 'processing') {
+          return CommandConflict({
+            detail: `Cannot complete refund with status ${current.status}. Must be processing first.`,
+          });
+        }
+
+        return [
+          RefundCompleted({
+            providerRefundId: input.providerRefundId,
+            providerResponse: input.providerResponse ?? null,
+          }),
+        ];
+      }),
+  );
+
+  const failRefund = j.command('failRefund', failRefundInputSchema, { writes: [RefundFailed] }, (input, { write }) =>
     write(refund, input.refundId, row => {
       const current = requireRefund(row, input.refundId);
-
-      // The provider's webhook and the service both report the same refund: the second changes nothing
-      if (current.status === 'completed' && current.providerRefundId === input.providerRefundId) {
-        return [];
-      }
+      if (isFailure(current)) return current;
 
       if (current.status !== 'processing') {
-        throw new CommandError(
-          'CONFLICT',
-          `Cannot complete refund with status ${current.status}. Must be processing first.`,
-        );
-      }
-
-      return [
-        RefundCompleted({
-          providerRefundId: input.providerRefundId,
-          providerResponse: input.providerResponse ?? null,
-        }),
-      ];
-    }),
-  );
-
-  const failRefund = j.command('failRefund', failRefundInputSchema, (input, { write }) =>
-    write(refund, input.refundId, row => {
-      const current = requireRefund(row, input.refundId);
-
-      if (current.status !== 'processing') {
-        throw new CommandError(
-          'CONFLICT',
-          `Cannot fail refund with status ${current.status}. Must be processing first.`,
-        );
+        return CommandConflict({
+          detail: `Cannot fail refund with status ${current.status}. Must be processing first.`,
+        });
       }
 
       return [RefundFailed({ errorMessage: input.errorMessage })];
@@ -398,7 +465,7 @@ export function createRefundsJournal<Meta extends z.ZodObject, Tx extends Transa
     events: { RefundRequested, RefundRequestedV2, RefundApproved, RefundRejected, RefundProcessed, RefundCompleted, RefundFailed },
     commands,
     /** `run` is the app's command runner: `context.runCommand` in a request, `ctx.run` inside a command. */
-    writes: (run: CommandRunner<z.output<Meta>, Tx>): RefundWrites => ({
+    writes: (run: CommandRunner<SchemaOutput<Meta>, Tx>): RefundWrites => ({
       requestRefund: input => writtenRow(run(commands.requestRefund, input), 'requestRefund'),
       approveRefund: input => writtenRow(run(commands.approveRefund, input), 'approveRefund'),
       rejectRefund: input => writtenRow(run(commands.rejectRefund, input), 'rejectRefund'),

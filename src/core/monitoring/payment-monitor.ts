@@ -1,7 +1,16 @@
 import type { Instant } from '@arki/date';
 import type { KV } from '@arki/kv';
 import type { Money } from '@arki/money';
-import { now } from '@arki/date';
+import { now, sub } from '@arki/date';
+import { getLogger } from '@arki/log';
+
+import type { PaymentRepository } from '../repository.js';
+import { observePayments } from '../telemetry.js';
+
+const logger = getLogger('arki:payments:monitor');
+
+/** Metrics older than this are dropped from memory. */
+const METRIC_RETENTION_MS = 60 * 60 * 1000;
 
 // AlertingService interface - to be implemented or imported from a shared location
 type AlertingService = {
@@ -53,27 +62,37 @@ type PaymentSystemHealth = {
   payments: {
     successRate: number;
     avgProcessingTime: number;
+    /** Subscriptions whose stored status is `active`. */
     activeSubscriptions: number;
   };
   webhooks: {
     avgProcessingTime: number;
     successRate: number;
   };
-  providers: Record<string, boolean>;
   lastUpdated: Instant;
 }
 
+/** The stored counts the monitor reads. A `PaymentRepository` fits. */
+type MonitorReads = Pick<PaymentRepository, 'getActiveSubscriptionCount' | 'countPaymentsCreatedBetween'>;
+
+/** How many past hours the payment volume of the last hour is compared with. */
+const VOLUME_HISTORY_HOURS = 24;
+
+/**
+ * Counts payment, webhook, subscription and refund outcomes in memory (the last hour) and in KV,
+ * and raises an alert when a rate crosses its threshold. It starts no timer: old metrics are
+ * dropped when a new one is recorded, so a monitor built per request leaves nothing running.
+ */
 export class PaymentMonitoringService {
   private metrics = new Map<string, MetricValue[]>();
   private alertThresholds = new Map<string, AlertThreshold>();
-  private metricsCollectionInterval?: NodeJS.Timeout;
 
   constructor(
     private kv: KV,
+    private reads: MonitorReads,
     private alertingService?: AlertingService,
   ) {
     this.initializeThresholds();
-    this.startMetricsCollection();
   }
 
   private initializeThresholds(): void {
@@ -100,13 +119,6 @@ export class PaymentMonitoringService {
       critical: 0.2, // 20% refund rate
       window: 24 * 60 * 60 * 1000, // Daily window
     });
-  }
-
-  private startMetricsCollection(): void {
-    // Collect metrics every minute
-    this.metricsCollectionInterval = setInterval(() => {
-      this.cleanupOldMetrics();
-    }, 60 * 1000);
   }
 
   async recordPaymentAttempt(result: PaymentResult): Promise<void> {
@@ -171,15 +183,19 @@ export class PaymentMonitoringService {
       labels,
     };
 
-    // Store in memory
-    if (!this.metrics.has(name)) {
-      this.metrics.set(name, []);
-    }
-    this.metrics.get(name)!.push(metric);
+    // Store in memory, dropping what is older than the retention window
+    this.cleanupOldMetrics();
+    const values = this.metrics.get(name) ?? [];
+    values.push(metric);
+    this.metrics.set(name, values);
 
-    // Also store in KV for persistence
+    // Also store in KV for persistence. A refused write keeps the in-memory metric: the
+    // rates still work, only the persisted copy is missing, so it is a WARN and not a failure.
     const key = `metrics:${name}:${Date.now()}`;
-    await this.kv.set(key, metric, 3600); // TTL 1 hour
+    const stored = await this.kv.set(key, metric, 3600); // TTL 1 hour
+    if (!stored) {
+      logger.warn('Metric {name} was not stored in KV; it is kept in memory only', { name });
+    }
   }
 
   private async getMetricValues(name: string, since: number): Promise<MetricValue[]> {
@@ -322,11 +338,17 @@ export class PaymentMonitoringService {
     const nowMs = Date.now();
     const oneHour = 60 * 60 * 1000;
 
-    // Detect unusual payment volumes
-    const currentHourVolume = await this.getHourlyVolume(nowMs);
-    const historicalAverage = await this.getHistoricalAverageVolume();
+    // Detect unusual payment volumes: the payments stored in the last hour against the hourly average
+    // of the hours before. With no history there is nothing to compare with.
+    const current = now();
+    const hourAgo = sub(current, { hours: 1 });
+    const [currentHourVolume, historyVolume] = await Promise.all([
+      this.reads.countPaymentsCreatedBetween(hourAgo, current),
+      this.reads.countPaymentsCreatedBetween(sub(hourAgo, { hours: VOLUME_HISTORY_HOURS }), hourAgo),
+    ]);
+    const historicalAverage = historyVolume / VOLUME_HISTORY_HOURS;
 
-    if (currentHourVolume > historicalAverage * 3) {
+    if (historicalAverage > 0 && currentHourVolume > historicalAverage * 3) {
       anomalies.push({
         type: 'unusual_volume',
         severity: 'warning',
@@ -378,14 +400,11 @@ export class PaymentMonitoringService {
       payments: {
         successRate: paymentSuccessRate,
         avgProcessingTime: avgPaymentProcessingTime,
-        activeSubscriptions: await this.getActiveSubscriptionCount(),
+        activeSubscriptions: await this.reads.getActiveSubscriptionCount(),
       },
       webhooks: {
         avgProcessingTime: avgWebhookProcessingTime,
         successRate: webhookSuccessRate,
-      },
-      providers: {
-        stripe: true, // Would check actual provider health
       },
       lastUpdated: now(),
     };
@@ -394,7 +413,7 @@ export class PaymentMonitoringService {
   private async triggerAlert(
     metricName: string,
     severity: 'warning' | 'critical',
-    data: Record<string, unknown>,
+    data: Record<string, number | string>,
   ): Promise<void> {
     const alert: PaymentAlert = {
       id: crypto.randomUUID(),
@@ -406,20 +425,27 @@ export class PaymentMonitoringService {
       status: 'active',
     };
 
-    // Store alert
-    await this.kv.set(`alert:${alert.id}`, alert, 86_400); // 24 hour TTL
+    // Store alert. A refused write still sends and logs the alert: losing the stored copy must not hide it.
+    const stored = await this.kv.set(`alert:${alert.id}`, alert, 86_400); // 24 hour TTL
+    if (!stored) {
+      logger.warn('Alert {alertId} ({metricName}) was not stored in KV', { alertId: alert.id, metricName });
+    }
 
     // Send notifications based on severity
-    if (this.alertingService) {
-      if (severity === 'critical') {
-        await this.alertingService.sendCriticalAlert(alert);
-      } else {
-        await this.alertingService.sendWarningAlert(alert);
-      }
+    const alertingService = this.alertingService;
+    if (alertingService) {
+      await observePayments('alert', { 'payments.alert': metricName, 'payments.severity': severity }, () =>
+        severity === 'critical' ? alertingService.sendCriticalAlert(alert) : alertingService.sendWarningAlert(alert),
+      );
     }
 
     // Log alert
-    console.error(`[PAYMENT ALERT] ${severity.toUpperCase()}: ${metricName}`, data);
+    const line = 'Payment alert {severity}: {metricName}';
+    if (severity === 'critical') {
+      logger.error(line, { severity, metricName, data });
+    } else {
+      logger.warn(line, { severity, metricName, data });
+    }
   }
 
   private async calculateSuccessRate(metric: string, start: number, _end: number): Promise<number> {
@@ -441,27 +467,8 @@ export class PaymentMonitoringService {
     return factors.reduce((sum, f) => sum + f, 0) / factors.length;
   }
 
-  private async getHourlyVolume(timestamp: number): Promise<number> {
-    const oneHour = 60 * 60 * 1000;
-    const values = await this.getMetricValues('payment_attempts_total', timestamp - oneHour);
-    return values.reduce((sum, v) => sum + v.value, 0);
-  }
-
-  private async getHistoricalAverageVolume(): Promise<number> {
-    // Would calculate from historical data
-    // For now, return a placeholder
-    return 100;
-  }
-
-  private async getActiveSubscriptionCount(): Promise<number> {
-    // Would get from database
-    // For now, return a placeholder
-    return 1000;
-  }
-
   private cleanupOldMetrics(): void {
-    const oneHour = 60 * 60 * 1000;
-    const cutoff = Date.now() - oneHour;
+    const cutoff = Date.now() - METRIC_RETENTION_MS;
 
     for (const [name, values] of this.metrics) {
       const filtered = values.filter(v => v.timestamp >= cutoff);
@@ -469,14 +476,9 @@ export class PaymentMonitoringService {
     }
   }
 
-  destroy(): void {
-    if (this.metricsCollectionInterval) {
-      clearInterval(this.metricsCollectionInterval);
-    }
-  }
 }
 
 // Factory function
-export function createPaymentMonitoringService(kv: KV, alertingService?: AlertingService) {
-  return new PaymentMonitoringService(kv, alertingService);
+export function createPaymentMonitoringService(kv: KV, reads: MonitorReads, alertingService?: AlertingService) {
+  return new PaymentMonitoringService(kv, reads, alertingService);
 }

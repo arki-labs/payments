@@ -124,7 +124,7 @@ export declare const updateCustomerInputSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const createSubscriptionInputSchema: z.ZodObject<{
     userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
-    planId: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    planId: z.ZodTemplateLiteral<`plan${string}`>;
     paymentMethodId: z.ZodOptional<z.ZodString>;
     trialPeriodDays: z.ZodOptional<z.ZodNumber>;
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
@@ -144,7 +144,7 @@ export declare const createSubscriptionInputSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const updateSubscriptionInputSchema: z.ZodObject<{
-    planId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>>>;
+    planId: z.ZodOptional<z.ZodTemplateLiteral<`plan${string}`>>;
     paymentMethodId: z.ZodOptional<z.ZodString>;
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     cancelAtPeriodEnd: z.ZodOptional<z.ZodBoolean>;
@@ -155,7 +155,7 @@ export declare const cancelSubscriptionInputSchema: z.ZodObject<{
     provideFeedback: z.ZodDefault<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const createPaymentInputSchema: z.ZodObject<{
-    subscriptionId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>>>;
+    subscriptionId: z.ZodOptional<z.ZodTemplateLiteral<`sub${string}`>>;
     userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
     amount: z.ZodPipe<z.ZodObject<{
         amount: z.ZodString;
@@ -235,7 +235,7 @@ export declare const subscriptionQuerySchema: z.ZodObject<{
         trialing: "trialing";
         unpaid: "unpaid";
     }>>;
-    planId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>>>;
+    planId: z.ZodOptional<z.ZodTemplateLiteral<`plan${string}`>>;
     userId: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
 }, z.core.$strip>;
 export declare const paymentQuerySchema: z.ZodObject<{
@@ -249,8 +249,8 @@ export declare const paymentQuerySchema: z.ZodObject<{
         requires_action: "requires_action";
         succeeded: "succeeded";
     }>>;
-    subscriptionId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>>>;
-    customerId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`cust_${string}`, string>>>;
+    subscriptionId: z.ZodOptional<z.ZodTemplateLiteral<`sub${string}`>>;
+    customerId: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
     userId: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
     startDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     endDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
@@ -400,7 +400,7 @@ export declare const paymentAnalyticsSchema: z.ZodObject<{
     }>>;
 }, z.core.$strip>;
 export declare const subscriptionPreviewSchema: z.ZodObject<{
-    planId: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    planId: z.ZodTemplateLiteral<`plan${string}`>;
     proration: z.ZodObject<{
         immediateTotal: z.ZodObject<{
             amount: z.ZodString;
@@ -460,11 +460,22 @@ export declare const paymentIntentResponseSchema: z.ZodObject<{
     clientSecret: z.ZodString;
     paymentIntentId: z.ZodString;
 }, z.core.$strip>;
+/**
+ * What a webhook route answers with a 2xx. `processed`: the event ran now. `queued`: it runs after the
+ * answer (`enableAsync`). `duplicate`: it already ran. `ignored`: an event type the handler does not
+ * handle. `refused`: a webhook failure whose `retryable` is false, by its `code`; the provider stops resending.
+ * A retryable outcome is never a 2xx: the route answers non-2xx, so the provider resends.
+ */
 export declare const webhookProcessingResultSchema: z.ZodObject<{
-    success: z.ZodBoolean;
-    webhookId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`wh_${string}`, string>>>;
-    error: z.ZodOptional<z.ZodString>;
-    retryable: z.ZodOptional<z.ZodBoolean>;
+    status: z.ZodEnum<{
+        duplicate: "duplicate";
+        ignored: "ignored";
+        processed: "processed";
+        queued: "queued";
+        refused: "refused";
+    }>;
+    webhookId: z.ZodOptional<z.ZodTemplateLiteral<`wh${string}`>>;
+    code: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const healthCheckSchema: z.ZodObject<{
     status: z.ZodEnum<{
@@ -483,10 +494,10 @@ export declare const subscriptionAccessSchema: z.ZodObject<{
     }>>>>;
 }, z.core.$strip>;
 export declare const getPlanInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    id: z.ZodTemplateLiteral<`plan${string}`>;
 }, z.core.$strip>;
 export declare const updatePlanWrapperInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    id: z.ZodTemplateLiteral<`plan${string}`>;
     data: z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
         description: z.ZodOptional<z.ZodOptional<z.ZodString>>;
@@ -510,10 +521,10 @@ export declare const updatePlanWrapperInputSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const deactivatePlanInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    id: z.ZodTemplateLiteral<`plan${string}`>;
 }, z.core.$strip>;
 export declare const subscriptionPreviewTaxInputSchema: z.ZodObject<{
-    planId: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    planId: z.ZodTemplateLiteral<`plan${string}`>;
     customerDetails: z.ZodObject<{
         address: z.ZodOptional<z.ZodObject<{
             line1: z.ZodOptional<z.ZodString>;
@@ -530,16 +541,16 @@ export declare const subscriptionPreviewTaxInputSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const updateSubscriptionWrapperInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `sub_${string}`, "out">, z.ZodTransform<`sub_${string}`, string & z.$brand<`sub_${string}`>>>;
+    id: z.ZodTemplateLiteral<`sub${string}`>;
     data: z.ZodObject<{
-        planId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>>>;
+        planId: z.ZodOptional<z.ZodTemplateLiteral<`plan${string}`>>;
         paymentMethodId: z.ZodOptional<z.ZodString>;
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
         cancelAtPeriodEnd: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const cancelSubscriptionWrapperInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `sub_${string}`, "out">, z.ZodTransform<`sub_${string}`, string & z.$brand<`sub_${string}`>>>;
+    id: z.ZodTemplateLiteral<`sub${string}`>;
     options: z.ZodOptional<z.ZodObject<{
         immediately: z.ZodDefault<z.ZodBoolean>;
         reason: z.ZodOptional<z.ZodString>;
@@ -547,8 +558,8 @@ export declare const cancelSubscriptionWrapperInputSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const paymentPreviewInputSchema: z.ZodObject<{
-    subscriptionId: z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `sub_${string}`, "out">, z.ZodTransform<`sub_${string}`, string & z.$brand<`sub_${string}`>>>;
-    planId: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    subscriptionId: z.ZodTemplateLiteral<`sub${string}`>;
+    planId: z.ZodTemplateLiteral<`plan${string}`>;
 }, z.core.$strip>;
 export declare const paymentPreviewTaxInputSchema: z.ZodObject<{
     amount: z.ZodPipe<z.ZodObject<{
@@ -576,7 +587,7 @@ export declare const paymentPreviewTaxInputSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const requestRefundInputSchema: z.ZodObject<{
-    paymentId: z.ZodPipe<z.ZodString, z.ZodTransform<`pay_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `pay_${string}`, "out">, z.ZodTransform<`pay_${string}`, string & z.$brand<`pay_${string}`>>>;
+    paymentId: z.ZodTemplateLiteral<`pay${string}`>;
     amount: z.ZodPipe<z.ZodObject<{
         amount: z.ZodString;
         currency: z.ZodString;
@@ -611,14 +622,14 @@ export declare const listRefundsInputSchema: z.ZodObject<{
     }>>;
 }, z.core.$strip>;
 export declare const getRefundInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
+    id: z.ZodTemplateLiteral<`rfnd${string}`>;
 }, z.core.$strip>;
 export declare const approveRefundInputSchema: z.ZodObject<{
-    refundId: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
+    refundId: z.ZodTemplateLiteral<`rfnd${string}`>;
     approvedBy: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
 }, z.core.$strip>;
 export declare const rejectRefundInputSchema: z.ZodObject<{
-    refundId: z.ZodPipe<z.ZodString, z.ZodTransform<`rfnd_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `rfnd_${string}`, "out">, z.ZodTransform<`rfnd_${string}`, string & z.$brand<`rfnd_${string}`>>>;
+    refundId: z.ZodTemplateLiteral<`rfnd${string}`>;
     rejectedBy: z.ZodOptional<z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
     reason: z.ZodString;
 }, z.core.$strip>;
@@ -627,8 +638,8 @@ export declare const getAnalyticsMetricsInputSchema: z.ZodObject<{
     endDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
 }, z.core.$strip>;
 export declare const prorationPreviewInputSchema: z.ZodObject<{
-    subscriptionId: z.ZodPipe<z.ZodString, z.ZodTransform<`sub_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `sub_${string}`, "out">, z.ZodTransform<`sub_${string}`, string & z.$brand<`sub_${string}`>>>;
-    newPlanId: z.ZodPipe<z.ZodString, z.ZodTransform<`plan_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `plan_${string}`, "out">, z.ZodTransform<`plan_${string}`, string & z.$brand<`plan_${string}`>>>;
+    subscriptionId: z.ZodTemplateLiteral<`sub${string}`>;
+    newPlanId: z.ZodTemplateLiteral<`plan${string}`>;
     changeDate: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     prorationMode: z.ZodDefault<z.ZodEnum<{
         immediate: "immediate";

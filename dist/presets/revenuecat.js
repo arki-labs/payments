@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { z } from '@arki/contracts';
+import { isFailure } from '@arki/failure';
 import { fromMillis, now, toMillis } from '@arki/date';
 /**
  * RevenueCat → our `subscriptions` table — the "native in" half of the cross-platform entitlement
@@ -14,6 +15,12 @@ import { fromMillis, now, toMillis } from '@arki/date';
  *  2. **No single subscription id** — RevenueCat identifies a subscription by `original_transaction_id`
  *     (stable across renewals), which we upsert on so renewals converge to one row.
  */
+/**
+ * A time in epoch milliseconds, up to the last millisecond of year 9999. `fromMillis` throws for a
+ * fraction or a time past Temporal's range, and the projector adds 100 years to a purchase time,
+ * so the schema refuses those before they reach it.
+ */
+const epochMillisSchema = z.number().int().min(0).max(253_402_300_799_999);
 /** Minimal validated shape of a RevenueCat webhook body (unknown keys are stripped). */
 export const revenueCatWebhookSchema = z.object({
     api_version: z.string().optional(),
@@ -28,8 +35,8 @@ export const revenueCatWebhookSchema = z.object({
         product_id: z.string().optional(),
         /** NORMAL | TRIAL | INTRO | PROMOTIONAL. */
         period_type: z.string().optional(),
-        purchased_at_ms: z.number().optional(),
-        expiration_at_ms: z.number().nullable().optional(),
+        purchased_at_ms: epochMillisSchema.optional(),
+        expiration_at_ms: epochMillisSchema.nullable().optional(),
         store: z.string().optional(),
         environment: z.string().optional(),
         transaction_id: z.string().optional(),
@@ -88,7 +95,7 @@ function mapRevenueCatStatus(type, periodType) {
 /** ~100 years out — a stand-in period end for a non-expiring (non-renewing/lifetime) entitlement. */
 const NON_EXPIRING_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 /**
- * Project a (validated) RevenueCat event onto our `subscriptions` table through the journal command
+ * Project a RevenueCat event, parsed with `revenueCatWebhookSchema`, onto our `subscriptions` table through the journal command
  * `syncSubscription`, which upserts by `original_transaction_id`. `customer` and `planId` are
  * resolved by the consuming app (the customer find-or-created from its user table, the plan mapped
  * from `product_id`).
@@ -96,6 +103,8 @@ const NON_EXPIRING_MS = 100 * 365 * 24 * 60 * 60 * 1000;
  * A repeated delivery writes no event. RevenueCat sends no cancel time, so `canceledAt` is "now" on
  * every `EXPIRATION`; the command keeps the time of the first one once the row is canceled.
  *
+ * A refused write is returned unchanged; the webhook route must reject it. An event not parsed by
+ * the schema can carry a time `fromMillis` refuses (a fraction, or past year 9999), which throws.
  * Returns `{ handled: false }` for event types that aren't a subscription-state change.
  */
 export async function projectRevenueCatEvent(params) {
@@ -111,7 +120,7 @@ export async function projectRevenueCatEvent(params) {
         ? fromMillis(event.expiration_at_ms)
         : fromMillis(toMillis(periodStart) + NON_EXPIRING_MS);
     const isTrial = event.period_type === 'TRIAL';
-    await writes.syncSubscription({
+    const result = await writes.syncSubscription({
         userId: customer.userId,
         customerId: customer.id,
         planId,
@@ -125,6 +134,8 @@ export async function projectRevenueCatEvent(params) {
         canceledAt: mapped.status === 'canceled' ? now() : null,
         metadata: { provider: 'revenuecat', store: event.store ?? null, environment: event.environment ?? null },
     });
+    if (isFailure(result))
+        return result;
     return { handled: true };
 }
 //# sourceMappingURL=revenuecat.js.map

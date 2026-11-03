@@ -1,9 +1,10 @@
-import { eq } from 'drizzle-orm';
+import { and, count, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 
-import type { UserId } from '../../core/user-id.js';
 import type { Instant } from '@arki/date';
-import { now } from '@arki/date';
+import { now, sub } from '@arki/date';
 import { getLogger } from '@arki/log';
+import { isFailure } from '@arki/failure';
+import type { MoneyFailure } from '@arki/money';
 import { Money } from '@arki/money';
 
 import type { PaymentRetryService } from '../../core/services/payment-retry-service.js';
@@ -11,13 +12,10 @@ import type { CoreTables } from '../../core/tables.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../../core/types.js';
 import type { DunningCampaignId } from '../primitives.js';
 import type { DunningTables } from '../tables.js';
-import type {
-  CampaignWithTrigger,
-  DunningCampaign as DunningCampaignRow,
-  DunningExecution as DunningExecutionRow,
-} from '../types.js';
+import type { DunningTickReport } from '../failures.js';
+import type { CampaignWithTrigger } from '../types.js';
 import type { CommunicationOrchestrationConfig } from './communication-service.js';
-import { type DunningDatabase } from '../repository.js';
+import type { DunningDatabase } from '../repository.js';
 import { createDunningCampaignService } from './campaign-service.js';
 import { createCommunicationOrchestrationService } from './communication-service.js';
 import { createCustomerSegmentationService } from './segmentation-service.js';
@@ -41,8 +39,8 @@ export type DunningTriggerEvent = {
  * Handles event-driven triggers and coordinates between payment retry and dunning
  */
 export type DunningIntegrationConfig = {
-  /** User ID used to attribute system-driven executions (e.g. dunning created automatically). */
-  systemUserId: UserId | string;
+  /** User ID (any text, usually a `usr_...` id) used to attribute system-driven executions. */
+  systemUserId: string;
   /** Channel-provider config forwarded to `createCommunicationOrchestrationService`. */
   communication?: CommunicationOrchestrationConfig;
 };
@@ -64,8 +62,11 @@ export class DunningIntegrationService {
   private campaignService;
   private communicationService;
   private segmentationService;
-  private readonly systemUserId: UserId | string;
+  private readonly systemUserId: string;
   private readonly dunningExecutions: DunningTables['dunningExecutions'];
+  private readonly dunningCampaigns: DunningTables['dunningCampaigns'];
+  private readonly dunningCommunications: DunningTables['dunningCommunications'];
+  private readonly customerSegments: DunningTables['customerSegments'];
 
   constructor(
     private readonly db: DunningDatabase,
@@ -76,6 +77,9 @@ export class DunningIntegrationService {
   ) {
     this.systemUserId = config.systemUserId;
     this.dunningExecutions = dunningTables.dunningExecutions;
+    this.dunningCampaigns = dunningTables.dunningCampaigns;
+    this.dunningCommunications = dunningTables.dunningCommunications;
+    this.customerSegments = dunningTables.customerSegments;
 
     this.communicationService = createCommunicationOrchestrationService(
       db,
@@ -90,6 +94,7 @@ export class DunningIntegrationService {
         dunningCampaignAnalytics: dunningTables.dunningCampaignAnalytics,
         dunningTemplates: dunningTables.dunningTemplates,
         dunningExecutions: dunningTables.dunningExecutions,
+        dunningCommunications: dunningTables.dunningCommunications,
         customerRiskProfiles: dunningTables.customerRiskProfiles,
         customers: coreTables.customers,
         payments: coreTables.payments,
@@ -106,7 +111,10 @@ export class DunningIntegrationService {
   }
 
   /**
-   * Handle payment failure events from the payment system
+   * Handle payment failure events from the payment system.
+   *
+   * A campaign whose stored spend range is not valid money (`@arki/money` refuses it) is skipped, and the
+   * first such failure is returned after the other campaigns have run, so one bad campaign stops no other.
    */
   async handlePaymentFailure(event: {
     paymentId: PaymentId;
@@ -116,7 +124,7 @@ export class DunningIntegrationService {
     amount: Money;
     failureCount: number;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     logger.info('Processing payment failure', {
       customerId: event.customerId,
       paymentId: event.paymentId,
@@ -126,14 +134,23 @@ export class DunningIntegrationService {
 
     // First, let the payment retry service handle technical retries (if available)
     if (this.paymentRetryService) {
-      await this.paymentRetryService.scheduleRetries(event.paymentId, event.failureReason);
+      const scheduled = await this.paymentRetryService.scheduleRetries(event.paymentId, event.failureReason);
+      if (isFailure(scheduled)) {
+        logger.warn('No payment retries scheduled for {paymentId}: {code}', {
+          paymentId: event.paymentId,
+          code: scheduled.code,
+          failure: scheduled,
+        });
+      }
     }
 
     // Update customer risk profile with payment failure
-    await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    const riskProfile = await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    if (isFailure(riskProfile)) return riskProfile;
 
     // Get customer segments to determine applicable campaigns
     const customerSegments = await this.segmentationService.getCustomerSegments(event.customerId);
+    if (isFailure(customerSegments)) return customerSegments;
 
     // Find active campaigns for payment failure trigger
     const applicableCampaigns = await this.campaignService.findActiveCampaignsForTrigger(
@@ -142,10 +159,18 @@ export class DunningIntegrationService {
     );
 
     // Execute applicable campaigns
+    let badRange: MoneyFailure | undefined;
     for (const campaign of applicableCampaigns) {
       try {
         // Check if campaign conditions are met
-        if (this.evaluateCampaignConditions(campaign, event)) {
+        const applies = this.evaluateCampaignConditions(campaign, event);
+        if (isFailure(applies)) {
+          logger.error('Campaign {campaignId} has a spend range that is not valid money: {code}', {
+            campaignId: campaign.id,
+            code: applies.code,
+          });
+          badRange ??= applies;
+        } else if (applies) {
           await this.executeCampaignForCustomer(campaign.id, event);
         }
       } catch (error) {
@@ -156,6 +181,7 @@ export class DunningIntegrationService {
         });
       }
     }
+    return badRange;
   }
 
   /**
@@ -167,7 +193,7 @@ export class DunningIntegrationService {
     oldStatus: string;
     newStatus: string;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     logger.info('Processing subscription status change', {
       customerId: event.customerId,
       subscriptionId: event.subscriptionId,
@@ -176,16 +202,13 @@ export class DunningIntegrationService {
     });
 
     // Update customer risk profile
-    await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    const riskProfile = await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    if (isFailure(riskProfile)) return riskProfile;
 
     // Handle different status transitions
-    if (event.newStatus === 'past_due') {
-      await this.handlePastDueSubscription(event);
-    } else if (event.newStatus === 'canceled') {
-      await this.handleSubscriptionCancellation(event);
-    } else if (event.newStatus === 'active' && event.oldStatus === 'past_due') {
-      await this.handleSubscriptionRecovery(event);
-    }
+    if (event.newStatus === 'past_due') return this.handlePastDueSubscription(event);
+    if (event.newStatus === 'canceled') return this.handleSubscriptionCancellation(event);
+    if (event.newStatus === 'active' && event.oldStatus === 'past_due') return this.handleSubscriptionRecovery(event);
   }
 
   /**
@@ -197,7 +220,7 @@ export class DunningIntegrationService {
     trialEndDate: Instant;
     daysUntilEnd: number;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     logger.info('Processing trial ending', {
       customerId: event.customerId,
       subscriptionId: event.subscriptionId,
@@ -206,6 +229,7 @@ export class DunningIntegrationService {
     });
 
     const customerSegments = await this.segmentationService.getCustomerSegments(event.customerId);
+    if (isFailure(customerSegments)) return customerSegments;
 
     const applicableCampaigns = await this.campaignService.findActiveCampaignsForTrigger(
       'trial_ending',
@@ -244,7 +268,7 @@ export class DunningIntegrationService {
     subscriptionId?: SubscriptionId;
     amount: Money;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     logger.info('Processing successful payment', {
       customerId: event.customerId,
       paymentId: event.paymentId,
@@ -252,7 +276,8 @@ export class DunningIntegrationService {
     });
 
     // Update customer risk profile with successful payment
-    await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    const riskProfile = await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    if (isFailure(riskProfile)) return riskProfile;
 
     // Stop any active dunning campaigns for this customer if configured
     await this.stopDunningCampaignsOnPaymentSuccess(event.customerId, event.subscriptionId);
@@ -270,7 +295,7 @@ export class DunningIntegrationService {
       triggerData?: Record<string, unknown>;
     },
   ): Promise<void> {
-    await this.campaignService.executeCampaign(
+    const executions = await this.campaignService.executeCampaign(
       {
         campaignId,
         dryRun: false,
@@ -281,6 +306,10 @@ export class DunningIntegrationService {
       },
       this.systemUserId, // System user for automated executions
     );
+    // The campaign was deleted, paused or emptied since it was listed as active: skip it, the others still run
+    if (isFailure(executions)) {
+      logger.warn('Campaign {campaignId} was not executed: {code}', { campaignId, code: executions.code });
+    }
   }
 
   /**
@@ -292,8 +321,9 @@ export class DunningIntegrationService {
     oldStatus: string;
     newStatus: string;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     const customerSegments = await this.segmentationService.getCustomerSegments(event.customerId);
+    if (isFailure(customerSegments)) return customerSegments;
 
     const applicableCampaigns = await this.campaignService.findActiveCampaignsForTrigger(
       'subscription_status',
@@ -333,10 +363,11 @@ export class DunningIntegrationService {
     oldStatus: string;
     newStatus: string;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     // Stop any active dunning campaigns for this subscription
     // Update customer risk profile to reflect cancellation
-    await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    const riskProfile = await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    if (isFailure(riskProfile)) return riskProfile;
 
     // Could trigger win-back campaigns (different from dunning)
     logger.info('Subscription canceled, stopping dunning campaigns', {
@@ -354,12 +385,13 @@ export class DunningIntegrationService {
     oldStatus: string;
     newStatus: string;
     metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<void | MoneyFailure> {
     // Stop any active dunning campaigns for this customer
     await this.stopDunningCampaignsOnPaymentSuccess(event.customerId, event.subscriptionId);
 
     // Update customer risk profile positively
-    await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    const riskProfile = await this.segmentationService.updateCustomerRiskProfile(event.customerId);
+    if (isFailure(riskProfile)) return riskProfile;
 
     logger.info('Subscription recovered', {
       subscriptionId: event.subscriptionId,
@@ -376,32 +408,23 @@ export class DunningIntegrationService {
     customerId: CustomerId,
     subscriptionId?: SubscriptionId,
   ): Promise<void> {
-    // Find active executions for this customer. Cast through unknown because
-    // the package-side `db.query.dunningExecutions` is typed against
-    // `AnyRelations` and loses the relations + filter operator info — the host
-    // contract guarantees the registered relations support `where` + `with`.
-    const dunningQuery = this.db.query as unknown as {
-      dunningExecutions: {
-        findMany: (config: {
-          where: Record<string, unknown>;
-          with?: Record<string, true | { with?: Record<string, true> }>;
-        }) => Promise<(DunningExecutionRow & { campaign?: DunningCampaignRow })[]>;
-      };
-    };
-    const activeExecutions = await dunningQuery.dunningExecutions.findMany({
-      where: {
-        customerId,
-        status: { in: ['scheduled', 'running'] },
-        ...(subscriptionId && { subscriptionId }),
-      },
-      with: {
-        campaign: true,
-      },
-    });
+    // The customer's active executions, each with the campaign that decides whether payment stops it
+    const executions = this.dunningExecutions;
+    const activeExecutions = await this.db
+      .select({ id: executions.id, campaignId: this.dunningCampaigns.id, settings: this.dunningCampaigns.settings })
+      .from(executions)
+      .innerJoin(this.dunningCampaigns, eq(executions.campaignId, this.dunningCampaigns.id))
+      .where(
+        and(
+          eq(executions.customerId, customerId),
+          inArray(executions.status, ['scheduled', 'running']),
+          subscriptionId ? eq(executions.subscriptionId, subscriptionId) : undefined,
+        ),
+      );
 
     for (const execution of activeExecutions) {
       // Check if the campaign is configured to stop on payment success
-      if (execution.campaign?.settings.stopOnPaymentSuccess) {
+      if (execution.settings.stopOnPaymentSuccess) {
         try {
           await this.db
             .update(this.dunningExecutions)
@@ -423,7 +446,7 @@ export class DunningIntegrationService {
           logger.info('Stopped dunning execution due to payment success', {
             executionId: execution.id,
             customerId: customerId,
-            campaignId: execution.campaign?.id,
+            campaignId: execution.campaignId,
           });
         } catch (error) {
           logger.error('Failed to stop dunning execution', {
@@ -450,7 +473,7 @@ export class DunningIntegrationService {
       failureCount: number;
       metadata?: Record<string, unknown>;
     },
-  ): boolean {
+  ): boolean | MoneyFailure {
     const conditions = campaign.trigger.conditions;
 
     // Check payment failure count condition
@@ -463,9 +486,16 @@ export class DunningIntegrationService {
     const range = campaign.trigger.filters?.totalSpent;
     const bound = range?.min ?? range?.max;
     if (range && bound) {
-      if (event.amount.currency.code !== Money.fromJSON(bound).currency.code) return false;
-      if (range.min && event.amount.lt(Money.fromJSON(range.min))) return false;
-      if (range.max && event.amount.gt(Money.fromJSON(range.max))) return false;
+      // The range is stored JSON: a bound `@arki/money` refuses is returned, not read as "does not apply"
+      const boundAmount = Money.fromJSON(bound);
+      if (isFailure(boundAmount)) return boundAmount;
+      const min = range.min ? Money.fromJSON(range.min) : undefined;
+      if (isFailure(min)) return min;
+      const max = range.max ? Money.fromJSON(range.max) : undefined;
+      if (isFailure(max)) return max;
+      if (event.amount.currency.code !== boundAmount.currency.code) return false;
+      if (min && event.amount.lt(min)) return false;
+      if (max && event.amount.gt(max)) return false;
     }
 
     // Add more condition evaluations as needed
@@ -497,70 +527,58 @@ export class DunningIntegrationService {
   }
 
   /**
-   * Process all scheduled dunning executions
+   * Run the scheduled executions that are due. Returns the tick report: each execution that failed is
+   * listed. A fault that stops the whole tick is logged and thrown.
    */
-  async processScheduledExecutions(): Promise<void> {
+  async processScheduledExecutions(): Promise<DunningTickReport> {
+    return this.tick('processScheduledExecutions', () => this.campaignService.processScheduledExecutions());
+  }
+
+  /** Send the pending communications. Returns the tick report: each communication not sent is listed. */
+  async processPendingCommunications(): Promise<DunningTickReport> {
+    return this.tick('processPendingCommunications', () => this.communicationService.processPendingCommunications());
+  }
+
+  /** Retry the failed executions that are due. Returns the tick report: each retry that failed again is listed. */
+  async retryFailedExecutions(): Promise<DunningTickReport> {
+    return this.tick('retryFailedExecutions', () => this.campaignService.retryFailedExecutions());
+  }
+
+  /** Recalculate customer risk profiles. Returns the tick report: each customer not updated is listed. */
+  async updateRiskProfiles(): Promise<DunningTickReport> {
+    return this.tick('updateRiskProfiles', () => this.segmentationService.bulkUpdateRiskProfiles());
+  }
+
+  /** Recount the auto-update segments. Returns the tick report: each segment not counted is listed. */
+  async processAutoUpdateSegments(): Promise<DunningTickReport> {
+    return this.tick('processAutoUpdateSegments', () => this.segmentationService.processAutoUpdateSegments());
+  }
+
+  /** Runs one scheduled tick: logs its item faults and a fault that stopped it, and hands both to the scheduler. */
+  private async tick(name: string, run: () => Promise<DunningTickReport>): Promise<DunningTickReport> {
     try {
-      await this.campaignService.processScheduledExecutions();
+      const report = await run();
+      if (report.failed.length > 0) {
+        logger.warn('Dunning tick {tick} finished with {failed} of {processed} items failed', {
+          tick: name,
+          failed: report.failed.length,
+          processed: report.processed,
+        });
+      }
+      return report;
     } catch (error) {
-      logger.error('Failed to process scheduled executions', {
+      logger.error('Dunning tick {tick} failed: {error}', {
+        tick: name,
         error: error instanceof Error ? error.message : String(error),
       });
+      throw error;
     }
   }
 
   /**
-   * Process pending communications
-   */
-  async processPendingCommunications(): Promise<void> {
-    try {
-      await this.communicationService.processPendingCommunications();
-    } catch (error) {
-      logger.error('Failed to process pending communications', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  /**
-   * Retry failed executions
-   */
-  async retryFailedExecutions(): Promise<void> {
-    try {
-      await this.campaignService.retryFailedExecutions();
-    } catch (error) {
-      logger.error('Failed to retry failed executions', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  /**
-   * Update customer risk profiles in bulk
-   */
-  async updateRiskProfiles(): Promise<void> {
-    try {
-      await this.segmentationService.bulkUpdateRiskProfiles();
-    } catch (error) {
-      logger.error('Failed to update risk profiles', { error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  /**
-   * Process auto-update segments
-   */
-  async processAutoUpdateSegments(): Promise<void> {
-    try {
-      await this.segmentationService.processAutoUpdateSegments();
-    } catch (error) {
-      logger.error('Failed to process auto-update segments', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  /**
-   * Integration health check
+   * Integration health check. Campaigns, communications and segmentation are healthy when their
+   * tables answer a read; `paymentRetry` says whether a `PaymentRetryService` was passed (it is
+   * optional, so it does not change `status`). `providers` is each registered channel's own check.
    */
   async healthCheck(): Promise<{
     status: 'healthy' | 'degraded' | 'unhealthy';
@@ -572,16 +590,21 @@ export class DunningIntegrationService {
     };
     providers: Record<string, boolean>;
   }> {
+    const [campaigns, communications, segmentation] = await Promise.all([
+      this.tableAnswers(this.dunningCampaigns),
+      this.tableAnswers(this.dunningCommunications),
+      this.tableAnswers(this.customerSegments),
+    ]);
     const services = {
-      campaigns: true, // Would check campaign service health
-      communications: true, // Would check communication service health
-      segmentation: true, // Would check segmentation service health
-      paymentRetry: true, // Would check payment retry service health
+      campaigns,
+      communications,
+      segmentation,
+      paymentRetry: this.paymentRetryService !== undefined,
     };
 
     const providers = await this.communicationService.validateProviders();
 
-    const allServicesHealthy = Object.values(services).every(Boolean);
+    const allServicesHealthy = campaigns && communications && segmentation;
     const allProvidersHealthy = Object.values(providers).every(Boolean);
 
     let status: 'healthy' | 'degraded' | 'unhealthy';
@@ -600,10 +623,30 @@ export class DunningIntegrationService {
     };
   }
 
+  /** True when one row (or none) can be read from the table; a failed read is logged and answers false. */
+  private async tableAnswers(
+    table:
+      | DunningTables['dunningCampaigns']
+      | DunningTables['dunningCommunications']
+      | DunningTables['customerSegments'],
+  ): Promise<boolean> {
+    try {
+      await this.db.select({ id: table.id }).from(table).limit(1);
+      return true;
+    } catch (error) {
+      logger.warn('Dunning health check could not read a table: {error}', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   /**
-   * Get integration metrics
+   * Execution and communication counts of the last `days` days, from the stored rows. `successRate`
+   * is completed executions over all executions (0 to 1); `averageProcessingTime` is the mean
+   * processing time, in milliseconds, recorded on completed executions.
    */
-  async getIntegrationMetrics(_days = 30): Promise<{
+  async getIntegrationMetrics(days = 30): Promise<{
     totalExecutions: number;
     successfulExecutions: number;
     failedExecutions: number;
@@ -611,15 +654,33 @@ export class DunningIntegrationService {
     successRate: number;
     averageProcessingTime: number;
   }> {
-    // This would query execution and communication tables for metrics
-    // Placeholder implementation
+    const since = sub(now(), { hours: days * 24 });
+    const executions = this.dunningExecutions;
+    const communications = this.dunningCommunications;
+
+    const [executionCounts] = await this.db
+      .select({
+        total: count(),
+        completed: count(sql`CASE WHEN ${executions.status} = 'completed' THEN 1 END`),
+        failed: count(sql`CASE WHEN ${executions.status} = 'failed' THEN 1 END`),
+        averageProcessingTime: sql<number>`COALESCE(AVG(CASE WHEN ${executions.status} = 'completed' THEN (${executions.result}->'performance'->>'processingTime')::numeric END), 0)`.mapWith(Number),
+      })
+      .from(executions)
+      .where(gte(executions.createdAt, since));
+    const [sentCounts] = await this.db
+      .select({ sent: count() })
+      .from(communications)
+      .where(and(isNotNull(communications.sentAt), gte(communications.sentAt, since)));
+
+    const totalExecutions = executionCounts?.total ?? 0;
+    const successfulExecutions = executionCounts?.completed ?? 0;
     return {
-      totalExecutions: 0,
-      successfulExecutions: 0,
-      failedExecutions: 0,
-      communicationsSent: 0,
-      successRate: 0,
-      averageProcessingTime: 0,
+      totalExecutions,
+      successfulExecutions,
+      failedExecutions: executionCounts?.failed ?? 0,
+      communicationsSent: sentCounts?.sent ?? 0,
+      successRate: totalExecutions > 0 ? successfulExecutions / totalExecutions : 0,
+      averageProcessingTime: executionCounts?.averageProcessingTime ?? 0,
     };
   }
 }

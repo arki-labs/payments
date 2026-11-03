@@ -2,19 +2,6 @@ import type { UserId } from '../core/user-id.js';
 import { z } from '@arki/contracts';
 import type { CoreWrites } from '../core/journal.js';
 import type { CustomerId, PlanId } from '../core/types.js';
-/**
- * RevenueCat → our `subscriptions` table — the "native in" half of the cross-platform entitlement
- * hub. A native StoreKit/Play purchase is made on-device via the RevenueCat SDK; RevenueCat then
- * POSTs a webhook here, which we project into the SAME `subscriptions` table the web Stripe rail
- * writes to, so `getEntitlement` stays one source of truth regardless of where the purchase happened.
- *
- * Two things differ from Stripe and shape this API:
- *  1. **No server checkout** creates a customer first, so the *consuming app's webhook route* must
- *     find-or-create the customer (it knows its own user table + email) and hand the resolved
- *     `{ customerId, userId }` here — this projector does not look it up.
- *  2. **No single subscription id** — RevenueCat identifies a subscription by `original_transaction_id`
- *     (stable across renewals), which we upsert on so renewals converge to one row.
- */
 /** Minimal validated shape of a RevenueCat webhook body (unknown keys are stripped). */
 export declare const revenueCatWebhookSchema: z.ZodObject<{
     api_version: z.ZodOptional<z.ZodString>;
@@ -44,7 +31,7 @@ export type RevenueCatEvent = RevenueCatWebhook['event'];
  */
 export declare function verifyRevenueCatAuth(authHeader: string | null, expectedSecret: string): boolean;
 /**
- * Project a (validated) RevenueCat event onto our `subscriptions` table through the journal command
+ * Project a RevenueCat event, parsed with `revenueCatWebhookSchema`, onto our `subscriptions` table through the journal command
  * `syncSubscription`, which upserts by `original_transaction_id`. `customer` and `planId` are
  * resolved by the consuming app (the customer find-or-created from its user table, the plan mapped
  * from `product_id`).
@@ -52,6 +39,8 @@ export declare function verifyRevenueCatAuth(authHeader: string | null, expected
  * A repeated delivery writes no event. RevenueCat sends no cancel time, so `canceledAt` is "now" on
  * every `EXPIRATION`; the command keeps the time of the first one once the row is canceled.
  *
+ * A refused write is returned unchanged; the webhook route must reject it. An event not parsed by
+ * the schema can carry a time `fromMillis` refuses (a fraction, or past year 9999), which throws.
  * Returns `{ handled: false }` for event types that aren't a subscription-state change.
  */
 export declare function projectRevenueCatEvent(params: {
@@ -63,7 +52,16 @@ export declare function projectRevenueCatEvent(params: {
         userId: UserId;
     };
     planId: PlanId;
-}): Promise<{
+}): Promise<import("@arki/failure").Failure<"contracts.random_source_unavailable", undefined> | import("@arki/failure").Failure<"db.transaction_cancelled", undefined> | import("@arki/failure").Failure<"db.transaction_commit_uncertain", undefined> | import("@arki/failure").Failure<"db.transaction_conflict", {
+    attempts: number;
+    sqlState: "40001" | "40P01";
+}> | import("@arki/failure").Failure<"db.transaction_defect", undefined> | import("@arki/failure").Failure<"db.transaction_rejected", {
+    sqlState: string;
+}> | import("@arki/failure").Failure<"db.transaction_unavailable", undefined> | import("@arki/failure").Failure<"failure.unexpected_defect", undefined> | import("@arki/failure").Failure<"journal.conflict", {
+    detail: string;
+}> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+    issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+}> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
     handled: boolean;
 }>;
 //# sourceMappingURL=revenuecat.d.ts.map

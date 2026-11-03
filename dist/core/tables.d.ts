@@ -5,7 +5,8 @@ export type CreateCoreTablesDeps = {
     /** Reference to the host app's `User.id` column — used for FK constraints. */
     userIdRef: () => PgColumn;
 };
-export declare function createCoreTables({ schema, userIdRef }: CreateCoreTablesDeps): {
+/** Builds the tables. `createCoreTables` returns them under the names declared below. */
+declare function buildCoreTables({ schema, userIdRef }: CreateCoreTablesDeps): {
     enums: {
         paymentProviderEnum: import("drizzle-orm/pg-core").PgEnum<["stripe", "paypal", "square", "razorpay", "revenuecat"]>;
         subscriptionStatusEnum: import("drizzle-orm/pg-core").PgEnum<["active", "canceled", "incomplete", "incomplete_expired", "past_due", "paused", "trialing", "unpaid"]>;
@@ -19,11 +20,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         name: "plans";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"plans", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `plan_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"plans", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `plan${string}`>>, {
                 name: string;
                 tableName: "plans";
                 dataType: "string";
-                data: `plan_${string}`;
+                data: `plan${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -244,11 +245,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         name: "customers";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"customers", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `cust_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"customers", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `cust${string}`>>, {
                 name: string;
                 tableName: "customers";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -409,11 +410,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         name: "subscriptions";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `sub_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `sub${string}`>>, {
                 name: string;
                 tableName: "subscriptions";
                 dataType: "string";
-                data: `sub_${string}`;
+                data: `sub${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -439,11 +440,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
-            planId: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `plan_${string}`>, {
+            planId: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `plan${string}`>, {
                 name: string;
                 tableName: "subscriptions";
                 dataType: "string";
-                data: `plan_${string}`;
+                data: `plan${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -454,11 +455,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
-            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>, {
+            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"subscriptions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>, {
                 name: string;
                 tableName: "subscriptions";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -684,11 +685,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         name: "payments";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `pay_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `pay${string}`>>, {
                 name: string;
                 tableName: "payments";
                 dataType: "string";
-                data: `pay_${string}`;
+                data: `pay${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -699,11 +700,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
-            subscriptionId: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub_${string}`>, {
+            subscriptionId: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub${string}`>, {
                 name: string;
                 tableName: "payments";
                 dataType: "string";
-                data: `sub_${string}`;
+                data: `sub${string}`;
                 driverParam: string;
                 notNull: false;
                 hasDefault: false;
@@ -729,11 +730,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
                 identity: undefined;
                 generated: undefined;
             }>;
-            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>, {
+            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"payments", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>, {
                 name: string;
                 tableName: "payments";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -999,11 +1000,11 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
         name: "webhook_events";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"webhook_events", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `wh_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"webhook_events", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `wh${string}`>>, {
                 name: string;
                 tableName: "webhook_events";
                 dataType: "string";
-                data: `wh_${string}`;
+                data: `wh${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -1216,37 +1217,69 @@ export declare function createCoreTables({ schema, userIdRef }: CreateCoreTables
     foreignKeys: {
         planForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `plan_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `plan${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `plan_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `plan${string}`>;
         };
         subscriptionForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `sub_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `sub${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub${string}`>;
         };
         paymentForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `pay_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `pay${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `pay_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `pay${string}`>;
         };
         customerForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `cust_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `cust${string}`>;
         };
     };
 };
-export type CoreTables = ReturnType<typeof createCoreTables>;
+type BuiltCoreTables = ReturnType<typeof buildCoreTables>;
+type PlansTableType = BuiltCoreTables['plans'];
+type CustomersTableType = BuiltCoreTables['customers'];
+type SubscriptionsTableType = BuiltCoreTables['subscriptions'];
+type PaymentsTableType = BuiltCoreTables['payments'];
+type WebhookEventsTableType = BuiltCoreTables['webhookEvents'];
+/** The `plans` table. */
+export interface PlansTable extends PlansTableType {
+}
+/** The `customers` table. */
+export interface CustomersTable extends CustomersTableType {
+}
+/** The `subscriptions` table. */
+export interface SubscriptionsTable extends SubscriptionsTableType {
+}
+/** The `payments` table. */
+export interface PaymentsTable extends PaymentsTableType {
+}
+/** The `webhook_events` table. */
+export interface WebhookEventsTable extends WebhookEventsTableType {
+}
+/** What `createCoreTables` returns: the enums, the five tables, and a foreign-key factory for four of them. */
+export type CoreTables = {
+    enums: BuiltCoreTables['enums'];
+    plans: PlansTable;
+    customers: CustomersTable;
+    subscriptions: SubscriptionsTable;
+    payments: PaymentsTable;
+    webhookEvents: WebhookEventsTable;
+    foreignKeys: BuiltCoreTables['foreignKeys'];
+};
+export declare function createCoreTables(deps: CreateCoreTablesDeps): CoreTables;
+export {};
 //# sourceMappingURL=tables.d.ts.map

@@ -1,64 +1,60 @@
-import { count, eq } from 'drizzle-orm';
+import { and, count, desc, eq, gte, lt, lte } from 'drizzle-orm';
 import { now } from '@arki/date';
+import { invariant } from '@arki/failure';
+import { CustomerConflict, WebhookEventNotFound } from './failures.js';
+import { ReferenceNotFound } from './providers/provider-error.js';
 import { claimWebhookEvent, reclaimWebhookEvent } from './webhook-claims.js';
 export class PaymentRepository {
     db;
-    q;
     plans;
     customers;
     subscriptions;
+    payments;
     webhookEvents;
     constructor(db, tables) {
         this.db = db;
-        // Single boundary cast: drizzle's RQB types are parameterised by the
-        // host's full relations graph (unknown at package level). The host
-        // contract guarantees the listed tables are registered with their
-        // relations — see `PaymentDatabase` doc.
-        this.q = db.query;
         this.plans = tables.plans;
         this.customers = tables.customers;
         this.subscriptions = tables.subscriptions;
+        this.payments = tables.payments;
         this.webhookEvents = tables.webhookEvents;
     }
     // Plan methods
     async createPlan(data) {
-        const result = await this.db.insert(this.plans).values(data).returning();
-        const row = result[0];
-        if (!row) {
-            throw new Error('Failed to create plan');
-        }
+        const [row] = await this.db.insert(this.plans).values(data).returning();
+        invariant(row, 'Failed to create plan');
         return row;
     }
     async findPlanById(id) {
-        const plan = await this.q.plans.findFirst({ where: { id } });
+        const [plan] = await this.db.select().from(this.plans).where(eq(this.plans.id, id)).limit(1);
         return plan ?? null;
     }
     async findPlansByTier(tier) {
-        return this.q.plans.findMany({
-            where: { tier, isActive: true },
-            orderBy: (t) => [t.priceMinor],
-        });
+        return this.db
+            .select()
+            .from(this.plans)
+            .where(and(eq(this.plans.tier, tier), eq(this.plans.isActive, true)))
+            .orderBy(this.plans.priceMinor);
     }
     /** Plans matching the filters left in `query`, cheapest first within a tier, one page. */
     async findPlans(query) {
         const { tier, interval, isActive, limit, offset } = query;
-        return this.q.plans.findMany({
-            where: {
-                ...(tier && { tier }),
-                ...(interval && { interval }),
-                ...(isActive !== undefined && { isActive }),
-            },
-            orderBy: (t) => [t.tier, t.priceMinor, t.id],
-            limit,
-            offset,
-        });
+        return this.db
+            .select()
+            .from(this.plans)
+            .where(and(tier ? eq(this.plans.tier, tier) : undefined, interval ? eq(this.plans.interval, interval) : undefined, isActive === undefined ? undefined : eq(this.plans.isActive, isActive)))
+            .orderBy(this.plans.tier, this.plans.priceMinor, this.plans.id)
+            .limit(limit)
+            .offset(offset);
     }
     async findActivePlans() {
-        return this.q.plans.findMany({
-            where: { isActive: true },
-            orderBy: (t) => [t.tier, t.priceMinor],
-        });
+        return this.db
+            .select()
+            .from(this.plans)
+            .where(eq(this.plans.isActive, true))
+            .orderBy(this.plans.tier, this.plans.priceMinor);
     }
+    /** The updated plan, or `ReferenceNotFound` when no plan has this id. */
     async updatePlan(id, data) {
         const result = await this.db
             .update(this.plans)
@@ -67,10 +63,11 @@ export class PaymentRepository {
             .returning();
         const row = result[0];
         if (!row) {
-            throw new Error('Failed to update plan or plan not found');
+            return ReferenceNotFound({ kind: 'plan', id, missing: 'row' });
         }
         return row;
     }
+    /** The deactivated plan, or `ReferenceNotFound` when no plan has this id. */
     async deactivatePlan(id) {
         const result = await this.db
             .update(this.plans)
@@ -79,7 +76,7 @@ export class PaymentRepository {
             .returning();
         const row = result[0];
         if (!row) {
-            throw new Error('Failed to deactivate plan or plan not found');
+            return ReferenceNotFound({ kind: 'plan', id, missing: 'row' });
         }
         return row;
     }
@@ -91,7 +88,7 @@ export class PaymentRepository {
      * A user has one customer, and a provider customer is one row. Two checkouts that race to
      * create the same customer both succeed: the second gets the row the first wrote. A customer
      * that clashes with a different one (another provider id for the user, or the provider id
-     * of another user) is an error, not a silent pick of either row.
+     * of another user) is returned as `CustomerConflict`, never a silent pick of either row.
      */
     async createCustomer(data) {
         const [created] = await this.db.insert(this.customers).values(data).onConflictDoNothing().returning();
@@ -102,24 +99,33 @@ export class PaymentRepository {
         if (existing && existing.providerCustomerId === data.providerCustomerId) {
             return existing;
         }
-        throw new Error(existing
-            ? `User ${data.userId} already has customer ${existing.id} with provider customer ${existing.providerCustomerId}`
-            : `Provider customer ${data.providerCustomerId} already belongs to another user`);
+        return CustomerConflict({
+            userId: data.userId,
+            providerCustomerId: data.providerCustomerId,
+            existingCustomerId: existing?.id ?? null,
+        });
     }
     async findCustomerById(id) {
-        const customer = await this.q.customers.findFirst({ where: { id } });
+        const [customer] = await this.db.select().from(this.customers).where(eq(this.customers.id, id)).limit(1);
         return customer ?? null;
     }
     async findCustomerByUserId(userId) {
-        const customer = await this.q.customers.findFirst({ where: { userId } });
+        const [customer] = await this.db
+            .select()
+            .from(this.customers)
+            .where(eq(this.customers.userId, userId))
+            .limit(1);
         return customer ?? null;
     }
     async findCustomerByProviderCustomerId(providerCustomerId, provider) {
-        const customer = await this.q.customers.findFirst({
-            where: { providerCustomerId, provider },
-        });
+        const [customer] = await this.db
+            .select()
+            .from(this.customers)
+            .where(and(eq(this.customers.providerCustomerId, providerCustomerId), eq(this.customers.provider, provider)))
+            .limit(1);
         return customer ?? null;
     }
+    /** The updated customer, or `ReferenceNotFound` when no customer has this id. */
     async updateCustomer(id, data) {
         const result = await this.db
             .update(this.customers)
@@ -128,7 +134,7 @@ export class PaymentRepository {
             .returning();
         const row = result[0];
         if (!row) {
-            throw new Error('Failed to update customer or customer not found');
+            return ReferenceNotFound({ kind: 'customer', id, missing: 'row' });
         }
         return row;
     }
@@ -137,69 +143,49 @@ export class PaymentRepository {
     }
     // Subscription methods
     async findSubscriptionById(id) {
-        const subscription = await this.q.subscriptions.findFirst({
-            where: { id },
-            with: { plan: true, customer: true },
-        });
-        if (!subscription)
-            return null;
-        const row = subscription;
-        return { ...row, plan: row.plan, customer: row.customer };
+        const [subscription] = await this.readSubscriptions({ where: eq(this.subscriptions.id, id), limit: 1 });
+        return subscription ?? null;
     }
     async findSubscriptionsByUserId(userId) {
-        return this.q.subscriptions.findMany({
-            where: { userId },
-            with: { plan: true, customer: true },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
+        return this.readSubscriptions({
+            where: eq(this.subscriptions.userId, userId),
+            orderBy: [desc(this.subscriptions.createdAt)],
         });
     }
     /** Subscriptions matching the filters left in `query`, newest first, one page. */
     async findSubscriptions(query) {
         const { status, planId, userId, limit, offset } = query;
-        return this.q.subscriptions.findMany({
-            where: {
-                ...(status && { status }),
-                ...(planId && { planId }),
-                ...(userId && { userId }),
-            },
-            with: { plan: true, customer: true },
-            orderBy: (t, { desc }) => [desc(t.createdAt), t.id],
+        return this.readSubscriptions({
+            where: and(status ? eq(this.subscriptions.status, status) : undefined, planId ? eq(this.subscriptions.planId, planId) : undefined, userId ? eq(this.subscriptions.userId, userId) : undefined),
+            orderBy: [desc(this.subscriptions.createdAt), this.subscriptions.id],
             limit,
             offset,
         });
     }
     async findActiveSubscriptionByUserId(userId) {
-        const subscription = await this.q.subscriptions.findFirst({
-            where: { userId, status: 'active' },
-            with: { plan: true, customer: true },
+        const [subscription] = await this.readSubscriptions({
+            where: and(eq(this.subscriptions.userId, userId), eq(this.subscriptions.status, 'active')),
+            limit: 1,
         });
-        if (!subscription)
-            return null;
-        const row = subscription;
-        return { ...row, plan: row.plan, customer: row.customer };
+        return subscription ?? null;
     }
     async findSubscriptionByProviderSubscriptionId(providerSubscriptionId) {
-        const subscription = await this.q.subscriptions.findFirst({
-            where: { providerSubscriptionId },
-            with: { plan: true, customer: true },
+        const [subscription] = await this.readSubscriptions({
+            where: eq(this.subscriptions.providerSubscriptionId, providerSubscriptionId),
+            limit: 1,
         });
         return subscription ?? null;
     }
     async findSubscriptionsByStatus(status) {
-        return this.q.subscriptions.findMany({
-            where: { status },
-            with: { plan: true, customer: true },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
+        return this.readSubscriptions({
+            where: eq(this.subscriptions.status, status),
+            orderBy: [desc(this.subscriptions.createdAt)],
         });
     }
     async findSubscriptionsEndingInRange(startDate, endDate) {
-        return this.q.subscriptions.findMany({
-            where: {
-                currentPeriodEnd: { gte: startDate, lte: endDate },
-                status: 'active',
-            },
-            with: { plan: true, customer: true },
-            orderBy: (t) => [t.currentPeriodEnd],
+        return this.readSubscriptions({
+            where: and(gte(this.subscriptions.currentPeriodEnd, startDate), lte(this.subscriptions.currentPeriodEnd, endDate), eq(this.subscriptions.status, 'active')),
+            orderBy: [this.subscriptions.currentPeriodEnd],
         });
     }
     async getSubscription(id) {
@@ -207,89 +193,93 @@ export class PaymentRepository {
     }
     // Payment methods
     async findPaymentById(id) {
-        const payment = await this.q.payments.findFirst({
-            where: { id },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
-        });
+        const [payment] = await this.readPayments({ where: eq(this.payments.id, id), limit: 1 });
         return payment ?? null;
     }
     async findPaymentsByUserId(userId, limit = 50) {
-        return this.q.payments.findMany({
-            where: { userId },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
+        return this.readPayments({
+            where: eq(this.payments.userId, userId),
+            orderBy: [desc(this.payments.createdAt)],
             limit,
         });
     }
     /** Payments matching the filters left in `query`, newest first, one page. `startDate` and `endDate` bound `createdAt`, both inclusive. */
     async findPayments(query) {
         const { status, subscriptionId, customerId, userId, startDate, endDate, limit, offset } = query;
-        const createdAt = startDate || endDate
-            ? {
-                ...(startDate && { gte: startDate }),
-                ...(endDate && { lte: endDate }),
-            }
-            : undefined;
-        return this.q.payments.findMany({
-            where: {
-                ...(status && { status }),
-                ...(subscriptionId && { subscriptionId }),
-                ...(customerId && { customerId }),
-                ...(userId && { userId }),
-                ...(createdAt && { createdAt }),
-            },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
-            orderBy: (t, { desc }) => [desc(t.createdAt), t.id],
+        return this.readPayments({
+            where: and(status ? eq(this.payments.status, status) : undefined, subscriptionId ? eq(this.payments.subscriptionId, subscriptionId) : undefined, customerId ? eq(this.payments.customerId, customerId) : undefined, userId ? eq(this.payments.userId, userId) : undefined, startDate ? gte(this.payments.createdAt, startDate) : undefined, endDate ? lte(this.payments.createdAt, endDate) : undefined),
+            orderBy: [desc(this.payments.createdAt), this.payments.id],
             limit,
             offset,
         });
     }
     async findPaymentsBySubscriptionId(subscriptionId) {
-        return this.q.payments.findMany({
-            where: { subscriptionId },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
+        return this.readPayments({
+            where: eq(this.payments.subscriptionId, subscriptionId),
+            orderBy: [desc(this.payments.createdAt)],
         });
     }
     async findPaymentByProviderPaymentId(providerPaymentId) {
-        const payment = await this.q.payments.findFirst({
-            where: { providerPaymentId },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
+        const [payment] = await this.readPayments({
+            where: eq(this.payments.providerPaymentId, providerPaymentId),
+            limit: 1,
         });
         return payment ?? null;
     }
     async findPaymentsByStatus(status) {
-        return this.q.payments.findMany({
-            where: { status },
-            with: {
-                subscription: { with: { plan: true } },
-                customer: true,
-            },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
+        return this.readPayments({
+            where: eq(this.payments.status, status),
+            orderBy: [desc(this.payments.createdAt)],
         });
+    }
+    /**
+     * Subscriptions with their plan and customer. Both foreign keys are required, so both joins
+     * are inner joins. `limit`, `offset` and `orderBy` are optional parts of one query.
+     */
+    async readSubscriptions(options) {
+        const { where, orderBy = [], limit, offset } = options;
+        const query = this.db
+            .select({ subscription: this.subscriptions, plan: this.plans, customer: this.customers })
+            .from(this.subscriptions)
+            .innerJoin(this.plans, eq(this.subscriptions.planId, this.plans.id))
+            .innerJoin(this.customers, eq(this.subscriptions.customerId, this.customers.id))
+            .where(where)
+            .orderBy(...orderBy)
+            .$dynamic();
+        const rows = await (limit === undefined ? query : query.limit(limit).offset(offset ?? 0));
+        return rows.map(({ subscription, plan, customer }) => ({ ...subscription, plan, customer }));
+    }
+    /**
+     * Payments with their customer and, when the payment has a subscription, that subscription
+     * with its plan. A payment without a subscription has no `subscription` field.
+     */
+    async readPayments(options) {
+        const { where, orderBy = [], limit, offset } = options;
+        const query = this.db
+            .select({
+            payment: this.payments,
+            subscription: this.subscriptions,
+            plan: this.plans,
+            customer: this.customers,
+        })
+            .from(this.payments)
+            .leftJoin(this.subscriptions, eq(this.payments.subscriptionId, this.subscriptions.id))
+            .leftJoin(this.plans, eq(this.subscriptions.planId, this.plans.id))
+            .innerJoin(this.customers, eq(this.payments.customerId, this.customers.id))
+            .where(where)
+            .orderBy(...orderBy)
+            .$dynamic();
+        const rows = await (limit === undefined ? query : query.limit(limit).offset(offset ?? 0));
+        return rows.map(({ payment, subscription, plan, customer }) => ({
+            ...payment,
+            subscription: subscription ? { ...subscription, plan: plan ?? undefined } : undefined,
+            customer,
+        }));
     }
     // Webhook event methods
     async createWebhookEvent(data) {
-        const result = await this.db.insert(this.webhookEvents).values(data).returning();
-        const row = result[0];
-        if (!row) {
-            throw new Error('Failed to create webhook event');
-        }
+        const [row] = await this.db.insert(this.webhookEvents).values(data).returning();
+        invariant(row, 'Failed to create webhook event');
         return row;
     }
     /** Insert the event, or return the row that holds its id. See `claimWebhookEvent` in `webhook-claims.ts`. */
@@ -301,28 +291,37 @@ export class PaymentRepository {
         return reclaimWebhookEvent(this.db, this.webhookEvents, id, seenAttempts, leaseCutoff);
     }
     async findWebhookEventById(id) {
-        const webhookEvent = await this.q.webhookEvents.findFirst({ where: { id } });
+        const [webhookEvent] = await this.db
+            .select()
+            .from(this.webhookEvents)
+            .where(eq(this.webhookEvents.id, id))
+            .limit(1);
         return webhookEvent ?? null;
     }
     async findWebhookEventByProviderEventId(providerEventId, provider) {
-        const webhookEvent = await this.q.webhookEvents.findFirst({
-            where: { providerEventId, provider },
-        });
+        const [webhookEvent] = await this.db
+            .select()
+            .from(this.webhookEvents)
+            .where(and(eq(this.webhookEvents.providerEventId, providerEventId), eq(this.webhookEvents.provider, provider)))
+            .limit(1);
         return webhookEvent ?? null;
     }
     async findUnprocessedWebhookEvents(limit = 100) {
-        return this.q.webhookEvents.findMany({
-            where: { processed: false },
-            orderBy: (t) => [t.createdAt],
-            limit,
-        });
+        return this.db
+            .select()
+            .from(this.webhookEvents)
+            .where(eq(this.webhookEvents.processed, false))
+            .orderBy(this.webhookEvents.createdAt)
+            .limit(limit);
     }
     async findWebhookEventsByType(eventType) {
-        return this.q.webhookEvents.findMany({
-            where: { eventType },
-            orderBy: (t, { desc }) => [desc(t.createdAt)],
-        });
+        return this.db
+            .select()
+            .from(this.webhookEvents)
+            .where(eq(this.webhookEvents.eventType, eventType))
+            .orderBy(desc(this.webhookEvents.createdAt));
     }
+    /** The updated event, or `WebhookEventNotFound` when no event has this id. */
     async updateWebhookEvent(id, data) {
         const result = await this.db
             .update(this.webhookEvents)
@@ -331,10 +330,11 @@ export class PaymentRepository {
             .returning();
         const row = result[0];
         if (!row) {
-            throw new Error('Failed to update webhook event or webhook event not found');
+            return WebhookEventNotFound({ webhookId: id });
         }
         return row;
     }
+    /** The processed event, or `WebhookEventNotFound` when no event has this id. */
     async markWebhookEventAsProcessed(id) {
         const result = await this.db
             .update(this.webhookEvents)
@@ -347,14 +347,15 @@ export class PaymentRepository {
             .returning();
         const row = result[0];
         if (!row) {
-            throw new Error('Failed to mark webhook event as processed or webhook event not found');
+            return WebhookEventNotFound({ webhookId: id });
         }
         return row;
     }
+    /** The event with one more attempt, or `WebhookEventNotFound` when no event has this id. */
     async incrementWebhookEventAttempts(id, errorMessage) {
         const currentEvent = await this.findWebhookEventById(id);
         if (!currentEvent) {
-            throw new Error('Webhook event not found');
+            return WebhookEventNotFound({ webhookId: id });
         }
         const result = await this.db
             .update(this.webhookEvents)
@@ -367,29 +368,33 @@ export class PaymentRepository {
             .where(eq(this.webhookEvents.id, id))
             .returning();
         const row = result[0];
+        // The row was read above: an update that matches nothing means it was deleted in between
         if (!row) {
-            throw new Error('Failed to increment webhook event attempts');
+            return WebhookEventNotFound({ webhookId: id });
         }
         return row;
     }
     // Analytics and reporting methods
     async getSubscriptionStats(startDate, endDate) {
-        const createdAt = startDate || endDate
-            ? { ...(startDate && { gte: startDate }), ...(endDate && { lte: endDate }) }
-            : undefined;
-        return this.q.subscriptions.findMany({
-            where: createdAt ? { createdAt } : undefined,
-            with: { plan: true },
-        });
+        const rows = await this.db
+            .select({ subscription: this.subscriptions, plan: this.plans })
+            .from(this.subscriptions)
+            .innerJoin(this.plans, eq(this.subscriptions.planId, this.plans.id))
+            .where(and(startDate ? gte(this.subscriptions.createdAt, startDate) : undefined, endDate ? lte(this.subscriptions.createdAt, endDate) : undefined));
+        return rows.map(({ subscription, plan }) => ({ ...subscription, plan }));
     }
     async getPaymentStats(startDate, endDate) {
-        const createdAt = startDate || endDate
-            ? { ...(startDate && { gte: startDate }), ...(endDate && { lte: endDate }) }
-            : undefined;
-        return this.q.payments.findMany({
-            where: createdAt ? { createdAt } : undefined,
-            with: { subscription: true },
-        });
+        // The plan is loaded too: `getSubscriptionAnalytics` splits revenue by its interval.
+        const rows = await this.db
+            .select({ payment: this.payments, subscription: this.subscriptions, plan: this.plans })
+            .from(this.payments)
+            .leftJoin(this.subscriptions, eq(this.payments.subscriptionId, this.subscriptions.id))
+            .leftJoin(this.plans, eq(this.subscriptions.planId, this.plans.id))
+            .where(and(startDate ? gte(this.payments.createdAt, startDate) : undefined, endDate ? lte(this.payments.createdAt, endDate) : undefined));
+        return rows.map(({ payment, subscription, plan }) => ({
+            ...payment,
+            subscription: subscription ? { ...subscription, plan: plan ?? undefined } : undefined,
+        }));
     }
     async getCustomerCount() {
         const [row] = await this.db.select({ total: count() }).from(this.customers);
@@ -400,6 +405,14 @@ export class PaymentRepository {
             .select({ total: count() })
             .from(this.subscriptions)
             .where(eq(this.subscriptions.status, 'active'));
+        return row?.total ?? 0;
+    }
+    /** How many payments were created from `start` (included) to `end` (excluded). */
+    async countPaymentsCreatedBetween(start, end) {
+        const [row] = await this.db
+            .select({ total: count() })
+            .from(this.payments)
+            .where(and(gte(this.payments.createdAt, start), lt(this.payments.createdAt, end)));
         return row?.total ?? 0;
     }
 }

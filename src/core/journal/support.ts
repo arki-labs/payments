@@ -6,7 +6,12 @@
  */
 
 import type { Instant } from '@arki/date';
+import type { IdGenerationFailure } from '@arki/contracts';
+import type { Failure, SchemaFailure } from '@arki/failure';
+import type { CommandFailure } from '@arki/journal';
 import { instant } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
+import { is, recordSchema } from '@arki/schema';
 
 /** Event data is stored as JSON, so a time travels as an ISO string. */
 export function toIso(value: Instant): string {
@@ -45,10 +50,6 @@ export function storedReal(value: number): number {
   return stored;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /**
  * Deep equality for JSON values. Key order does not matter: a `jsonb` column
  * returns object keys in its own order. A key holding `undefined` equals a
@@ -63,7 +64,7 @@ export function sameJson(left: unknown, right: unknown): boolean {
     return left.length === right.length && left.every((item, index) => sameJson(item, right[index]));
   }
 
-  if (isPlainObject(left) && isPlainObject(right)) {
+  if (is(left, recordSchema) && is(right, recordSchema)) {
     const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
 
     return [...keys].every(key => sameJson(left[key], right[key]));
@@ -73,18 +74,33 @@ export function sameJson(left: unknown, right: unknown): boolean {
 }
 
 /**
- * The row a command hands back to a service. `version` is a storage detail of
- * the journal, so it never leaves the package's write functions.
+ * What a write function returns besides the row and its command's own refusals: the
+ * command runner's failures (`CommandFailure`), a failed id and a schema failure.
  */
-export async function writtenRow<Row extends { version: number }>(
+export type JournalWriteFailure = CommandFailure | IdGenerationFailure | SchemaFailure;
+
+/**
+ * The row a command hands back to a service, or the failure the command
+ * returned when a rule said no. `version` is a storage detail of the journal,
+ * so it never leaves the package's write functions.
+ */
+export function writtenRow<Row extends { version: number }>(
   result: Promise<{ readonly row: Row | null }>,
   what: string,
-): Promise<Omit<Row, 'version'>> {
-  const { row } = await result;
+): Promise<Omit<Row, 'version'>>;
+export function writtenRow<Row extends { version: number }, Refusal extends Failure>(
+  result: Promise<{ readonly row: Row | null } | Refusal>,
+  what: string,
+): Promise<Omit<Row, 'version'> | Refusal>;
+export async function writtenRow(
+  result: Promise<{ readonly row: { version: number } | null } | Failure>,
+  what: string,
+): Promise<object> {
+  const written = await result;
+  if (isFailure(written)) return written;
 
-  if (!row) {
-    throw new Error(`[@arki/payments] ${what}: the journal returned no row`);
-  }
+  const { row } = written;
+  invariant(row, () => `[@arki/payments] ${what}: the journal returned no row`);
 
   const { version, ...rest } = row;
   void version;

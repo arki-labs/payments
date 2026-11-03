@@ -19,5 +19,7 @@ export declare const refundStatusSchema: z.ZodEnum<{
     processing: "processing";
     rejected: "rejected";
 }>;
+/** Why a refund was turned down, as the customer reads it. A blank reason says nothing, so it is refused. */
+export declare const refundRejectionReasonSchema: z.ZodString;
 export { refundReasonValues, refundStatusValues } from './primitives.js';
 //# sourceMappingURL=contracts.d.ts.map

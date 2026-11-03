@@ -19,11 +19,13 @@
  */
 
 import type { Instant } from '@arki/date';
-import type { JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
+import type { EventDef, JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
+import type { StandardSchemaV1 } from '@arki/schema';
 import { userIdSchema } from '../user-id.js';
 import { z } from '@arki/contracts';
 import { fromDate } from '@arki/date';
-import { CommandError } from '@arki/journal';
+import { isFailure, orThrow } from '@arki/failure';
+import { CommandConflict, CommandInvalid, CommandNotFound } from '@arki/journal';
 import { Money } from '@arki/money';
 
 import type { CoreTables } from '../tables.js';
@@ -87,9 +89,67 @@ export type MarkPaymentRequiresActionInput = z.input<typeof markPaymentRequiresA
 export type RecordPaymentRefundInput = z.input<typeof recordPaymentRefundInputSchema>;
 export type RecordPaymentDisputeInput = z.input<typeof recordPaymentDisputeInputSchema>;
 
-function requirePayment(row: PaymentRow | null, paymentId: string): PaymentRow {
+const paymentStart = {
+  subscriptionId: subscriptionIdSchema.nullable(),
+  userId: userIdSchema,
+  customerId: customerIdSchema,
+  providerPaymentId: z.string(),
+  paymentMethod: paymentMethodSchema,
+  description: z.string().nullable(),
+  metadata: metadataSchema.nullable(),
+};
+const paymentInitiatedSchema = z.object({ ...paymentStart, amount: z.number(), currency: z.string() });
+const paymentInitiatedV2Schema = z.object({ ...paymentStart, amount: moneyJsonSchema });
+const paymentCompletedSchema = z.object({ receiptUrl: z.string().nullable() });
+const paymentFailedSchema = z.object({ failureReason: z.string() });
+const paymentCanceledSchema = z.object({});
+const paymentRequiresActionSchema = z.object({});
+const paymentRefundRecordedSchema = z.object({ refundedAmount: moneyJsonSchema });
+const paymentDisputeRecordedSchema = z.object({
+  disputeId: z.string(),
+  status: z.string(),
+  reason: z.string().nullable(),
+});
+
+// The events have names (interfaces over `EventDef`), so the journal's types say `PaymentCompletedEvent`
+// instead of the event's whole schema type, in declaration files and editor hovers alike.
+/** Before minor units: a payment was started, its amount a JS number of major units. Replay only. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentInitiatedEvent extends EventDef<'PaymentInitiated', typeof paymentInitiatedSchema> {}
+/** A payment was started with the provider. It is `pending`. The amount is exact `Money` JSON. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentInitiatedV2Event extends EventDef<'PaymentInitiatedV2', typeof paymentInitiatedV2Schema> {}
+/** The provider collected the money. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentCompletedEvent extends EventDef<'PaymentCompleted', typeof paymentCompletedSchema> {}
+/** The provider could not collect the money. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentFailedEvent extends EventDef<'PaymentFailed', typeof paymentFailedSchema> {}
+/** The payment was canceled before it finished. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentCanceledEvent extends EventDef<'PaymentCanceled', typeof paymentCanceledSchema> {}
+/** The provider needs the customer to act (for example 3-D Secure) before the payment can finish. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentRequiresActionEvent extends EventDef<
+  'PaymentRequiresAction',
+  typeof paymentRequiresActionSchema
+> {}
+/** The provider refunded part or all of the payment. `refundedAmount` is the exact total refunded so far, as `Money` JSON. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentRefundRecordedEvent extends EventDef<
+  'PaymentRefundRecorded',
+  typeof paymentRefundRecordedSchema
+> {}
+/** The customer's bank opened a dispute on the payment, or the dispute changed status. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface PaymentDisputeRecordedEvent extends EventDef<
+  'PaymentDisputeRecorded',
+  typeof paymentDisputeRecordedSchema
+> {}
+
+function requirePayment(row: PaymentRow | null, paymentId: string): PaymentRow | CommandNotFound {
   if (!row) {
-    throw new CommandError('NOT_FOUND', `Payment ${paymentId} not found`);
+    return CommandNotFound({ detail: `Payment ${paymentId} not found` });
   }
 
   return row;
@@ -100,37 +160,27 @@ function isOpen(status: PaymentRow['status']): boolean {
   return status === 'pending' || status === 'processing' || status === 'requires_action';
 }
 
-export function createPaymentJournal<Meta extends z.ZodObject, Tx extends TransactionSource<Tx>, AppDb extends RootDb>(
-  j: JournalDefinitions<Meta, Tx, AppDb>,
-  payments: CoreTables['payments'],
-) {
-  const paymentStart = {
-    subscriptionId: subscriptionIdSchema.nullable(),
-    userId: userIdSchema,
-    customerId: customerIdSchema,
-    providerPaymentId: z.string(),
-    paymentMethod: paymentMethodSchema,
-    description: z.string().nullable(),
-    metadata: metadataSchema.nullable(),
-  };
-  /** Before minor units: a payment was started, its amount a JS number of major units. Replay only. */
-  const PaymentInitiated = j.event(
-    'PaymentInitiated',
-    z.object({ ...paymentStart, amount: z.number(), currency: z.string() }),
+export function createPaymentJournal<
+  Meta extends StandardSchemaV1<unknown, Record<string, unknown>>,
+  Tx extends TransactionSource<Tx>,
+  AppDb extends RootDb,
+>(j: JournalDefinitions<Meta, Tx, AppDb>, payments: CoreTables['payments']) {
+  const PaymentInitiated: PaymentInitiatedEvent = j.event('PaymentInitiated', paymentInitiatedSchema);
+  const PaymentInitiatedV2: PaymentInitiatedV2Event = j.event('PaymentInitiatedV2', paymentInitiatedV2Schema);
+  const PaymentCompleted: PaymentCompletedEvent = j.event('PaymentCompleted', paymentCompletedSchema);
+  const PaymentFailed: PaymentFailedEvent = j.event('PaymentFailed', paymentFailedSchema);
+  const PaymentCanceled: PaymentCanceledEvent = j.event('PaymentCanceled', paymentCanceledSchema);
+  const PaymentRequiresAction: PaymentRequiresActionEvent = j.event(
+    'PaymentRequiresAction',
+    paymentRequiresActionSchema,
   );
-  /** A payment was started with the provider. It is `pending`. The amount is exact `Money` JSON. */
-  const PaymentInitiatedV2 = j.event('PaymentInitiatedV2', z.object({ ...paymentStart, amount: moneyJsonSchema }));
-  const PaymentCompleted = j.event('PaymentCompleted', z.object({ receiptUrl: z.string().nullable() }));
-  const PaymentFailed = j.event('PaymentFailed', z.object({ failureReason: z.string() }));
-  const PaymentCanceled = j.event('PaymentCanceled', z.object({}));
-  /** The provider needs the customer to act (for example 3-D Secure) before the payment can finish. */
-  const PaymentRequiresAction = j.event('PaymentRequiresAction', z.object({}));
-  /** The provider refunded part or all of the payment. `refundedAmount` is the exact total refunded so far, as `Money` JSON. */
-  const PaymentRefundRecorded = j.event('PaymentRefundRecorded', z.object({ refundedAmount: moneyJsonSchema }));
-  /** The customer's bank opened a dispute on the payment, or the dispute changed status. */
-  const PaymentDisputeRecorded = j.event(
+  const PaymentRefundRecorded: PaymentRefundRecordedEvent = j.event(
+    'PaymentRefundRecorded',
+    paymentRefundRecordedSchema,
+  );
+  const PaymentDisputeRecorded: PaymentDisputeRecordedEvent = j.event(
     'PaymentDisputeRecorded',
-    z.object({ disputeId: z.string(), status: z.string(), reason: z.string().nullable() }),
+    paymentDisputeRecordedSchema,
   );
 
   type StartData = z.output<typeof PaymentInitiatedV2.schema>;
@@ -166,8 +216,11 @@ export function createPaymentJournal<Meta extends z.ZodObject, Tx extends Transa
         fromDate(e.recordedAt),
       ),
     )
+    // The two `orThrow` reads below fold events this journal wrote itself, from `Money#toJSON()` after the
+    // command's schema accepted the amount. A fold cannot return a failure; a refusal here is a corrupt
+    // event log (a bug), so it throws.
     .create(PaymentInitiatedV2, e =>
-      started(e.data, toMinorColumn(Money.fromJSON(e.data.amount)), e.data.amount.currency, fromDate(e.recordedAt)),
+      started(e.data, toMinorColumn(orThrow(Money.fromJSON(e.data.amount))), e.data.amount.currency, fromDate(e.recordedAt)),
     )
     .on(PaymentCompleted, (_row, e) => ({
       status: 'succeeded',
@@ -182,7 +235,7 @@ export function createPaymentJournal<Meta extends z.ZodObject, Tx extends Transa
     .on(PaymentCanceled, (_row, e) => ({ status: 'canceled', updatedAt: fromDate(e.recordedAt) }))
     .on(PaymentRequiresAction, (_row, e) => ({ status: 'requires_action', updatedAt: fromDate(e.recordedAt) }))
     .on(PaymentRefundRecorded, (_row, e) => {
-      const refundedAmount = Money.fromJSON(e.data.refundedAmount);
+      const refundedAmount = orThrow(Money.fromJSON(e.data.refundedAmount));
 
       return {
         refunded: !refundedAmount.isZero(),
@@ -196,84 +249,107 @@ export function createPaymentJournal<Meta extends z.ZodObject, Tx extends Transa
       updatedAt: fromDate(e.recordedAt),
     }));
 
-  const initiatePayment = j.command('initiatePayment', initiatePaymentInputSchema, (input, { write }) => {
-    const paymentId = input.paymentId ?? createPaymentId();
+  const initiatePayment = j.command(
+    'initiatePayment',
+    initiatePaymentInputSchema,
+    { writes: [PaymentInitiatedV2] },
+    (input, { write }) => {
+      const paymentId = input.paymentId ?? createPaymentId();
+      if (isFailure(paymentId)) return paymentId;
 
-    return write(payment, paymentId, row => {
-      if (row) {
-        throw new CommandError('CONFLICT', `Payment ${paymentId} already exists with status ${row.status}`);
-      }
+      return write(payment, paymentId, row => {
+        if (row) {
+          return CommandConflict({ detail: `Payment ${paymentId} already exists with status ${row.status}` });
+        }
 
-      return [
-        PaymentInitiatedV2({
-          subscriptionId: input.subscriptionId ?? null,
-          userId: input.userId,
-          customerId: input.customerId,
-          providerPaymentId: input.providerPaymentId,
-          amount: input.amount.toJSON(),
-          paymentMethod: input.paymentMethod,
-          description: input.description ?? null,
-          metadata: input.metadata ?? null,
-        }),
-      ];
-    });
-  });
+        return [
+          PaymentInitiatedV2({
+            subscriptionId: input.subscriptionId ?? null,
+            userId: input.userId,
+            customerId: input.customerId,
+            providerPaymentId: input.providerPaymentId,
+            amount: input.amount.toJSON(),
+            paymentMethod: input.paymentMethod,
+            description: input.description ?? null,
+            metadata: input.metadata ?? null,
+          }),
+        ];
+      });
+    },
+  );
 
   /**
    * The money was collected. An open payment completes, and so does a `failed`
    * one: the customer retried on the same provider payment and it succeeded.
    */
-  const completePayment = j.command('completePayment', completePaymentInputSchema, (input, { write }) =>
-    write(payment, input.paymentId, row => {
-      const current = requirePayment(row, input.paymentId);
+  const completePayment = j.command(
+    'completePayment',
+    completePaymentInputSchema,
+    { writes: [PaymentCompleted] },
+    (input, { write }) =>
+      write(payment, input.paymentId, row => {
+        const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
-      if (!isOpen(current.status) && current.status !== 'failed') {
-        throw new CommandError('CONFLICT', `Cannot complete payment with status ${current.status}`);
-      }
+        if (!isOpen(current.status) && current.status !== 'failed') {
+          return CommandConflict({ detail: `Cannot complete payment with status ${current.status}` });
+        }
 
-      return [PaymentCompleted({ receiptUrl: input.receiptUrl ?? null })];
-    }),
+        return [PaymentCompleted({ receiptUrl: input.receiptUrl ?? null })];
+      }),
   );
 
   /** Only an open payment fails. A `succeeded` payment never moves back to `failed`. */
-  const failPayment = j.command('failPayment', failPaymentInputSchema, (input, { write }) =>
-    write(payment, input.paymentId, row => {
-      const current = requirePayment(row, input.paymentId);
+  const failPayment = j.command(
+    'failPayment',
+    failPaymentInputSchema,
+    { writes: [PaymentFailed] },
+    (input, { write }) =>
+      write(payment, input.paymentId, row => {
+        const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
-      if (!isOpen(current.status)) {
-        throw new CommandError('CONFLICT', `Cannot fail payment with status ${current.status}`);
-      }
+        if (!isOpen(current.status)) {
+          return CommandConflict({ detail: `Cannot fail payment with status ${current.status}` });
+        }
 
-      return [PaymentFailed({ failureReason: input.failureReason })];
-    }),
+        return [PaymentFailed({ failureReason: input.failureReason })];
+      }),
   );
 
-  const cancelPayment = j.command('cancelPayment', cancelPaymentInputSchema, (input, { write }) =>
-    write(payment, input.paymentId, row => {
-      const current = requirePayment(row, input.paymentId);
+  const cancelPayment = j.command(
+    'cancelPayment',
+    cancelPaymentInputSchema,
+    { writes: [PaymentCanceled] },
+    (input, { write }) =>
+      write(payment, input.paymentId, row => {
+        const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
-      if (current.status === 'succeeded' || current.status === 'failed' || current.status === 'canceled') {
-        throw new CommandError('CONFLICT', `Cannot cancel payment with status ${current.status}`);
-      }
+        if (current.status === 'succeeded' || current.status === 'failed' || current.status === 'canceled') {
+          return CommandConflict({ detail: `Cannot cancel payment with status ${current.status}` });
+        }
 
-      return [PaymentCanceled({})];
-    }),
+        return [PaymentCanceled({})];
+      }),
   );
 
   /** The customer must act before the payment can finish. Repeating it on a payment that already waits writes nothing. */
   const markPaymentRequiresAction = j.command(
     'markPaymentRequiresAction',
     markPaymentRequiresActionInputSchema,
+    { writes: [PaymentRequiresAction] },
     (input, { write }) =>
       write(payment, input.paymentId, row => {
         const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
         if (current.status === 'requires_action') {
           return [];
         }
 
         if (!isOpen(current.status)) {
-          throw new CommandError('CONFLICT', `Cannot mark payment with status ${current.status} as requiring action`);
+          return CommandConflict({ detail: `Cannot mark payment with status ${current.status} as requiring action` });
         }
 
         return [PaymentRequiresAction({})];
@@ -284,40 +360,46 @@ export function createPaymentJournal<Meta extends z.ZodObject, Tx extends Transa
    * The provider refunded part or all of a payment that was collected. The command takes the
    * running total, so a webhook delivered twice, or after a later one, never lowers or doubles it.
    */
-  const recordPaymentRefund = j.command('recordPaymentRefund', recordPaymentRefundInputSchema, (input, { write }) =>
-    write(payment, input.paymentId, row => {
-      const current = requirePayment(row, input.paymentId);
+  const recordPaymentRefund = j.command(
+    'recordPaymentRefund',
+    recordPaymentRefundInputSchema,
+    { writes: [PaymentRefundRecorded] },
+    (input, { write }) =>
+      write(payment, input.paymentId, row => {
+        const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
-      if (current.status !== 'succeeded') {
-        throw new CommandError('CONFLICT', `Cannot refund payment with status ${current.status}`);
-      }
-      if (input.refundedAmount.currency.code !== current.currency.toUpperCase()) {
-        throw new CommandError(
-          'BAD_REQUEST',
-          `Refund is in ${input.refundedAmount.currency.code}, payment is in ${current.currency}`,
-        );
-      }
+        if (current.status !== 'succeeded') {
+          return CommandConflict({ detail: `Cannot refund payment with status ${current.status}` });
+        }
+        if (input.refundedAmount.currency.code !== current.currency.toUpperCase()) {
+          return CommandInvalid({
+            detail: `Refund is in ${input.refundedAmount.currency.code}, payment is in ${current.currency}`,
+          });
+        }
 
-      const refundedMinor = toMinorColumn(input.refundedAmount);
-      if (refundedMinor > current.amountMinor) {
-        throw new CommandError('BAD_REQUEST', `Refund of ${refundedMinor} exceeds the payment of ${current.amountMinor}`);
-      }
-      // Not higher than what is recorded: a resent or out-of-order report
-      if (refundedMinor <= current.refundedAmountMinor) {
-        return [];
-      }
+        const refundedMinor = toMinorColumn(input.refundedAmount);
+        if (refundedMinor > current.amountMinor) {
+          return CommandInvalid({ detail: `Refund of ${refundedMinor} exceeds the payment of ${current.amountMinor}` });
+        }
+        // Not higher than what is recorded: a resent or out-of-order report
+        if (refundedMinor <= current.refundedAmountMinor) {
+          return [];
+        }
 
-      return [PaymentRefundRecorded({ refundedAmount: input.refundedAmount.toJSON() })];
-    }),
+        return [PaymentRefundRecorded({ refundedAmount: input.refundedAmount.toJSON() })];
+      }),
   );
 
   /** A dispute opened, or changed status. The same dispute and status again writes nothing. */
   const recordPaymentDispute = j.command(
     'recordPaymentDispute',
     recordPaymentDisputeInputSchema,
+    { writes: [PaymentDisputeRecorded] },
     (input, { write }) =>
       write(payment, input.paymentId, row => {
         const current = requirePayment(row, input.paymentId);
+        if (isFailure(current)) return current;
 
         if (current.disputeId === input.disputeId && current.disputeStatus === input.status) {
           return [];
@@ -356,3 +438,10 @@ export function createPaymentJournal<Meta extends z.ZodObject, Tx extends Transa
     },
   };
 }
+
+/** What `createPaymentJournal` returns for one app's journal definitions. */
+export type PaymentJournal<
+  Meta extends StandardSchemaV1<unknown, Record<string, unknown>>,
+  Tx extends TransactionSource<Tx>,
+  AppDb extends RootDb,
+> = ReturnType<typeof createPaymentJournal<Meta, Tx, AppDb>>;

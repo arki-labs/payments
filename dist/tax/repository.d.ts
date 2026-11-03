@@ -2,9 +2,12 @@ import type { AnyRelations } from 'drizzle-orm';
 import type { NodePgDatabase, NodePgTransaction } from 'drizzle-orm/node-postgres';
 import type { PgliteDatabase } from 'drizzle-orm/pglite';
 import type { Instant } from '@arki/date';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import type { TaxConfigId, TaxExemptionId, TaxJurisdictionId, TaxRecordType } from './primitives.js';
 import type { TaxTables } from './tables.js';
 import type { NewTaxConfig, NewTaxExemption, NewTaxAuditRow, NewTaxJurisdiction, NewTaxRecord, TaxAuditRow, TaxConfig, TaxExemption, TaxJurisdiction, TaxRecord } from './types.js';
+import { TaxReferenceNotFound } from './failures.js';
+type NotFound = FailureOf<typeof TaxReferenceNotFound>;
 /**
  * Structural database type for the tax repositories. The tax repositories
  * only use `db.select / insert / update / delete` (no relational query
@@ -27,8 +30,13 @@ export declare class TaxConfigurationRepository {
     findConfigurationById(id: TaxConfigId): Promise<TaxConfig | null>;
     findDefaultConfiguration(): Promise<TaxConfig | null>;
     findActiveConfigurations(): Promise<TaxConfig[]>;
-    updateConfiguration(id: TaxConfigId, data: UpdateTaxConfiguration): Promise<TaxConfig>;
-    setDefaultConfiguration(id: TaxConfigId): Promise<TaxConfig>;
+    /** The updated row, or `TaxReferenceNotFound` when no configuration has `id`. */
+    updateConfiguration(id: TaxConfigId, data: UpdateTaxConfiguration): Promise<TaxConfig | NotFound>;
+    /**
+     * Makes `id` the one default configuration. An unknown `id` returns `TaxReferenceNotFound` and
+     * leaves the current default as it is: the new default is set before the old one is cleared.
+     */
+    setDefaultConfiguration(id: TaxConfigId): Promise<TaxConfig | NotFound>;
     deleteConfiguration(id: TaxConfigId): Promise<void>;
 }
 /**
@@ -45,7 +53,8 @@ export declare class TaxJurisdictionRepository {
     findJurisdictionsByCountry(countryCode: string): Promise<TaxJurisdiction[]>;
     findActiveJurisdictions(): Promise<TaxJurisdiction[]>;
     findJurisdictionHierarchy(id: TaxJurisdictionId): Promise<TaxJurisdiction[]>;
-    updateJurisdiction(id: TaxJurisdictionId, data: UpdateTaxJurisdiction): Promise<TaxJurisdiction>;
+    /** The updated row, or `TaxReferenceNotFound` when no jurisdiction has `id`. */
+    updateJurisdiction(id: TaxJurisdictionId, data: UpdateTaxJurisdiction): Promise<TaxJurisdiction | NotFound>;
     deleteJurisdiction(id: TaxJurisdictionId): Promise<void>;
 }
 /**
@@ -56,7 +65,11 @@ export declare class TaxExemptionRepository {
     private readonly db;
     private readonly taxExemptions;
     constructor(db: TaxDatabase, tables: Pick<TaxTables, 'taxExemptions'>);
-    createExemption(data: NewTaxExemption): Promise<TaxExemption>;
+    /**
+     * The new row. One that names no customer, product code or jurisdiction would exempt every sale:
+     * `exemptionTargetSchema` refuses it with `InvalidInput`, and nothing is written.
+     */
+    createExemption(data: NewTaxExemption): Promise<TaxExemption | SchemaFailure>;
     findExemptionById(id: TaxExemptionId): Promise<TaxExemption | null>;
     findCustomerExemptions(customerId: string): Promise<TaxExemption[]>;
     /**
@@ -76,9 +89,12 @@ export declare class TaxExemptionRepository {
     findProductExemptions(productCode: string): Promise<TaxExemption[]>;
     findJurisdictionExemptions(jurisdictionId: TaxJurisdictionId): Promise<TaxExemption[]>;
     findExpiringExemptions(days?: number): Promise<TaxExemption[]>;
-    updateExemption(id: TaxExemptionId, data: UpdateTaxExemption): Promise<TaxExemption>;
-    approveExemption(id: TaxExemptionId, approvedBy: string): Promise<TaxExemption>;
-    revokeExemption(id: TaxExemptionId): Promise<TaxExemption>;
+    /** The updated row, or `TaxReferenceNotFound` when no exemption has `id`. */
+    updateExemption(id: TaxExemptionId, data: UpdateTaxExemption): Promise<TaxExemption | NotFound>;
+    /** The approved row, or `TaxReferenceNotFound` when no exemption has `id`. */
+    approveExemption(id: TaxExemptionId, approvedBy: string): Promise<TaxExemption | NotFound>;
+    /** The revoked row, or `TaxReferenceNotFound` when no exemption has `id`. */
+    revokeExemption(id: TaxExemptionId): Promise<TaxExemption | NotFound>;
     deleteExemption(id: TaxExemptionId): Promise<void>;
     getExemptionStats(): Promise<{
         totalActive: number;
@@ -169,4 +185,5 @@ export declare function createTaxRepositories(db: TaxDatabase, tables: TaxReposi
     audit: TaxAuditRepository;
 };
 export type TaxRepositories = ReturnType<typeof createTaxRepositories>;
+export {};
 //# sourceMappingURL=repository.d.ts.map

@@ -1,9 +1,9 @@
-import { createIdFactory } from '@arki/db/id-factory';
-const taxConfigId = createIdFactory('txc_');
-const taxJurisdictionId = createIdFactory('txj_');
-const taxExemptionId = createIdFactory('txe_');
-const taxRecordId = createIdFactory('txr_');
-const taxAuditEntryId = createIdFactory('txa_');
+import { defineId } from '@arki/contracts';
+const taxConfigId = defineId('txc_');
+const taxJurisdictionId = defineId('txj_');
+const taxExemptionId = defineId('txe_');
+const taxRecordId = defineId('txr_');
+const taxAuditEntryId = defineId('txa_');
 export const createTaxConfigId = taxConfigId.create;
 export const createTaxJurisdictionId = taxJurisdictionId.create;
 export const createTaxExemptionId = taxExemptionId.create;

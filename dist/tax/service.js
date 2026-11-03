@@ -1,6 +1,8 @@
 import { fromDate, now, sub } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
 import { getLogger } from '@arki/log';
 import { Money, sum } from '@arki/money';
+import { TaxCurrencyMismatch, TaxRefundSaleNotFound } from './failures.js';
 import { checkTaxIdFormat } from './tax-id.js';
 const logger = getLogger('arki:payments:tax');
 /** How Stripe names the level of each jurisdiction type of ours. */
@@ -50,10 +52,8 @@ export class TaxService {
     constructor(stripeProvider, reads) {
         this.stripeProvider = stripeProvider;
         this.reads = reads;
-        // Verify that Stripe provider supports tax features
-        if (!stripeProvider.features.taxCalculation) {
-            throw new Error('Tax service requires a provider with tax calculation capabilities');
-        }
+        // A provider without tax is a configuration fault: `FailureError` (`invariant`) when the service is built
+        invariant(stripeProvider.features.taxCalculation, 'Tax service requires a provider with tax calculation capabilities');
     }
     /**
      * Calculate tax for a potential purchase
@@ -65,6 +65,9 @@ export class TaxService {
      * breakdown, unless the tax is inclusive (it is part of the price then, and stays). A line that is
      * wholly exempt is not sent to Stripe. An exemption needs what its type says it is for (a customer, a product or a
      * jurisdiction): one without would exempt every sale, so it is never applied.
+     *
+     * A Stripe amount that `@arki/money` refuses (an unknown currency, units off Stripe's rule) is returned as a
+     * `MoneyFailure`, so a sale is never priced with a wrong tax.
      */
     async calculateTax(input) {
         const currency = input.currency.toUpperCase();
@@ -110,6 +113,8 @@ export class TaxService {
                 currency: input.currency,
                 customerDetails: input.customerDetails,
             });
+            if (isFailure(result))
+                return result;
             subtotal = exemptSubtotal.plus(result.amountTotal.minus(result.taxAmountExclusive));
             taxAmount = result.taxAmountExclusive;
             taxInclusive = result.taxAmountInclusive.isPositive();
@@ -143,7 +148,7 @@ export class TaxService {
                 taxCode: line.taxCode,
             }));
         }
-        return {
+        const calculated = {
             subtotal,
             taxAmount,
             total: subtotal.plus(taxAmount),
@@ -155,6 +160,7 @@ export class TaxService {
                 .map(taxId => taxId.value),
             appliedExemptionIds: [...applied],
         };
+        return calculated;
     }
     /**
      * Create a tax transaction for compliance tracking
@@ -172,7 +178,12 @@ export class TaxService {
         const grouped = new Map();
         for (const line of params.breakdown) {
             if (line.amount.currency.code !== currency) {
-                throw new Error(`Tax for ${line.jurisdiction} is in ${line.amount.currency.code}, but the transaction ${params.reference} is in ${currency}`);
+                return TaxCurrencyMismatch({
+                    reference: params.reference,
+                    jurisdiction: line.jurisdiction,
+                    taxCurrency: line.amount.currency.code,
+                    transactionCurrency: currency,
+                });
             }
             const key = `${line.jurisdiction}\u0000${line.rate}`;
             const entry = grouped.get(key) ?? { jurisdiction: line.jurisdiction, rate: line.rate, amounts: [] };
@@ -185,7 +196,7 @@ export class TaxService {
         const first = existing[0];
         if (first) {
             logger.debug('Tax transaction {reference} was already recorded', { reference: params.reference });
-            return {
+            const recorded = {
                 id: first.providerTransactionId ?? first.id,
                 reference: params.reference,
                 type: params.type,
@@ -201,16 +212,17 @@ export class TaxService {
                 })),
                 taxCode,
             };
+            return recorded;
         }
         let originalTransactionId;
         if (params.type === 'refund') {
             if (params.originalReference === undefined) {
-                throw new Error(`Refund ${params.reference} needs originalReference: the reference of the sale it reverses`);
+                return TaxRefundSaleNotFound({ reference: params.reference, originalReference: null });
             }
             const original = await this.reads.records.findByReference('sale', params.originalReference);
             originalTransactionId = original.find(record => record.providerTransactionId !== null)?.providerTransactionId ?? undefined;
             if (originalTransactionId === undefined) {
-                throw new Error(`Refund ${params.reference} reverses sale ${params.originalReference}, which was never recorded`);
+                return TaxRefundSaleNotFound({ reference: params.reference, originalReference: params.originalReference });
             }
         }
         const transaction = await this.stripeProvider.createTaxTransaction({
@@ -227,6 +239,9 @@ export class TaxService {
             currency: params.currency,
             customerDetails: params.customerDetails,
         });
+        // An unknown customer is refused before Stripe is asked, so nothing was recorded anywhere
+        if (isFailure(transaction))
+            return transaction;
         // The provider worked the tax out itself; the records are the caller's breakdown. They should agree.
         const recorded = transaction.taxAmountExclusive.plus(transaction.taxAmountInclusive).abs();
         if (recorded.toMinorNumber() !== taxAmount.toMinorNumber()) {
@@ -251,7 +266,7 @@ export class TaxService {
             providerTransactionId: transaction.id,
             occurredAt: createdAt,
         })));
-        return {
+        const created = {
             id: transaction.id,
             reference: params.reference,
             type: params.type,
@@ -264,6 +279,7 @@ export class TaxService {
             breakdown: lines.map(line => ({ jurisdiction: line.jurisdiction, taxAmount: line.taxAmount })),
             taxCode,
         };
+        return created;
     }
     /**
      * Get tax settings and configuration

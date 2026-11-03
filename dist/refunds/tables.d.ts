@@ -8,7 +8,8 @@ export type CreateRefundsTablesDeps = {
     /** `() => User.id` from the host app's auth tables. */
     userIdRef: () => PgColumn;
 };
-export declare function createRefundsTables({ schema, paymentIdRef, userIdRef }: CreateRefundsTablesDeps): {
+/** Builds the tables. `createRefundsTables` returns them under the names declared below. */
+declare function buildRefundsTables({ schema, paymentIdRef, userIdRef }: CreateRefundsTablesDeps): {
     enums: {
         refundReasonEnum: import("drizzle-orm/pg-core").PgEnum<["customer_request", "duplicate_charge", "fraudulent_transaction", "service_not_delivered", "billing_error", "technical_issue", "goodwill_gesture", "chargeback_prevention", "other"]>;
         refundStatusEnum: import("drizzle-orm/pg-core").PgEnum<["pending", "approved", "processing", "completed", "failed", "rejected", "canceled"]>;
@@ -17,11 +18,11 @@ export declare function createRefundsTables({ schema, paymentIdRef, userIdRef }:
         name: "refunds";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `rfnd_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `rfnd${string}`>>, {
                 name: string;
                 tableName: "refunds";
                 dataType: "string";
-                data: `rfnd_${string}`;
+                data: `rfnd${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -32,11 +33,11 @@ export declare function createRefundsTables({ schema, paymentIdRef, userIdRef }:
                 identity: undefined;
                 generated: undefined;
             }>;
-            paymentId: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `pay_${string}`>, {
+            paymentId: import("drizzle-orm/pg-core").PgBuildColumn<"refunds", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `pay${string}`>, {
                 name: string;
                 tableName: "refunds";
                 dataType: "string";
-                data: `pay_${string}`;
+                data: `pay${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -407,13 +408,25 @@ export declare function createRefundsTables({ schema, paymentIdRef, userIdRef }:
     foreignKeys: {
         refundForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `rfnd_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `rfnd${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `rfnd_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `rfnd${string}`>;
         };
     };
 };
-export type RefundsTables = ReturnType<typeof createRefundsTables>;
+type BuiltRefundsTables = ReturnType<typeof buildRefundsTables>;
+type RefundsTableType = BuiltRefundsTables['refunds'];
+/** The `refunds` table. */
+export interface RefundsTable extends RefundsTableType {
+}
+/** What `createRefundsTables` returns: the enums, the `refunds` table, and its foreign-key factory. */
+export type RefundsTables = {
+    enums: BuiltRefundsTables['enums'];
+    refunds: RefundsTable;
+    foreignKeys: BuiltRefundsTables['foreignKeys'];
+};
+export declare function createRefundsTables(deps: CreateRefundsTablesDeps): RefundsTables;
+export {};
 //# sourceMappingURL=tables.d.ts.map

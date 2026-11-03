@@ -13,7 +13,8 @@
  *   new SubscriptionManager(provider, repo, paymentsJournal.writes(context.runCommand));
  *
  * Every write of `payments` and `subscriptions` goes through one of these
- * commands. A rejected rule throws the `CommandError` of `@arki/journal`.
+ * commands. A rejected rule returns a failure of `@arki/journal`
+ * (`CommandNotFound`, `CommandConflict`, `CommandInvalid`): nothing is written.
  */
 import { createPaymentJournal } from './journal/payment.js';
 import { createSubscriptionJournal } from './journal/subscription.js';
@@ -28,8 +29,7 @@ export function createCoreJournal(j, tables) {
         entities: { payment: payments.payment, subscription: subscriptions.subscription },
         events: { ...payments.events, ...subscriptions.events },
         commands,
-        /** `run` is the app's command runner: `context.runCommand` in a request, `ctx.run` inside a command. */
-        writes: (run) => ({
+        writes: run => ({
             initiatePayment: input => writtenRow(run(commands.initiatePayment, input), 'initiatePayment'),
             completePayment: input => writtenRow(run(commands.completePayment, input), 'completePayment'),
             failPayment: input => writtenRow(run(commands.failPayment, input), 'failPayment'),

@@ -148,7 +148,7 @@ export declare const updateTaxConfigSchema: z.ZodObject<{
     }, z.core.$strip>>>;
 }, z.core.$strip>;
 export declare const updateConfigurationInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`txc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txc_${string}`, "out">, z.ZodTransform<`txc_${string}`, string & z.$brand<`txc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`txc_${string}`>;
     data: z.ZodObject<{
         description: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         calculationMode: z.ZodOptional<z.ZodDefault<z.ZodEnum<{
@@ -205,7 +205,7 @@ export declare const updateConfigurationInputSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export declare const setDefaultConfigurationInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`txc_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txc_${string}`, "out">, z.ZodTransform<`txc_${string}`, string & z.$brand<`txc_${string}`>>>;
+    id: z.ZodTemplateLiteral<`txc_${string}`>;
 }, z.core.$strip>;
 /** A tax rate in percent, as a decimal string: `'19'`, `'7.5'`. Never negative, never above 100. */
 export declare const taxRateSchema: z.ZodString;
@@ -220,7 +220,7 @@ export declare const createJurisdictionSchema: z.ZodObject<{
         province: "province";
         state: "state";
     }>;
-    parentId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`txj_${string}`, string>>>;
+    parentId: z.ZodOptional<z.ZodTemplateLiteral<`txj_${string}`>>;
     countryCode: z.ZodString;
     stateCode: z.ZodOptional<z.ZodString>;
     standardRate: z.ZodOptional<z.ZodString>;
@@ -239,7 +239,16 @@ export declare const getJurisdictionsByCountryInputSchema: z.ZodObject<{
     countryCode: z.ZodString;
 }, z.core.$strip>;
 export declare const getJurisdictionHierarchyInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`txj_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txj_${string}`, "out">, z.ZodTransform<`txj_${string}`, string & z.$brand<`txj_${string}`>>>;
+    id: z.ZodTemplateLiteral<`txj_${string}`>;
+}, z.core.$strip>;
+/**
+ * What an exemption covers. It must name a customer, a product code or a jurisdiction: with none it
+ * would exempt every sale. `TaxExemptionRepository.createExemption` checks every new row with it.
+ */
+export declare const exemptionTargetSchema: z.ZodObject<{
+    customerId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    productCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    jurisdictionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const createExemptionSchema: z.ZodObject<{
     type: z.ZodEnum<{
@@ -250,7 +259,7 @@ export declare const createExemptionSchema: z.ZodObject<{
     }>;
     customerId: z.ZodOptional<z.ZodString>;
     productCode: z.ZodOptional<z.ZodString>;
-    jurisdictionId: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodTransform<`txj_${string}`, string>>>;
+    jurisdictionId: z.ZodOptional<z.ZodTemplateLiteral<`txj_${string}`>>;
     exemptionCode: z.ZodString;
     reason: z.ZodString;
     certificateNumber: z.ZodOptional<z.ZodString>;
@@ -270,10 +279,10 @@ export declare const getExpiringExemptionsInputSchema: z.ZodObject<{
     days: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const approveExemptionInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`txe_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txe_${string}`, "out">, z.ZodTransform<`txe_${string}`, string & z.$brand<`txe_${string}`>>>;
+    id: z.ZodTemplateLiteral<`txe_${string}`>;
 }, z.core.$strip>;
 export declare const revokeExemptionInputSchema: z.ZodObject<{
-    id: z.ZodPipe<z.ZodString, z.ZodTransform<`txe_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txe_${string}`, "out">, z.ZodTransform<`txe_${string}`, string & z.$brand<`txe_${string}`>>>;
+    id: z.ZodTemplateLiteral<`txe_${string}`>;
 }, z.core.$strip>;
 export declare const taxCalculationInputSchema: z.ZodObject<{
     customerId: z.ZodString;
@@ -395,7 +404,7 @@ export declare const taxCalculationResultSchema: z.ZodObject<{
         taxCode: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     applicableTaxIds: z.ZodArray<z.ZodString>;
-    appliedExemptionIds: z.ZodArray<z.ZodPipe<z.ZodString, z.ZodTransform<`txe_${string}`, string>> | z.ZodPipe<z.core.$ZodBranded<z.ZodString, `txe_${string}`, "out">, z.ZodTransform<`txe_${string}`, string & z.$brand<`txe_${string}`>>>>;
+    appliedExemptionIds: z.ZodArray<z.ZodTemplateLiteral<`txe_${string}`>>;
 }, z.core.$strip>;
 export declare function taxCalculationResultJson(result: TaxCalculationResult): z.input<typeof taxCalculationResultSchema>;
 /** What `TaxService.getCustomerTaxSummary` answers. */

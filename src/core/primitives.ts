@@ -1,17 +1,18 @@
-import { createIdFactory } from '@arki/db/id-factory';
+import type { IdOf } from '@arki/contracts';
+import { defineId } from '@arki/contracts';
 
 export type PaymentProviderId = `pprov_${string}`;
-export type SubscriptionId = `sub_${string}`;
-export type PaymentId = `pay_${string}`;
-export type PlanId = `plan_${string}`;
-export type CustomerId = `cust_${string}`;
-export type WebhookId = `wh_${string}`;
+export type SubscriptionId = IdOf<typeof subscriptionId>;
+export type PaymentId = IdOf<typeof paymentId>;
+export type PlanId = IdOf<typeof planId>;
+export type CustomerId = IdOf<typeof customerId>;
+export type WebhookId = IdOf<typeof webhookId>;
 
-const planId = createIdFactory<'plan', PlanId>('plan');
-const subscriptionId = createIdFactory<'sub', SubscriptionId>('sub');
-const paymentId = createIdFactory<'pay', PaymentId>('pay');
-const customerId = createIdFactory<'cust', CustomerId>('cust');
-const webhookId = createIdFactory<'wh', WebhookId>('wh');
+const planId = defineId('plan');
+const subscriptionId = defineId('sub');
+const paymentId = defineId('pay');
+const customerId = defineId('cust');
+const webhookId = defineId('wh');
 
 export const createPlanId = planId.create;
 export const createSubscriptionId = subscriptionId.create;

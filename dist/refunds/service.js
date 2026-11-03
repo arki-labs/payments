@@ -1,11 +1,20 @@
 import { z } from '@arki/contracts';
 import { toMillis } from '@arki/date';
+import { TransactionDefect, TransactionRejected } from '@arki/db/errors';
+import { isFailure } from '@arki/failure';
+import { isJournalError } from '@arki/journal';
+import { getLogger } from '@arki/log';
 import { sum } from '@arki/money';
 import { currencyCodeSchema } from '@arki/money/zod';
+import { parse } from '@arki/schema';
+import { misconfigured } from '../core/failures.js';
 import { nonNegativeMoneySchema, paymentAmount } from '../core/money.js';
+import { refundRejectionReasonSchema } from './contracts.js';
+import { DuplicatePendingRefund, RefundAmountExceeded, RefundCurrencyMismatch, RefundInvalidState, RefundNotFound, RefundWindowExceeded, TransactionNotFound, } from './failures.js';
 import { createRefundRepository, refundAmountOf } from './repository.js';
 import { pendingRefundIndexName } from './tables.js';
-import { RefundError } from './types.js';
+/** Logs ids only, never refund data. */
+const logger = getLogger('arki:payments');
 /**
  * The largest refund approved without a person, per currency: `{ USD: '10.00', JPY: '1500' }`.
  * Each amount is exact text in its own currency, so 10 USD and 1500 JPY are both "small".
@@ -41,6 +50,18 @@ function isPendingRefundConflict(error) {
     }
     return false;
 }
+/**
+ * Whether the refund write lost the race to another pending refund for the same payment.
+ * Two shapes say so. A journal command throws `JournalError('CONFLICT')` for a row insert's
+ * unique violation, and its transaction returns that as `TransactionDefect`. A plain database
+ * write returns `TransactionRejected` with SQLSTATE 23505. Any other failure is kept as it is.
+ */
+function lostPendingRefundRace(failure) {
+    if (TransactionDefect.is(failure)) {
+        return isJournalError(failure.cause, 'CONFLICT') && isPendingRefundConflict(failure.cause);
+    }
+    return TransactionRejected.is(failure) && failure.data.sqlState === '23505' && isPendingRefundConflict(failure.cause);
+}
 /** A refund in these statuses has been, or will be, paid back, so it counts against what the payment can still refund. */
 function refundHoldsMoney(status) {
     return status === 'pending' || status === 'approved' || status === 'processing' || status === 'completed';
@@ -48,30 +69,39 @@ function refundHoldsMoney(status) {
 /**
  * Reads come from the repositories. Every change of a `refunds` row goes
  * through `writes`: one journal command per step, so each step leaves an event.
+ *
+ * The service never calls the provider. Approval records `RefundApproved`, and that event starts the
+ * `payments.refund` workflow (`createRefundWorkflow`), which pays the money back after the request has answered.
  */
 export class RefundService {
     refundRepository;
     writes;
-    paymentProvider;
     paymentRepository;
     notificationService;
     refundWindow;
     systemUserId;
     autoApproveLimits;
-    constructor(refundRepository, writes, paymentProvider, paymentRepository, config, notificationService) {
+    constructor(refundRepository, writes, paymentRepository, config, 
+    /** Sends the customer's rejection mail only. The approvers' mail is an effect: `createRefundEffects`. */
+    notificationService) {
         this.refundRepository = refundRepository;
         this.writes = writes;
-        this.paymentProvider = paymentProvider;
         this.paymentRepository = paymentRepository;
         this.notificationService = notificationService;
         this.refundWindow = config.refundWindowMs ?? 90 * 24 * 60 * 60 * 1000;
         this.systemUserId = config.systemUserId;
-        this.autoApproveLimits = refundAutoApproveLimitsSchema.parse(config.autoApproveLimits ?? DEFAULT_REFUND_AUTO_APPROVE_LIMITS);
+        // A bad limit is a configuration fault: `payments.configuration_invalid` when the service is built
+        const limits = refundAutoApproveLimitsSchema.safeParse(config.autoApproveLimits ?? DEFAULT_REFUND_AUTO_APPROVE_LIMITS);
+        if (!limits.success) {
+            throw misconfigured('refunds.autoApproveLimits', limits.error.issues.map(issue => `${issue.path.join('.') || '(limits)'}: ${issue.message}`).join('; '));
+        }
+        this.autoApproveLimits = limits.data;
     }
     async requestRefund(data) {
-        await this.validateRefundEligibility(data.paymentId, data.amount);
-        const refund = await this.writes
-            .requestRefund({
+        const refused = await this.validateRefundEligibility(data.paymentId, data.amount);
+        if (isFailure(refused))
+            return refused;
+        const refund = await this.writes.requestRefund({
             paymentId: data.paymentId,
             originalAmount: data.amount.toJSON(),
             refundAmount: data.amount.toJSON(),
@@ -80,117 +110,95 @@ export class RefundService {
             customerNote: data.customerNote,
             internalNotes: data.internalNotes,
             metadata: JSON.stringify({}),
-        })
-            .catch((error) => {
-            // Two requests can pass the check above together; the database lets only one stay pending
-            if (isPendingRefundConflict(error)) {
-                throw new RefundError(`Payment ${data.paymentId} already has a refund waiting for a decision`, 'DUPLICATE_PENDING_REFUND', error);
-            }
-            throw error;
         });
+        // Two requests can pass eligibility together; only this unique index proves another is pending.
+        if (lostPendingRefundRace(refund)) {
+            return DuplicatePendingRefund({ paymentId: data.paymentId }, { cause: refund });
+        }
+        if (isFailure(refund))
+            return refund;
         if (await this.shouldAutoApprove(refund)) {
             return this.approveRefund({ refundId: refund.id, approvedBy: this.systemUserId });
         }
-        if (this.notificationService) {
-            await this.notifyApprovers(refund);
-        }
+        // The approvers hear from the `refund-approval-request` effect (`createRefundEffects`), after the commit
         return refund;
     }
     async approveRefund(data) {
-        await this.requirePending(data.refundId);
+        const pending = await this.requirePending(data.refundId);
+        if (isFailure(pending))
+            return pending;
         const approvedRefund = await this.writes.approveRefund({
             refundId: data.refundId,
             approvedBy: data.approvedBy,
             notes: data.notes ?? null,
         });
-        return this.processRefund(approvedRefund);
+        // `approved`: the workflow the approval started pays it back after this answer
+        return approvedRefund;
     }
+    /** A blank `reason` is refused with the schema's `InvalidInput` before anything is read or written. */
     async rejectRefund(data) {
-        if (data.reason.trim() === '') {
-            throw new RefundError('A rejection needs a reason', 'REASON_REQUIRED');
-        }
-        await this.requirePending(data.refundId);
+        const reason = parse(refundRejectionReasonSchema, data.reason);
+        if (isFailure(reason))
+            return reason;
+        const pending = await this.requirePending(data.refundId);
+        if (isFailure(pending))
+            return pending;
         const rejectedRefund = await this.writes.rejectRefund({
             refundId: data.refundId,
             rejectedBy: data.rejectedBy,
-            rejectionReason: data.reason,
+            rejectionReason: reason,
         });
+        if (isFailure(rejectedRefund))
+            return rejectedRefund;
         if (this.notificationService) {
             await this.notifyCustomer(rejectedRefund, 'rejected');
         }
         return rejectedRefund;
     }
-    /** A refund that can still be approved or rejected. A missing one and one past `pending` are different errors. */
+    /** A refund that can still be approved or rejected. A missing one and one past `pending` are different failures. */
     async requirePending(refundId) {
         const refund = await this.refundRepository.findById(refundId);
         if (!refund) {
-            throw new RefundError(`Refund ${refundId} not found`, 'REFUND_NOT_FOUND');
+            return RefundNotFound({ refundId });
         }
         if (refund.status !== 'pending') {
-            throw new RefundError(`Invalid refund state for ${refundId}`, 'INVALID_STATE');
+            return RefundInvalidState({ refundId, status: refund.status });
         }
         return refund;
     }
-    async processRefund(refund) {
-        // Outside the `try`: a refund that could not start has nothing to mark as failed
-        await this.writes.processRefund({ refundId: refund.id });
-        try {
-            const payment = await this.paymentRepository.findPaymentById(refund.paymentId);
-            if (!payment) {
-                throw new Error(`Payment ${refund.paymentId} not found`);
-            }
-            // The provider resolves its own payment from our payment id
-            const providerResult = await this.paymentProvider.refundPayment(payment.id, {
-                amount: refundAmountOf(refund),
-                reason: refund.reason,
-                metadata: {
-                    refundId: refund.id,
-                    internalReason: refund.reason,
-                },
-            });
-            const completedRefund = await this.writes.completeRefund({
-                refundId: refund.id,
-                providerRefundId: providerResult.providerRefundId,
-                providerResponse: JSON.stringify(providerResult),
-            });
-            if (this.notificationService) {
-                await this.notifyCustomer(completedRefund, 'completed');
-            }
-            return completedRefund;
-        }
-        catch (error) {
-            await this.writes.failRefund({
-                refundId: refund.id,
-                errorMessage: error instanceof Error ? error.message : 'Unknown error',
-            });
-            if (this.notificationService) {
-                await this.notifySupportTeam(refund, error);
-            }
-            throw error;
-        }
-    }
+    /** Nothing when the payment can give back `amount`, or the failure that says why not. */
     async validateRefundEligibility(paymentId, amount) {
         const payment = await this.paymentRepository.findPaymentById(paymentId);
         if (!payment) {
-            throw new Error('Payment not found');
+            return TransactionNotFound({ paymentId });
         }
         const paid = paymentAmount(payment);
         if (!amount.hasSameCurrency(paid)) {
-            throw new Error(`Refund currency ${amount.currency.code} differs from the payment currency ${paid.currency.code}`);
+            return RefundCurrencyMismatch({
+                paymentId,
+                refundCurrency: amount.currency.code,
+                paymentCurrency: paid.currency.code,
+            });
         }
         if (payment.createdAt && Date.now() - toMillis(payment.createdAt) > this.refundWindow) {
-            throw new Error('Refund window exceeded');
+            return RefundWindowExceeded({ paymentId });
         }
         const existingRefunds = await this.refundRepository.findByPaymentId(paymentId);
         if (existingRefunds.some(existing => existing.status === 'pending')) {
-            throw new RefundError(`Payment ${paymentId} already has a refund waiting for a decision`, 'DUPLICATE_PENDING_REFUND');
+            return DuplicatePendingRefund({ paymentId });
         }
         // Money already promised back counts, not only money already sent: an approved or processing
         // refund will be paid. Rejected and failed ones never move money.
         const totalRefunded = sum(existingRefunds.filter(r => refundHoldsMoney(r.status)).map(refund => refundAmountOf(refund)), paid.currency);
         if (totalRefunded.plus(amount).gt(paid)) {
-            throw new RefundError('Refund amount exceeds payment amount', 'AMOUNT_EXCEEDED');
+            return RefundAmountExceeded({
+                paymentId,
+                requested: amount.toDecimalString(),
+                refundable: paid.minus(totalRefunded).toDecimalString(),
+                currency: paid.currency.code,
+            });
         }
+        return;
     }
     /**
      * The per-currency limit is the only rule, whatever the reason: a billing
@@ -202,33 +210,25 @@ export class RefundService {
         const limit = this.autoApproveLimits.get(amount.currency.code);
         return limit !== undefined && amount.lte(limit);
     }
-    async notifyApprovers(refund) {
-        if (this.notificationService?.sendRefundApprovalRequest) {
-            try {
-                await this.notificationService.sendRefundApprovalRequest(refund);
-            }
-            catch (error) {
-                console.error('Failed to send refund approval notification:', error);
-            }
-        }
-    }
     async notifyCustomer(refund, event) {
         if (this.notificationService?.sendRefundStatusUpdate) {
             try {
-                await this.notificationService.sendRefundStatusUpdate(refund, event);
+                const sent = await this.notificationService.sendRefundStatusUpdate(refund, event);
+                if (isFailure(sent)) {
+                    logger.warn('Refund {event} mail for {refundId} was not sent: {code}', {
+                        refundId: refund.id,
+                        event,
+                        code: sent.code,
+                        failure: sent,
+                    });
+                }
             }
             catch (error) {
-                console.error('Failed to send customer notification:', error);
-            }
-        }
-    }
-    async notifySupportTeam(refund, error) {
-        if (this.notificationService?.sendRefundFailureAlert) {
-            try {
-                await this.notificationService.sendRefundFailureAlert(refund, error);
-            }
-            catch (error_) {
-                console.error('Failed to send support team alert:', error_);
+                logger.error('Refund {event} mail for {refundId} was not sent: {error}', {
+                    refundId: refund.id,
+                    event,
+                    error: error instanceof Error ? error.message : String(error),
+                });
             }
         }
     }
@@ -243,7 +243,7 @@ export class RefundService {
         return this.refundRepository.searchRefunds(filters);
     }
 }
-export function createRefundService(db, tables, writes, paymentProvider, paymentRepository, config, notificationService) {
-    return new RefundService(createRefundRepository(db, tables), writes, paymentProvider, paymentRepository, config, notificationService);
+export function createRefundService(db, tables, writes, paymentRepository, config, notificationService) {
+    return new RefundService(createRefundRepository(db, tables), writes, paymentRepository, config, notificationService);
 }
 //# sourceMappingURL=service.js.map

@@ -1,5 +1,5 @@
-import { createIdFactory } from '@arki/db/id-factory';
-const refundIdFactoryInstance = createIdFactory('rfnd');
+import { defineId } from '@arki/contracts';
+const refundIdFactoryInstance = defineId('rfnd');
 export const createRefundId = refundIdFactoryInstance.create;
 export const refundIdSchema = refundIdFactoryInstance.schema;
 export const refundIdFactory = refundIdFactoryInstance;

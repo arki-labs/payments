@@ -9,9 +9,20 @@ export type WebhookValidationOptions = {
     skipTimestampValidation?: boolean;
     skipSignatureValidation?: boolean;
 };
+/**
+ * Checks a webhook delivery's source address, timestamp, replay and signature.
+ *
+ * Limit: the replay set is in this process's memory only. It is empty after a restart and not shared
+ * between instances, so it only catches a copy that reaches the same process within the window. The
+ * webhook handler's database claim (`claimWebhookEvent`) is what keeps an event from running twice.
+ *
+ * It starts no timer: old entries are pruned during `validateWebhook`, at most once an hour, so the
+ * service never keeps a process alive and needs no closing.
+ */
 export declare class WebhookSecurityService {
     private processedEvents;
     private readonly config;
+    private lastCleanupAt;
     constructor(config: WebhookSecurityConfig);
     validateWebhook(provider: PaymentProviderType, payload: string | Buffer, signature: string, timestamp: string, sourceIp: string, webhookSecret: string, options?: WebhookValidationOptions): Promise<WebhookValidationResult>;
     private isIpAllowed;
@@ -21,8 +32,10 @@ export declare class WebhookSecurityService {
     private generateEventId;
     private isEventProcessed;
     private markEventAsProcessed;
+    private cleanupIfDue;
     private cleanupOldEvents;
     private validateSignature;
+    /** Stripe signs its own timestamp (`t=`), so the window is checked on that, not on the caller's value. */
     private validateStripeSignature;
     private validatePayPalSignature;
     private validateSquareSignature;

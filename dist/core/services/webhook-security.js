@@ -1,23 +1,43 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { add, fromUnix, isAfter, isBefore, now, sub } from '@arki/date';
+import { createHash } from 'node:crypto';
+import { isBefore, now, sub } from '@arki/date';
+import { isFailure } from '@arki/failure';
+import { WebhookMalformed, WebhookStale, stripe } from '@arki/http/webhooks';
+import { is, recordSchema } from '@arki/schema';
 import { mapStripeEventType } from '../providers/stripe-event-types.js';
 /** A whole number of seconds since the epoch, as Stripe writes `t=`. */
 const UNIX_SECONDS = /^\d+$/;
-/** Constant-time string compare. Different lengths are simply unequal (`timingSafeEqual` would throw). */
-function constantTimeEqual(a, b) {
-    const left = Buffer.from(a, 'utf8');
-    const right = Buffer.from(b, 'utf8');
-    return left.length === right.length && timingSafeEqual(left, right);
+/** The messages this service has always returned, by `@arki/http/webhooks` code. */
+function stripeFailure(code) {
+    switch (code) {
+        case WebhookMalformed.code: {
+            return 'Invalid signature format';
+        }
+        case WebhookStale.code: {
+            return 'Signature timestamp is outside the allowed window';
+        }
+        default: {
+            return 'Signature verification failed';
+        }
+    }
 }
+/** How often, at most, deliveries older than twice the replay window are pruned from the replay set. */
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * Checks a webhook delivery's source address, timestamp, replay and signature.
+ *
+ * Limit: the replay set is in this process's memory only. It is empty after a restart and not shared
+ * between instances, so it only catches a copy that reaches the same process within the window. The
+ * webhook handler's database claim (`claimWebhookEvent`) is what keeps an event from running twice.
+ *
+ * It starts no timer: old entries are pruned during `validateWebhook`, at most once an hour, so the
+ * service never keeps a process alive and needs no closing.
+ */
 export class WebhookSecurityService {
     processedEvents = new Map();
     config;
+    lastCleanupAt = now();
     constructor(config) {
         this.config = config;
-        // Clean up old processed events every hour
-        setInterval(() => {
-            this.cleanupOldEvents();
-        }, 60 * 60 * 1000);
     }
     async validateWebhook(provider, payload, signature, timestamp, sourceIp, webhookSecret, options = {}) {
         try {
@@ -42,6 +62,7 @@ export class WebhookSecurityService {
                 }
             }
             // 3. Replay attack prevention
+            this.cleanupIfDue();
             const eventId = this.generateEventId(payload, signature, timestamp);
             if (this.isEventProcessed(eventId)) {
                 return {
@@ -52,7 +73,7 @@ export class WebhookSecurityService {
             }
             // 4. Signature verification
             if (!options.skipSignatureValidation) {
-                const signatureValidation = this.validateSignature(provider, payload, signature, timestamp, webhookSecret);
+                const signatureValidation = await this.validateSignature(provider, payload, signature, webhookSecret);
                 if (!signatureValidation.isValid) {
                     return signatureValidation;
                 }
@@ -112,7 +133,7 @@ export class WebhookSecurityService {
             if (!network || !prefixLength) {
                 return false;
             }
-            const mask = (0xff_ff_ff_ff << (32 - Number.parseInt(prefixLength, 10))) >>> 0;
+            const mask = (0xFF_FF_FF_FF << (32 - Number.parseInt(prefixLength, 10))) >>> 0;
             const ipInt = this.ipToInt(ip);
             const networkInt = this.ipToInt(network);
             return (ipInt & mask) === (networkInt & mask);
@@ -158,7 +179,13 @@ export class WebhookSecurityService {
     markEventAsProcessed(eventId) {
         this.processedEvents.set(eventId, now());
     }
+    cleanupIfDue() {
+        if (isBefore(this.lastCleanupAt, sub(now(), { milliseconds: CLEANUP_INTERVAL_MS }))) {
+            this.cleanupOldEvents();
+        }
+    }
     cleanupOldEvents() {
+        this.lastCleanupAt = now();
         const cutoffTime = sub(now(), { seconds: this.config.replayWindowSeconds * 2 });
         for (const [eventId, processedAt] of this.processedEvents) {
             if (isBefore(processedAt, cutoffTime)) {
@@ -166,7 +193,7 @@ export class WebhookSecurityService {
             }
         }
     }
-    validateSignature(provider, payload, signature, timestamp, webhookSecret) {
+    async validateSignature(provider, payload, signature, webhookSecret) {
         // An HMAC keyed with an empty secret can be computed by anyone.
         if (!webhookSecret) {
             return { isValid: false, provider, error: 'Webhook secret is not configured' };
@@ -174,7 +201,7 @@ export class WebhookSecurityService {
         try {
             switch (provider) {
                 case 'stripe': {
-                    return this.validateStripeSignature(payload, signature, timestamp, webhookSecret);
+                    return await this.validateStripeSignature(payload, signature, webhookSecret);
                 }
                 case 'paypal': {
                     return this.validatePayPalSignature(payload, signature, webhookSecret);
@@ -199,56 +226,14 @@ export class WebhookSecurityService {
             };
         }
     }
-    validateStripeSignature(payload, signature, _timestamp, secret) {
-        try {
-            let signedTimestamp;
-            const candidates = [];
-            for (const element of signature.split(',')) {
-                const separator = element.indexOf('=');
-                const key = element.slice(0, separator).trim();
-                const value = element.slice(separator + 1).trim();
-                if (separator <= 0 || !value)
-                    continue;
-                if (key === 't')
-                    signedTimestamp = value;
-                if (key === 'v1')
-                    candidates.push(value);
-            }
-            if (!signedTimestamp || candidates.length === 0) {
-                return {
-                    isValid: false,
-                    provider: 'stripe',
-                    error: 'Invalid signature format',
-                };
-            }
-            const window = { seconds: this.config.replayWindowSeconds };
-            const current = now();
-            if (!UNIX_SECONDS.test(signedTimestamp)) {
-                return { isValid: false, provider: 'stripe', error: 'Signature timestamp is outside the allowed window' };
-            }
-            const signedAt = fromUnix(Number(signedTimestamp));
-            if (isBefore(signedAt, sub(current, window)) || isAfter(signedAt, add(current, window))) {
-                return { isValid: false, provider: 'stripe', error: 'Signature timestamp is outside the allowed window' };
-            }
-            const payloadStr = typeof payload === 'string' ? payload : payload.toString();
-            const computedSignature = createHmac('sha256', secret)
-                .update(`${signedTimestamp}.${payloadStr}`, 'utf8')
-                .digest('hex');
-            // Stripe sends one `v1` per active secret while a secret is being rolled; any may match.
-            const isValid = candidates.some((candidate) => constantTimeEqual(candidate, computedSignature));
-            return {
-                isValid,
-                provider: 'stripe',
-                error: isValid ? undefined : 'Signature verification failed',
-            };
+    /** Stripe signs its own timestamp (`t=`), so the window is checked on that, not on the caller's value. */
+    async validateStripeSignature(payload, signature, secret) {
+        const body = typeof payload === 'string' ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+        const result = await stripe({ secrets: [secret] }).verify({ headers: new Headers({ 'stripe-signature': signature }), body }, { tolerance: this.config.replayWindowSeconds });
+        if (isFailure(result)) {
+            return { isValid: false, provider: 'stripe', error: stripeFailure(result.code) };
         }
-        catch (error) {
-            return {
-                isValid: false,
-                provider: 'stripe',
-                error: `Stripe signature validation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            };
-        }
+        return { isValid: true, provider: 'stripe' };
     }
     validatePayPalSignature(_payload, _signature, _secret) {
         // PayPal verifies through its API with transmission headers this method does not receive.
@@ -263,9 +248,7 @@ export class WebhookSecurityService {
             const payloadStr = typeof payload === 'string' ? payload : payload.toString();
             const parsed = JSON.parse(payloadStr);
             const sanitized = this.deepSanitize(parsed);
-            return typeof sanitized === 'object' && sanitized !== null && !Array.isArray(sanitized)
-                ? sanitized
-                : {};
+            return is(sanitized, recordSchema) ? sanitized : {};
         }
         catch {
             return {};

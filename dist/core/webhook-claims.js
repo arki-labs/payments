@@ -1,5 +1,6 @@
 import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { now } from '@arki/date';
+import { WebhookClaimConflict } from './services/webhook-failures.js';
 /**
  * Insert the event, or return the row that already holds its `providerEventId`.
  * `created` is true only for the caller whose insert won, so exactly one
@@ -7,6 +8,9 @@ import { now } from '@arki/date';
  *
  * `onConflictDoNothing()` takes no target on purpose: it covers the unique
  * index on `provider_event_id` and the primary key alike.
+ *
+ * Returns `WebhookClaimConflict` (retryable) when the insert conflicted but no
+ * row holds the event's `providerEventId`.
  */
 export async function claimWebhookEvent(db, table, data) {
     const [inserted] = await db.insert(table).values(data).onConflictDoNothing().returning();
@@ -20,7 +24,9 @@ export async function claimWebhookEvent(db, table, data) {
     // Stripe), so this is accepted rather than paying for a composite index.
     const [existing] = await db.select().from(table).where(eq(table.providerEventId, data.providerEventId));
     if (!existing) {
-        throw new Error('Failed to claim webhook event');
+        // The insert conflicted on the primary key (a webhook id collision), or the winning row was
+        // deleted between the two queries. A resend claims the event again with a new id.
+        return WebhookClaimConflict({ providerEventId: data.providerEventId, retryable: true });
     }
     return { event: existing, created: false };
 }

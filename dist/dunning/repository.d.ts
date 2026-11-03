@@ -9,18 +9,14 @@ import type { DunningTables } from './tables.js';
 import type { CustomerRiskProfile, DunningCampaign, DunningCommunication, DunningExecution, DunningTemplate, ExecutionResultDb, NewDunningCommunication, NewDunningExecution } from './types.js';
 /**
  * Structural database type accepted by the dunning repositories. See the
- * `PaymentDatabase` doc in `../core/repository` — same contract: the host's
- * relations graph MUST register the dunning tables (`dunningCampaigns`,
- * `dunningTemplates`, `dunningExecutions`, `dunningCommunications`,
- * `customerSegments`, `customerRiskProfiles`) for the relational query
- * builder calls below to work at runtime. PGlite is accepted so the package
- * can run these queries in its own tests.
+ * `PaymentDatabase` doc in `../core/repository`: the repositories only use
+ * `select / insert / update / delete`, so no relations graph is needed. PGlite
+ * is accepted so the package can run these queries in its own tests.
  */
 export type DunningDatabase = NodePgDatabase<AnyRelations> | NodePgTransaction<AnyRelations> | PgliteDatabase<AnyRelations>;
 type CampaignTables = Pick<DunningTables, 'dunningCampaigns' | 'dunningCampaignAnalytics'>;
 export declare class DunningCampaignRepository {
     private readonly db;
-    private readonly q;
     private readonly dunningCampaigns;
     private readonly dunningCampaignAnalytics;
     constructor(db: DunningDatabase, tables: CampaignTables);
@@ -73,7 +69,6 @@ export declare class DunningCampaignRepository {
 }
 export declare class DunningTemplateRepository {
     private readonly db;
-    private readonly q;
     private readonly dunningTemplates;
     constructor(db: DunningDatabase, tables: Pick<DunningTables, 'dunningTemplates'>);
     findById(id: DunningTemplateId): Promise<DunningTemplate | null>;
@@ -86,7 +81,6 @@ export declare class DunningTemplateRepository {
 }
 export declare class DunningExecutionRepository {
     private readonly db;
-    private readonly q;
     private readonly dunningExecutions;
     constructor(db: DunningDatabase, tables: Pick<DunningTables, 'dunningExecutions'>);
     findById(id: DunningExecutionId): Promise<DunningExecution | null>;
@@ -100,7 +94,6 @@ export declare class DunningExecutionRepository {
 }
 export declare class DunningCommunicationRepository {
     private readonly db;
-    private readonly q;
     private readonly dunningCommunications;
     constructor(db: DunningDatabase, tables: Pick<DunningTables, 'dunningCommunications'>);
     findById(id: DunningCommunicationId): Promise<DunningCommunication | null>;
@@ -130,7 +123,6 @@ export declare class DunningCommunicationRepository {
 type CustomerSegmentRow = DunningTables['customerSegments']['$inferSelect'];
 export declare class CustomerSegmentRepository {
     private readonly db;
-    private readonly q;
     private readonly customerSegments;
     constructor(db: DunningDatabase, tables: Pick<DunningTables, 'customerSegments'>);
     findById(id: CustomerSegmentId): Promise<CustomerSegmentRow | undefined>;
@@ -145,7 +137,6 @@ export declare class CustomerSegmentRepository {
 }
 export declare class CustomerRiskProfileRepository {
     private readonly db;
-    private readonly q;
     private readonly customerRiskProfiles;
     constructor(db: DunningDatabase, tables: Pick<DunningTables, 'customerRiskProfiles'>);
     findByCustomerId(customerId: CustomerId): Promise<CustomerRiskProfile | undefined>;

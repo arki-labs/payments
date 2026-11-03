@@ -1,8 +1,10 @@
+import { idColumns } from '@arki/db/id';
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, check, index, jsonb, numeric, text, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 import { instant } from '@arki/db/temporal';
 import { exemptionStatusValues, exemptionTypeValues, jurisdictionTypeValues, taxBusinessTypeValues, taxCalculationModeValues, taxConfigIdFactory, taxAuditEntryIdFactory, taxConfigStatusValues, taxExemptionIdFactory, taxJurisdictionIdFactory, taxRecordIdFactory, taxRecordTypeValues, } from './primitives.js';
-export function createTaxTables({ schema }) {
+/** Builds the tables. `createTaxTables` returns them under the names declared below. */
+function buildTaxTables({ schema }) {
     const taxConfigStatusEnum = schema.enum('tax_config_status', taxConfigStatusValues);
     const taxCalculationModeEnum = schema.enum('tax_calculation_mode', taxCalculationModeValues);
     const taxBusinessTypeEnum = schema.enum('tax_business_type', taxBusinessTypeValues);
@@ -11,7 +13,7 @@ export function createTaxTables({ schema }) {
     const exemptionStatusEnum = schema.enum('exemption_status', exemptionStatusValues);
     const taxRecordTypeEnum = schema.enum('tax_record_type', taxRecordTypeValues);
     const taxConfigurations = schema.table('tax_configurations', {
-        id: taxConfigIdFactory.primaryColumn(),
+        id: idColumns(taxConfigIdFactory).primaryColumn(),
         name: varchar('name', { length: 255 }).notNull(),
         description: text('description'),
         status: taxConfigStatusEnum('status').$type().notNull().default('active'),
@@ -37,11 +39,11 @@ export function createTaxTables({ schema }) {
         updatedBy: varchar('updated_by', { length: 255 }),
     });
     const taxJurisdictions = schema.table('tax_jurisdictions', {
-        id: taxJurisdictionIdFactory.primaryColumn(),
+        id: idColumns(taxJurisdictionIdFactory).primaryColumn(),
         name: varchar('name', { length: 255 }).notNull(),
         code: varchar('code', { length: 20 }).notNull(),
         type: jurisdictionTypeEnum('type').$type().notNull(),
-        parentId: taxJurisdictionIdFactory.optionalForeignKey('parent_id', () => taxJurisdictions.id),
+        parentId: idColumns(taxJurisdictionIdFactory).optionalForeignKey('parent_id', () => taxJurisdictions.id),
         countryCode: varchar('country_code', { length: 2 }).notNull(),
         stateCode: varchar('state_code', { length: 10 }),
         standardRate: varchar('standard_rate', { length: 10 }),
@@ -60,13 +62,13 @@ export function createTaxTables({ schema }) {
             .default(sql `now()`),
     });
     const taxExemptions = schema.table('tax_exemptions', {
-        id: taxExemptionIdFactory.primaryColumn(),
+        id: idColumns(taxExemptionIdFactory).primaryColumn(),
         type: exemptionTypeEnum('type').$type().notNull(),
         /** New exemptions wait for review: only `approveExemption` makes one `active`, and only an `active` one is applied to a sale. */
         status: exemptionStatusEnum('status').$type().notNull().default('pending_review'),
         customerId: varchar('customer_id', { length: 255 }),
         productCode: varchar('product_code', { length: 100 }),
-        jurisdictionId: taxJurisdictionIdFactory.optionalForeignKey('jurisdiction_id', () => taxJurisdictions.id),
+        jurisdictionId: idColumns(taxJurisdictionIdFactory).optionalForeignKey('jurisdiction_id', () => taxJurisdictions.id),
         exemptionCode: varchar('exemption_code', { length: 50 }).notNull(),
         reason: text('reason').notNull(),
         certificateNumber: varchar('certificate_number', { length: 100 }),
@@ -92,7 +94,7 @@ export function createTaxTables({ schema }) {
      * compliance report add these up; nothing else stores per-jurisdiction tax.
      */
     const taxRecords = schema.table('tax_records', {
-        id: taxRecordIdFactory.primaryColumn(),
+        id: idColumns(taxRecordIdFactory).primaryColumn(),
         /** The caller's id for the transaction. Recording the same one again changes nothing. */
         reference: varchar('reference', { length: 255 }).notNull(),
         type: taxRecordTypeEnum('type').$type().notNull(),
@@ -119,7 +121,7 @@ export function createTaxTables({ schema }) {
     ]);
     /** Every tax action that was audited (a calculation, an exemption, a report), append-only. */
     const taxAuditEntries = schema.table('tax_audit_entries', {
-        id: taxAuditEntryIdFactory.primaryColumn(),
+        id: idColumns(taxAuditEntryIdFactory).primaryColumn(),
         action: varchar('action', { length: 20 }).$type().notNull(),
         entity: varchar('entity', { length: 20 }).$type().notNull(),
         entityId: varchar('entity_id', { length: 255 }).notNull(),
@@ -130,9 +132,9 @@ export function createTaxTables({ schema }) {
             .notNull()
             .default(sql `now()`),
     }, table => [index('tax_audit_entries_entity_idx').on(table.entity, table.entityId, table.occurredAt)]);
-    const taxConfigForeignKeys = taxConfigIdFactory.createForeignKeyFactory(() => taxConfigurations.id);
-    const taxJurisdictionForeignKeys = taxJurisdictionIdFactory.createForeignKeyFactory(() => taxJurisdictions.id);
-    const taxExemptionForeignKeys = taxExemptionIdFactory.createForeignKeyFactory(() => taxExemptions.id);
+    const taxConfigForeignKeys = idColumns(taxConfigIdFactory).createForeignKeyFactory(() => taxConfigurations.id);
+    const taxJurisdictionForeignKeys = idColumns(taxJurisdictionIdFactory).createForeignKeyFactory(() => taxJurisdictions.id);
+    const taxExemptionForeignKeys = idColumns(taxExemptionIdFactory).createForeignKeyFactory(() => taxExemptions.id);
     return {
         enums: {
             taxConfigStatusEnum,
@@ -154,5 +156,8 @@ export function createTaxTables({ schema }) {
             taxExemptionForeignKeys,
         },
     };
+}
+export function createTaxTables(deps) {
+    return buildTaxTables(deps);
 }
 //# sourceMappingURL=tables.js.map

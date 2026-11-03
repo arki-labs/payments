@@ -1,3 +1,4 @@
+import { idColumns } from '@arki/db/id';
 import type { PgColumn, PgSchema } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, check, integer, jsonb, real, text, varchar } from 'drizzle-orm/pg-core';
@@ -50,15 +51,11 @@ export type CreateDunningTablesDeps = {
  */
 type ExecutionResultJson = Record<string, unknown>;
 
-export function createDunningTables({
-  schema,
-  customerIdRef,
-  paymentIdRef,
-  subscriptionIdRef,
-}: CreateDunningTablesDeps) {
-  const customerFk = customerIdFactory.createForeignKeyFactory(customerIdRef);
-  const paymentFk = paymentIdFactory.createForeignKeyFactory(paymentIdRef);
-  const subscriptionFk = subscriptionIdFactory.createForeignKeyFactory(subscriptionIdRef);
+/** Builds the tables. `createDunningTables` returns them under the names declared below. */
+function buildDunningTables({ schema, customerIdRef, paymentIdRef, subscriptionIdRef }: CreateDunningTablesDeps) {
+  const customerFk = idColumns(customerIdFactory).createForeignKeyFactory(customerIdRef);
+  const paymentFk = idColumns(paymentIdFactory).createForeignKeyFactory(paymentIdRef);
+  const subscriptionFk = idColumns(subscriptionIdFactory).createForeignKeyFactory(subscriptionIdRef);
 
   const dunningCampaignTypeEnum = schema.enum('dunning_campaign_type', dunningCampaignTypeValues);
   const dunningCampaignStatusEnum = schema.enum('dunning_campaign_status', dunningCampaignStatusValues);
@@ -69,7 +66,7 @@ export function createDunningTables({
   const riskCategoryEnum = schema.enum('risk_category', riskCategoryValues);
 
   const dunningCampaigns = schema.table('dunning_campaigns', {
-    id: dunningCampaignIdFactory.primaryColumn(),
+    id: idColumns(dunningCampaignIdFactory).primaryColumn(),
     name: varchar('name', { length: 255 }).notNull(),
     description: text('description'),
     type: dunningCampaignTypeEnum('type').$type<DunningCampaignType>().notNull(),
@@ -116,8 +113,8 @@ export function createDunningTables({
   });
 
   const dunningTemplates = schema.table('dunning_templates', {
-    id: dunningTemplateIdFactory.primaryColumn(),
-    campaignId: dunningCampaignIdFactory.foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
+    id: idColumns(dunningTemplateIdFactory).primaryColumn(),
+    campaignId: idColumns(dunningCampaignIdFactory).foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
     name: varchar('name', { length: 255 }).notNull(),
     description: text('description'),
     stepNumber: integer('step_number').notNull(),
@@ -143,9 +140,9 @@ export function createDunningTables({
   });
 
   const dunningExecutions = schema.table('dunning_executions', {
-    id: dunningExecutionIdFactory.primaryColumn(),
-    campaignId: dunningCampaignIdFactory.foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
-    templateId: dunningTemplateIdFactory.optionalForeignKey('template_id', () => dunningTemplates.id, {
+    id: idColumns(dunningExecutionIdFactory).primaryColumn(),
+    campaignId: idColumns(dunningCampaignIdFactory).foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
+    templateId: idColumns(dunningTemplateIdFactory).optionalForeignKey('template_id', () => dunningTemplates.id, {
       onDelete: 'set null',
     }),
     customerId: customerFk.required('customer_id', { onDelete: 'cascade' }),
@@ -167,12 +164,12 @@ export function createDunningTables({
   });
 
   const dunningCommunications = schema.table('dunning_communications', {
-    id: dunningCommunicationIdFactory.primaryColumn(),
-    executionId: dunningExecutionIdFactory.foreignKey('execution_id', () => dunningExecutions.id, {
+    id: idColumns(dunningCommunicationIdFactory).primaryColumn(),
+    executionId: idColumns(dunningExecutionIdFactory).foreignKey('execution_id', () => dunningExecutions.id, {
       onDelete: 'cascade',
     }),
     customerId: customerFk.required('customer_id', { onDelete: 'cascade' }),
-    templateId: dunningTemplateIdFactory.foreignKey('template_id', () => dunningTemplates.id, { onDelete: 'restrict' }),
+    templateId: idColumns(dunningTemplateIdFactory).foreignKey('template_id', () => dunningTemplates.id, { onDelete: 'restrict' }),
     channel: communicationChannelEnum('channel').$type<CommunicationChannel>().notNull(),
     recipient: varchar('recipient', { length: 255 }).notNull(),
     subject: varchar('subject', { length: 500 }),
@@ -192,7 +189,7 @@ export function createDunningTables({
   });
 
   const customerSegments = schema.table('customer_segments', {
-    id: customerSegmentIdFactory.primaryColumn(),
+    id: idColumns(customerSegmentIdFactory).primaryColumn(),
     name: varchar('name', { length: 255 }).notNull(),
     description: text('description'),
     type: customerSegmentTypeEnum('type').$type<CustomerSegmentType>().notNull(),
@@ -221,7 +218,7 @@ export function createDunningTables({
   });
 
   const customerRiskProfiles = schema.table('customer_risk_profiles', {
-    id: customerRiskProfileIdFactory.primaryColumn(),
+    id: idColumns(customerRiskProfileIdFactory).primaryColumn(),
     customerId: customerFk.required('customer_id', { onDelete: 'cascade' }),
     segmentIds: jsonb('segment_ids').$type<string[]>().notNull().default([]),
     riskScore: jsonb('risk_score')
@@ -282,7 +279,7 @@ export function createDunningTables({
 
   const dunningCampaignAnalytics = schema.table('dunning_campaign_analytics', {
     id: varchar('id', { length: 255 }).primaryKey(),
-    campaignId: dunningCampaignIdFactory.foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
+    campaignId: idColumns(dunningCampaignIdFactory).foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),
     date: instant('date').notNull(),
     executions: integer('executions').notNull().default(0),
     customersReached: integer('customers_reached').notNull().default(0),
@@ -311,14 +308,14 @@ export function createDunningTables({
     check('dunning_analytics_processing_costs_minor_not_negative', sql`"processing_costs_minor" >= 0`),
   ]);
 
-  const dunningCampaignForeignKeys = dunningCampaignIdFactory.createForeignKeyFactory(() => dunningCampaigns.id);
-  const dunningTemplateForeignKeys = dunningTemplateIdFactory.createForeignKeyFactory(() => dunningTemplates.id);
-  const dunningExecutionForeignKeys = dunningExecutionIdFactory.createForeignKeyFactory(() => dunningExecutions.id);
-  const dunningCommunicationForeignKeys = dunningCommunicationIdFactory.createForeignKeyFactory(
+  const dunningCampaignForeignKeys = idColumns(dunningCampaignIdFactory).createForeignKeyFactory(() => dunningCampaigns.id);
+  const dunningTemplateForeignKeys = idColumns(dunningTemplateIdFactory).createForeignKeyFactory(() => dunningTemplates.id);
+  const dunningExecutionForeignKeys = idColumns(dunningExecutionIdFactory).createForeignKeyFactory(() => dunningExecutions.id);
+  const dunningCommunicationForeignKeys = idColumns(dunningCommunicationIdFactory).createForeignKeyFactory(
     () => dunningCommunications.id,
   );
-  const customerSegmentForeignKeys = customerSegmentIdFactory.createForeignKeyFactory(() => customerSegments.id);
-  const customerRiskProfileForeignKeys = customerRiskProfileIdFactory.createForeignKeyFactory(
+  const customerSegmentForeignKeys = idColumns(customerSegmentIdFactory).createForeignKeyFactory(() => customerSegments.id);
+  const customerRiskProfileForeignKeys = idColumns(customerRiskProfileIdFactory).createForeignKeyFactory(
     () => customerRiskProfiles.id,
   );
 
@@ -350,4 +347,53 @@ export function createDunningTables({
   };
 }
 
-export type DunningTables = ReturnType<typeof createDunningTables>;
+// Each table gets a name (an interface over its Drizzle type), so declaration files, docs and editor
+// hovers say the table's name instead of the whole expanded Drizzle type. The type is still built by
+// `buildDunningTables` above; the interfaces only name it.
+type BuiltDunningTables = ReturnType<typeof buildDunningTables>;
+type DunningCampaignsTableType = BuiltDunningTables['dunningCampaigns'];
+type DunningTemplatesTableType = BuiltDunningTables['dunningTemplates'];
+type DunningExecutionsTableType = BuiltDunningTables['dunningExecutions'];
+type DunningCommunicationsTableType = BuiltDunningTables['dunningCommunications'];
+type CustomerSegmentsTableType = BuiltDunningTables['customerSegments'];
+type CustomerRiskProfilesTableType = BuiltDunningTables['customerRiskProfiles'];
+type DunningCampaignAnalyticsTableType = BuiltDunningTables['dunningCampaignAnalytics'];
+
+/** The `dunning_campaigns` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface DunningCampaignsTable extends DunningCampaignsTableType {}
+/** The `dunning_templates` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface DunningTemplatesTable extends DunningTemplatesTableType {}
+/** The `dunning_executions` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface DunningExecutionsTable extends DunningExecutionsTableType {}
+/** The `dunning_communications` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface DunningCommunicationsTable extends DunningCommunicationsTableType {}
+/** The `customer_segments` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface CustomerSegmentsTable extends CustomerSegmentsTableType {}
+/** The `customer_risk_profiles` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface CustomerRiskProfilesTable extends CustomerRiskProfilesTableType {}
+/** The `dunning_campaign_analytics` table. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/consistent-type-definitions
+export interface DunningCampaignAnalyticsTable extends DunningCampaignAnalyticsTableType {}
+
+/** What `createDunningTables` returns: the enums, the seven tables, and a foreign-key factory for six of them. */
+export type DunningTables = {
+  enums: BuiltDunningTables['enums'];
+  dunningCampaigns: DunningCampaignsTable;
+  dunningTemplates: DunningTemplatesTable;
+  dunningExecutions: DunningExecutionsTable;
+  dunningCommunications: DunningCommunicationsTable;
+  customerSegments: CustomerSegmentsTable;
+  customerRiskProfiles: CustomerRiskProfilesTable;
+  dunningCampaignAnalytics: DunningCampaignAnalyticsTable;
+  foreignKeys: BuiltDunningTables['foreignKeys'];
+};
+
+export function createDunningTables(deps: CreateDunningTablesDeps): DunningTables {
+  return buildDunningTables(deps);
+}

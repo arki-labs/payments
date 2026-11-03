@@ -1,4 +1,11 @@
-import { add, isSameOrBefore, now, toMillis } from '@arki/date';
+import { add, isAfter, isBefore, isSameOrBefore, now, toMillis } from '@arki/date';
+import { isFailure } from '@arki/failure';
+import { getLogger } from '@arki/log';
+import { MoneyBag } from '@arki/money/bag';
+import { PaymentWithoutSubscription } from '../failures.js';
+import { paymentAmount } from '../money.js';
+import { CardDeclined, ReferenceNotFound } from '../providers/provider-error.js';
+const logger = getLogger('arki:payments:retry');
 const DEFAULT_RETRY_STRATEGIES = [
     {
         name: 'card_declined_standard',
@@ -61,91 +68,85 @@ export class PaymentRetryService {
         this.writes = writes;
         this.strategies = strategies;
     }
+    /**
+     * Schedule the retries of a failed subscription payment by the first strategy that fits it.
+     * Returns the scheduled attempts (none when no strategy fits), or a failure:
+     * `ReferenceNotFound` (payment or subscription) or `PaymentWithoutSubscription`.
+     */
     async scheduleRetries(paymentId, failureReason) {
-        try {
-            const payment = await this.paymentRepository.findPaymentById(paymentId);
-            if (!payment) {
-                throw new Error('Payment not found');
-            }
-            if (!payment.subscriptionId) {
-                throw new Error('Payment must be associated with a subscription for retries');
-            }
-            // Minimal subscription used for strategy selection — real implementation
-            // would load via subscription repository.
-            const subscription = {
-                id: payment.subscriptionId,
-                userId: payment.userId,
-                status: 'active',
-                currentPeriodStart: now(),
-                currentPeriodEnd: now(),
-                planId: 'default_plan_id',
-                customerId: payment.customerId,
-                providerSubscriptionId: 'default_provider_id',
-                cancelAtPeriodEnd: false,
-                metadata: null,
-                trialStart: null,
-                trialEnd: null,
-                canceledAt: null,
-                createdAt: now(),
-                updatedAt: now(),
-            };
-            const domainPayment = {
-                ...payment,
-                subscriptionId: payment.subscriptionId ?? null,
-                description: payment.description ?? null,
-                failureReason: payment.failureReason ?? null,
-                receiptUrl: payment.receiptUrl ?? null,
-                metadata: payment.metadata ?? null,
-            };
-            const strategy = this.selectRetryStrategy(domainPayment, failureReason, subscription);
-            if (!strategy) {
-                console.log(`No retry strategy found for payment ${paymentId} with failure reason: ${failureReason}`);
-                return [];
-            }
-            await this.cancelRetries(paymentId);
-            const retryAttempts = [];
-            const current = now();
-            for (let i = 0; i < strategy.maxAttempts; i++) {
-                const delayMinutes = this.calculateDelay(strategy, i);
-                const scheduledFor = add(current, { minutes: delayMinutes });
-                const attempt = {
-                    id: `retry_${paymentId}_${i + 1}_${Date.now()}`,
-                    paymentId,
-                    subscriptionId: subscription.id,
-                    attemptNumber: i + 1,
-                    scheduledFor,
-                    status: 'pending',
-                    strategyUsed: strategy.name,
-                    createdAt: current,
-                };
-                this.retryAttempts.set(attempt.id, attempt);
-                retryAttempts.push(attempt);
-            }
-            console.log(`Scheduled ${retryAttempts.length} retry attempts for payment ${paymentId} using strategy: ${strategy.name}`);
-            return retryAttempts;
+        const payment = await this.paymentRepository.findPaymentById(paymentId);
+        if (!payment)
+            return ReferenceNotFound({ kind: 'payment', id: paymentId, missing: 'row' });
+        if (!payment.subscriptionId)
+            return PaymentWithoutSubscription({ paymentId });
+        const subscription = await this.paymentRepository.findSubscriptionById(payment.subscriptionId);
+        if (!subscription) {
+            return ReferenceNotFound({ kind: 'subscription', id: payment.subscriptionId, missing: 'row' });
         }
-        catch (error) {
-            console.error(`Failed to schedule retries for payment ${paymentId}:`, error);
-            throw error;
+        const strategy = this.selectRetryStrategy(payment, failureReason, subscription);
+        if (!strategy) {
+            logger.debug('No retry strategy fits payment {paymentId} with failure reason {failureReason}', {
+                paymentId,
+                failureReason,
+            });
+            const none = [];
+            return none;
         }
+        await this.cancelRetries(paymentId);
+        const retryAttempts = [];
+        const current = now();
+        for (let i = 0; i < strategy.maxAttempts; i++) {
+            const delayMinutes = this.calculateDelay(strategy, i);
+            const scheduledFor = add(current, { minutes: delayMinutes });
+            const attempt = {
+                id: `retry_${paymentId}_${i + 1}_${Date.now()}`,
+                paymentId,
+                subscriptionId: subscription.id,
+                attemptNumber: i + 1,
+                scheduledFor,
+                status: 'pending',
+                strategyUsed: strategy.name,
+                createdAt: current,
+            };
+            this.retryAttempts.set(attempt.id, attempt);
+            retryAttempts.push(attempt);
+        }
+        logger.debug('Scheduled {count} retry attempts for payment {paymentId} using {strategy}', {
+            count: retryAttempts.length,
+            paymentId,
+            strategy: strategy.name,
+        });
+        return retryAttempts;
     }
     async processRetries() {
         const current = now();
         const pendingRetries = [...this.retryAttempts.values()]
             .filter((attempt) => attempt.status === 'pending' && isSameOrBefore(attempt.scheduledFor, current))
-            .sort((a, b) => toMillis(a.scheduledFor) - toMillis(b.scheduledFor));
-        console.log(`Processing ${pendingRetries.length} pending retry attempts`);
+            .toSorted((a, b) => toMillis(a.scheduledFor) - toMillis(b.scheduledFor));
+        logger.debug('Processing {count} pending retry attempts', { count: pendingRetries.length });
         for (const attempt of pendingRetries) {
             try {
-                await this.executeRetry(attempt);
+                const executed = await this.executeRetry(attempt);
+                if (isFailure(executed)) {
+                    logger.warn('Retry {attemptId} failed: {code}', {
+                        attemptId: attempt.id,
+                        code: executed.code,
+                        failure: executed,
+                    });
+                }
             }
             catch (error) {
-                console.error(`Failed to execute retry ${attempt.id}:`, error);
+                // One broken attempt must not stop the others
+                logger.error('Retry {attemptId} threw: {error}', {
+                    attemptId: attempt.id,
+                    error: error instanceof Error ? error : String(error),
+                });
                 attempt.status = 'failed';
                 attempt.failureReason = error instanceof Error ? error.message : 'Unknown error';
             }
         }
     }
+    /** Nothing, or the failure of a journal write; `attempt` then says `failed` with its message. */
     async executeRetry(attempt) {
         attempt.status = 'executing';
         attempt.executedAt = now();
@@ -153,33 +154,67 @@ export class PaymentRetryService {
             const subscription = await this.paymentRepository.findSubscriptionById(attempt.subscriptionId);
             if (!subscription || !['active', 'past_due'].includes(subscription.status)) {
                 attempt.status = 'cancelled';
-                console.log(`Cancelled retry ${attempt.id} - subscription no longer eligible`);
+                logger.debug('Cancelled retry {attemptId}: the subscription is no longer eligible', { attemptId: attempt.id });
                 return;
             }
             const payment = await this.paymentRepository.findPaymentById(attempt.paymentId);
             if (!payment || payment.status === 'succeeded') {
                 attempt.status = 'cancelled';
-                console.log(`Cancelled retry ${attempt.id} - payment already succeeded`);
+                logger.debug('Cancelled retry {attemptId}: the payment is gone or already succeeded', {
+                    attemptId: attempt.id,
+                });
                 return;
             }
-            console.log(`Executing retry attempt ${attempt.attemptNumber} for payment ${attempt.paymentId}`);
+            logger.debug('Executing retry attempt {attemptNumber} for payment {paymentId}', {
+                attemptNumber: attempt.attemptNumber,
+                paymentId: attempt.paymentId,
+            });
             const result = await this.paymentProvider.confirmPayment(attempt.paymentId);
+            if (isFailure(result)) {
+                // A declined card or a missing payment row: this attempt failed, as when the provider threw
+                attempt.status = 'failed';
+                attempt.failureReason = result.message;
+                logger.warn('Retry {attemptId} failed: {code}', { attemptId: attempt.id, code: result.code, failure: result });
+                // A declined card is a failed retry like any other: the last one ends dunning
+                if (CardDeclined.is(result) && (await this.isLastAttempt(attempt.paymentId, attempt.attemptNumber))) {
+                    const ended = await this.handleFinalFailure(attempt.paymentId, attempt.subscriptionId);
+                    if (isFailure(ended)) {
+                        attempt.failureReason = ended.message;
+                        return ended;
+                    }
+                }
+                return;
+            }
             if (result.status === 'succeeded') {
                 attempt.status = 'succeeded';
                 await this.cancelRetries(attempt.paymentId, attempt.id);
                 if (subscription.status === 'past_due') {
-                    await this.writes.activateSubscription({ subscriptionId: subscription.id });
+                    const activated = await this.writes.activateSubscription({ subscriptionId: subscription.id });
+                    // The money came in, but the row could not follow: the attempt counts as failed, as when the write threw
+                    if (isFailure(activated)) {
+                        attempt.status = 'failed';
+                        attempt.failureReason = activated.message;
+                        return activated;
+                    }
                 }
-                console.log(`Retry attempt ${attempt.id} succeeded - payment recovered`);
+                logger.info('Retry {attemptId} succeeded: payment {paymentId} recovered', {
+                    attemptId: attempt.id,
+                    paymentId: attempt.paymentId,
+                });
             }
             else {
                 attempt.status = 'failed';
                 attempt.failureReason = this.extractFailureReason(result);
-                console.log(`Retry attempt ${attempt.id} failed: ${attempt.failureReason}`);
+                logger.info('Retry {attemptId} failed: {reason}', { attemptId: attempt.id, reason: attempt.failureReason });
                 if (await this.isLastAttempt(attempt.paymentId, attempt.attemptNumber)) {
-                    await this.handleFinalFailure(attempt.paymentId, attempt.subscriptionId);
+                    const ended = await this.handleFinalFailure(attempt.paymentId, attempt.subscriptionId);
+                    if (isFailure(ended)) {
+                        attempt.failureReason = ended.message;
+                        return ended;
+                    }
                 }
             }
+            return;
         }
         catch (error) {
             attempt.status = 'failed';
@@ -225,9 +260,13 @@ export class PaymentRetryService {
         const maxAttemptNumber = Math.max(...paymentRetries.map((r) => r.attemptNumber));
         return currentAttemptNumber === maxAttemptNumber;
     }
+    /** Nothing, or the failure of the write: a subscription that is not there. */
     async handleFinalFailure(paymentId, subscriptionId) {
-        console.log(`All retry attempts exhausted for payment ${paymentId}`);
-        await this.writes.markSubscriptionPastDue({ subscriptionId });
+        logger.info('All retry attempts exhausted for payment {paymentId}', { paymentId });
+        const marked = await this.writes.markSubscriptionPastDue({ subscriptionId });
+        if (isFailure(marked))
+            return marked;
+        return;
     }
     async cancelRetries(paymentId, excludeId) {
         const retriesToCancel = [...this.retryAttempts.entries()].filter(([id, attempt]) => attempt.paymentId === paymentId && attempt.status === 'pending' && id !== excludeId);
@@ -235,19 +274,23 @@ export class PaymentRetryService {
             attempt.status = 'cancelled';
             this.retryAttempts.delete(id);
         }
-        console.log(`Cancelled ${retriesToCancel.length} pending retry attempts for payment ${paymentId}`);
+        logger.debug('Cancelled {count} pending retry attempts for payment {paymentId}', {
+            count: retriesToCancel.length,
+            paymentId,
+        });
     }
     getRetryAttempts(paymentId) {
         return [...this.retryAttempts.values()]
             .filter((attempt) => attempt.paymentId === paymentId)
-            .sort((a, b) => a.attemptNumber - b.attemptNumber);
+            .toSorted((a, b) => a.attemptNumber - b.attemptNumber);
     }
     async getRetryAnalytics(startDate, endDate) {
         const allRetries = [...this.retryAttempts.values()];
         const filteredRetries = startDate || endDate
             ? allRetries.filter((attempt) => {
+                // Temporal instants have no `<`/`>`: their `valueOf` throws, so compare with the date helpers
                 const date = attempt.createdAt;
-                return (!startDate || date >= startDate) && (!endDate || date <= endDate);
+                return (!startDate || !isBefore(date, startDate)) && (!endDate || !isAfter(date, endDate));
             })
             : allRetries;
         const totalRetryAttempts = filteredRetries.length;
@@ -273,7 +316,10 @@ export class PaymentRetryService {
             const reason = attempt.failureReason;
             commonFailureReasons[reason] = (commonFailureReasons[reason] || 0) + 1;
         }
-        const revenueRecovered = successfulRetries * 50;
+        // Each recovered payment counts once, at the amount stored on its row; a deleted payment adds nothing
+        const recoveredIds = new Set(filteredRetries.filter(r => r.status === 'succeeded').map(r => r.paymentId));
+        const recoveredPayments = await Promise.all([...recoveredIds].map(paymentId => this.paymentRepository.findPaymentById(paymentId)));
+        const revenueRecovered = MoneyBag.of(...recoveredPayments.flatMap(payment => (payment ? [paymentAmount(payment)] : [])));
         return {
             totalRetryAttempts,
             successfulRetries,

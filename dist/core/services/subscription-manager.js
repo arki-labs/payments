@@ -1,18 +1,8 @@
 import { fromDate } from '@arki/date';
+import { isFailure } from '@arki/failure';
+import { PlanInactive, SubscriptionAlreadyActive, SubscriptionInvalidState } from '../failures.js';
 import { paymentAmount } from '../money.js';
-// Utility functions to convert between database and domain types
-function convertSubscriptionToDomain(dbSubscription) {
-    return {
-        ...dbSubscription,
-        trialStart: dbSubscription.trialStart ?? undefined,
-        trialEnd: dbSubscription.trialEnd ?? undefined,
-        canceledAt: dbSubscription.canceledAt ?? undefined,
-        metadata: dbSubscription.metadata ?? undefined,
-    };
-}
-function convertSubscriptionArrayToDomain(dbSubscriptions) {
-    return dbSubscriptions.map(convertSubscriptionToDomain);
-}
+import { ReferenceNotFound } from '../providers/provider-error.js';
 /**
  * Reads come from the repository. Every change of a `subscriptions` row goes
  * through `writes`: one journal command each, so each change leaves an event.
@@ -26,396 +16,340 @@ export class SubscriptionManager {
         this.paymentRepository = paymentRepository;
         this.writes = writes;
     }
+    /**
+     * Start a subscription for a user who has a customer and no active subscription. Returns the
+     * provider's subscription, or a failure: `ReferenceNotFound` (no customer for the user, or no
+     * plan), `PlanInactive`, `SubscriptionAlreadyActive`, or what the provider returned.
+     */
     async createSubscription(userId, planId, options = {}) {
-        try {
-            // Get or create customer
-            const customer = await this.paymentRepository.findCustomerByUserId(userId);
-            if (!customer) {
-                // This would typically get user info from the auth system
-                throw new Error('Customer not found and user info not available');
-            }
-            // Get plan details
-            const plan = await this.paymentRepository.findPlanById(planId);
-            if (!plan || !plan.isActive) {
-                throw new Error('Plan not found or inactive');
-            }
-            // Check for existing active subscription
-            const existingSubscription = await this.paymentRepository.findActiveSubscriptionByUserId(userId);
-            if (existingSubscription) {
-                throw new Error('User already has an active subscription');
-            }
-            // Create subscription with the payment provider
-            const providerSubscription = await this.paymentProvider.createSubscription({
-                customerId: customer.id,
-                planId,
-                paymentMethodId: options.paymentMethodId,
-                trialPeriodDays: options.trialPeriodDays ?? plan.trialPeriodDays ?? undefined,
-                metadata: options.metadata,
-            });
-            return providerSubscription;
+        const customer = await this.paymentRepository.findCustomerByUserId(userId);
+        if (!customer)
+            return ReferenceNotFound({ kind: 'customer', id: userId, missing: 'row' });
+        const plan = await this.activePlan(planId);
+        if (isFailure(plan))
+            return plan;
+        const existingSubscription = await this.paymentRepository.findActiveSubscriptionByUserId(userId);
+        if (existingSubscription) {
+            return SubscriptionAlreadyActive({ userId, subscriptionId: existingSubscription.id });
         }
-        catch (error) {
-            throw new Error(`Failed to create subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        return this.paymentProvider.createSubscription({
+            customerId: customer.id,
+            planId,
+            paymentMethodId: options.paymentMethodId,
+            trialPeriodDays: options.trialPeriodDays ?? plan.trialPeriodDays ?? undefined,
+            metadata: options.metadata,
+        });
     }
+    /**
+     * Move an active subscription to another active plan. Returns the provider's subscription and
+     * the preview, or a failure: `ReferenceNotFound`, `SubscriptionInvalidState`, `PlanInactive`,
+     * what the provider returned, or the refusal of the journal write.
+     */
     async updateSubscription(subscriptionId, newPlanId, options = {}) {
-        try {
-            // Validate subscription exists
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (currentSubscription.status !== 'active') {
-                throw new Error('Only active subscriptions can be updated');
-            }
-            // Validate new plan exists
-            const newPlan = await this.paymentRepository.findPlanById(newPlanId);
-            if (!newPlan || !newPlan.isActive) {
-                throw new Error('New plan not found or inactive');
-            }
-            // Preview the change first
-            const preview = await this.paymentProvider.previewSubscriptionChange({
-                subscriptionId,
-                planId: newPlanId,
-                prorationBehavior: options.prorationBehavior || 'create_prorations',
-            });
-            // Update the subscription
-            const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, {
-                planId: newPlanId,
-                prorationBehavior: options.prorationBehavior || 'create_prorations',
-            });
-            // The provider moved the plan; store it. The provider's answer says which plan it is on now.
-            await this.writes.changeSubscriptionPlan({ subscriptionId, planId: updatedSubscription.planId });
-            return {
-                subscription: updatedSubscription,
-                preview,
-            };
-        }
-        catch (error) {
-            throw new Error(`Failed to update subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        const currentSubscription = await this.subscriptionIn(subscriptionId, ['active'], 'update');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        const newPlan = await this.activePlan(newPlanId);
+        if (isFailure(newPlan))
+            return newPlan;
+        // Preview the change first
+        const preview = await this.paymentProvider.previewSubscriptionChange({
+            subscriptionId,
+            planId: newPlanId,
+            prorationBehavior: options.prorationBehavior || 'create_prorations',
+        });
+        if (isFailure(preview))
+            return preview;
+        // Update the subscription
+        const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, {
+            planId: newPlanId,
+            prorationBehavior: options.prorationBehavior || 'create_prorations',
+        });
+        // A refused change stored nothing: the row keeps the old plan
+        if (isFailure(updatedSubscription))
+            return updatedSubscription;
+        // The provider moved the plan; store it. The provider's answer says which plan it is on now.
+        const stored = await this.writes.changeSubscriptionPlan({ subscriptionId, planId: updatedSubscription.planId });
+        if (isFailure(stored))
+            return stored;
+        return {
+            subscription: updatedSubscription,
+            preview,
+        };
     }
     /**
      * Set or clear "ends when the paid period ends". The provider changes the flag, then the row follows.
      * Unlike `cancelSubscription` it never cancels now, and `false` undoes an earlier `true`.
      */
     async setCancelAtPeriodEnd(subscriptionId, cancelAtPeriodEnd) {
-        try {
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (currentSubscription.status === 'canceled') {
-                throw new Error('Subscription is already canceled');
-            }
-            const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, { cancelAtPeriodEnd });
-            await this.writes.setSubscriptionCancelAtPeriodEnd({
-                subscriptionId,
-                cancelAtPeriodEnd: updatedSubscription.cancelAtPeriodEnd,
-            });
+        const currentSubscription = await this.subscriptionNotCanceled(subscriptionId, 'set_cancel_at_period_end');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        const updatedSubscription = await this.paymentProvider.updateSubscription(subscriptionId, { cancelAtPeriodEnd });
+        if (isFailure(updatedSubscription))
             return updatedSubscription;
-        }
-        catch (error) {
-            throw new Error(`Failed to set cancel at period end: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
-        }
+        const stored = await this.writes.setSubscriptionCancelAtPeriodEnd({
+            subscriptionId,
+            cancelAtPeriodEnd: updatedSubscription.cancelAtPeriodEnd,
+        });
+        if (isFailure(stored))
+            return stored;
+        return updatedSubscription;
     }
     async cancelSubscription(subscriptionId, options = {}) {
-        try {
-            // Validate subscription exists
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (currentSubscription.status === 'canceled') {
-                throw new Error('Subscription is already canceled');
-            }
-            // Cancel with the payment provider
-            const canceledSubscription = await this.paymentProvider.cancelSubscription(subscriptionId, {
-                immediately: options.immediately || false,
-                reason: options.reason,
-            });
-            // Update our database
-            await this.writes.cancelSubscription({
-                subscriptionId,
-                status: canceledSubscription.status,
-                canceledAt: canceledSubscription.canceledAt,
-                cancelAtPeriodEnd: canceledSubscription.cancelAtPeriodEnd,
-            });
+        const currentSubscription = await this.subscriptionNotCanceled(subscriptionId, 'cancel');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        // Cancel with the payment provider
+        const canceledSubscription = await this.paymentProvider.cancelSubscription(subscriptionId, {
+            immediately: options.immediately || false,
+            reason: options.reason,
+        });
+        if (isFailure(canceledSubscription))
             return canceledSubscription;
-        }
-        catch (error) {
-            throw new Error(`Failed to cancel subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        // Update our database
+        const stored = await this.writes.cancelSubscription({
+            subscriptionId,
+            status: canceledSubscription.status,
+            canceledAt: canceledSubscription.canceledAt,
+            cancelAtPeriodEnd: canceledSubscription.cancelAtPeriodEnd,
+        });
+        if (isFailure(stored))
+            return stored;
+        return canceledSubscription;
     }
     async reactivateSubscription(subscriptionId) {
-        try {
-            // Validate subscription exists and can be reactivated
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (!['canceled', 'past_due'].includes(currentSubscription.status)) {
-                throw new Error('Only canceled or past due subscriptions can be reactivated');
-            }
-            // Reactivate with the payment provider
-            const reactivatedSubscription = await this.paymentProvider.reactivateSubscription(subscriptionId);
-            // Update our database. The event clears the cancellation.
-            await this.writes.reactivateSubscription({ subscriptionId, status: reactivatedSubscription.status });
+        const currentSubscription = await this.subscriptionIn(subscriptionId, ['canceled', 'past_due'], 'reactivate');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        // Reactivate with the payment provider
+        const reactivatedSubscription = await this.paymentProvider.reactivateSubscription(subscriptionId);
+        if (isFailure(reactivatedSubscription))
             return reactivatedSubscription;
-        }
-        catch (error) {
-            throw new Error(`Failed to reactivate subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        // Update our database. The event clears the cancellation.
+        const stored = await this.writes.reactivateSubscription({
+            subscriptionId,
+            status: reactivatedSubscription.status,
+        });
+        if (isFailure(stored))
+            return stored;
+        return reactivatedSubscription;
     }
     async pauseSubscription(subscriptionId) {
-        try {
-            // Validate subscription exists and is active
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (currentSubscription.status !== 'active') {
-                throw new Error('Only active subscriptions can be paused');
-            }
-            // Pause with the payment provider
-            const pausedSubscription = await this.paymentProvider.pauseSubscription(subscriptionId);
-            // Update our database
-            await this.writes.pauseSubscription({ subscriptionId, status: pausedSubscription.status });
+        const currentSubscription = await this.subscriptionIn(subscriptionId, ['active'], 'pause');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        // Pause with the payment provider
+        const pausedSubscription = await this.paymentProvider.pauseSubscription(subscriptionId);
+        if (isFailure(pausedSubscription))
             return pausedSubscription;
-        }
-        catch (error) {
-            throw new Error(`Failed to pause subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        // Update our database
+        const stored = await this.writes.pauseSubscription({ subscriptionId, status: pausedSubscription.status });
+        if (isFailure(stored))
+            return stored;
+        return pausedSubscription;
     }
     async resumeSubscription(subscriptionId) {
-        try {
-            // Validate subscription exists and is paused
-            const currentSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!currentSubscription) {
-                throw new Error('Subscription not found');
-            }
-            if (currentSubscription.status !== 'paused') {
-                throw new Error('Only paused subscriptions can be resumed');
-            }
-            // Resume with the payment provider
-            const resumedSubscription = await this.paymentProvider.resumeSubscription(subscriptionId);
-            // Update our database
-            await this.writes.resumeSubscription({ subscriptionId, status: resumedSubscription.status });
+        const currentSubscription = await this.subscriptionIn(subscriptionId, ['paused'], 'resume');
+        if (isFailure(currentSubscription))
+            return currentSubscription;
+        // Resume with the payment provider
+        const resumedSubscription = await this.paymentProvider.resumeSubscription(subscriptionId);
+        if (isFailure(resumedSubscription))
             return resumedSubscription;
+        // Update our database
+        const stored = await this.writes.resumeSubscription({ subscriptionId, status: resumedSubscription.status });
+        if (isFailure(stored))
+            return stored;
+        return resumedSubscription;
+    }
+    /** The stored subscription when its status is one of `allowed`, or the failure that refuses `action`. */
+    async subscriptionIn(subscriptionId, allowed, action) {
+        const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+        if (!subscription)
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
+        if (!allowed.includes(subscription.status)) {
+            return SubscriptionInvalidState({ subscriptionId, status: subscription.status, action });
         }
-        catch (error) {
-            throw new Error(`Failed to resume subscription: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        return subscription;
+    }
+    /** The stored subscription unless it is missing or already canceled. */
+    async subscriptionNotCanceled(subscriptionId, action) {
+        const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+        if (!subscription)
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
+        if (subscription.status === 'canceled') {
+            return SubscriptionInvalidState({ subscriptionId, status: subscription.status, action });
         }
+        return subscription;
+    }
+    /** The plan when it exists and is offered, or `ReferenceNotFound` / `PlanInactive`. */
+    async activePlan(planId) {
+        const plan = await this.paymentRepository.findPlanById(planId);
+        if (!plan)
+            return ReferenceNotFound({ kind: 'plan', id: planId, missing: 'row' });
+        if (!plan.isActive)
+            return PlanInactive({ planId });
+        return plan;
     }
     async getSubscription(subscriptionId) {
-        const dbSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-        return dbSubscription ? convertSubscriptionToDomain(dbSubscription) : null;
+        return this.paymentRepository.findSubscriptionById(subscriptionId);
     }
     async getUserSubscriptions(userId) {
-        const dbSubscriptions = await this.paymentRepository.findSubscriptionsByUserId(userId);
-        return convertSubscriptionArrayToDomain(dbSubscriptions);
+        return this.paymentRepository.findSubscriptionsByUserId(userId);
     }
     async getActiveSubscription(userId) {
-        const dbSubscription = await this.paymentRepository.findActiveSubscriptionByUserId(userId);
-        return dbSubscription ? convertSubscriptionToDomain(dbSubscription) : null;
+        return this.paymentRepository.findActiveSubscriptionByUserId(userId);
     }
+    /**
+     * What a move to `newPlanId` would cost, from the provider. Returns the preview, or a failure:
+     * `ReferenceNotFound`, `PlanInactive`, or what the provider returned.
+     */
     async previewSubscriptionChange(subscriptionId, newPlanId, options = {}) {
-        try {
-            // Validate subscription and plan exist
-            const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!subscription) {
-                throw new Error('Subscription not found');
-            }
-            const newPlan = await this.paymentRepository.findPlanById(newPlanId);
-            if (!newPlan || !newPlan.isActive) {
-                throw new Error('New plan not found or inactive');
-            }
-            // Get preview from payment provider
-            return this.paymentProvider.previewSubscriptionChange({
-                subscriptionId,
-                planId: newPlanId,
-                prorationBehavior: options.prorationBehavior || 'create_prorations',
-            });
-        }
-        catch (error) {
-            throw new Error(`Failed to preview subscription change: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+        if (!subscription)
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
+        const newPlan = await this.activePlan(newPlanId);
+        if (isFailure(newPlan))
+            return newPlan;
+        return this.paymentProvider.previewSubscriptionChange({
+            subscriptionId,
+            planId: newPlanId,
+            prorationBehavior: options.prorationBehavior || 'create_prorations',
+        });
     }
+    /** Trialing subscriptions whose period ends in the local calendar day `daysBeforeExpiration` days from now. */
     async handleTrialEndingSoon(daysBeforeExpiration = 3) {
-        try {
-            // Local-time calendar days, as before: the working values stay `Date`s until the query.
-            const startDate = new Date();
-            startDate.setDate(startDate.getDate() + daysBeforeExpiration - 1);
-            const endDate = new Date();
-            endDate.setDate(endDate.getDate() + daysBeforeExpiration);
-            const subscriptions = await this.paymentRepository.findSubscriptionsEndingInRange(fromDate(startDate), fromDate(endDate));
-            // Filter for trialing subscriptions
-            const trialingSubscriptions = subscriptions.filter(sub => sub.status === 'trialing');
-            // Here you would typically send notifications or trigger other actions
-            // For now, just return the list
-            return convertSubscriptionArrayToDomain(trialingSubscriptions);
-        }
-        catch (error) {
-            throw new Error(`Failed to handle trial ending soon: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        // Local-time calendar days, as before: the working values stay `Date`s until the query.
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() + daysBeforeExpiration - 1);
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + daysBeforeExpiration);
+        const subscriptions = await this.paymentRepository.findSubscriptionsEndingInRange(fromDate(startDate), fromDate(endDate));
+        return subscriptions.filter(sub => sub.status === 'trialing');
     }
+    /** Every past due subscription. */
     async handlePastDueSubscriptions() {
-        try {
-            const pastDueSubscriptions = await this.paymentRepository.findSubscriptionsByStatus('past_due');
-            // Here you would implement business logic for handling past due subscriptions
-            // - Send notifications
-            // - Retry payments
-            // - Grace period management
-            // - Automatic cancellation after certain period
-            return convertSubscriptionArrayToDomain(pastDueSubscriptions);
-        }
-        catch (error) {
-            throw new Error(`Failed to handle past due subscriptions: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        return this.paymentRepository.findSubscriptionsByStatus('past_due');
     }
     async getSubscriptionAnalytics(startDate, endDate) {
-        try {
-            const subscriptions = await this.paymentRepository.getSubscriptionStats(startDate, endDate);
-            const payments = await this.paymentRepository.getPaymentStats(startDate, endDate);
-            const totalSubscriptions = subscriptions.length;
-            const activeSubscriptions = subscriptions.filter(sub => sub.status === 'active').length;
-            // Calculate churn rate (simplified)
-            const canceledSubscriptions = subscriptions.filter(sub => sub.status === 'canceled').length;
-            const churnRate = totalSubscriptions > 0 ? (canceledSubscriptions / totalSubscriptions) * 100 : 0;
-            // Calculate revenue metrics
-            const successfulPayments = payments.filter(payment => payment.status === 'succeeded');
-            const totalRevenue = successfulPayments.reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
-            const averageRevenuePerUser = activeSubscriptions > 0 ? totalRevenue / activeSubscriptions : 0;
-            // Calculate MRR and ARR (simplified)
-            const monthlyRevenue = successfulPayments
-                .filter(payment => {
-                const subscription = payment.subscription;
-                return subscription?.plan?.interval === 'monthly';
-            })
-                .reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
-            const yearlyRevenue = successfulPayments
-                .filter(payment => {
-                const subscription = payment.subscription;
-                return subscription?.plan?.interval === 'yearly';
-            })
-                .reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
-            const monthlyRecurringRevenue = monthlyRevenue + yearlyRevenue / 12;
-            const annualRecurringRevenue = monthlyRecurringRevenue * 12;
-            // Group by tier and status
-            const subscriptionsByTier = {};
-            const subscriptionsByStatus = {
-                active: 0,
-                canceled: 0,
-                incomplete: 0,
-                incomplete_expired: 0,
-                past_due: 0,
-                paused: 0,
-                trialing: 0,
-                unpaid: 0,
-            };
-            for (const subscription of subscriptions) {
-                // Group by tier
-                const plan = subscription.plan;
-                const tier = plan?.tier || 'unknown';
-                subscriptionsByTier[tier] = (subscriptionsByTier[tier] || 0) + 1;
-                // Group by status
-                subscriptionsByStatus[subscription.status]++;
-            }
-            return {
-                totalSubscriptions,
-                activeSubscriptions,
-                churnRate,
-                averageRevenuePerUser,
-                monthlyRecurringRevenue,
-                annualRecurringRevenue,
-                subscriptionsByTier,
-                subscriptionsByStatus,
-            };
+        const subscriptions = await this.paymentRepository.getSubscriptionStats(startDate, endDate);
+        const payments = await this.paymentRepository.getPaymentStats(startDate, endDate);
+        const totalSubscriptions = subscriptions.length;
+        const activeSubscriptions = subscriptions.filter(sub => sub.status === 'active').length;
+        // Calculate churn rate (simplified)
+        const canceledSubscriptions = subscriptions.filter(sub => sub.status === 'canceled').length;
+        const churnRate = totalSubscriptions > 0 ? (canceledSubscriptions / totalSubscriptions) * 100 : 0;
+        // Calculate revenue metrics
+        const successfulPayments = payments.filter(payment => payment.status === 'succeeded');
+        const totalRevenue = successfulPayments.reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
+        const averageRevenuePerUser = activeSubscriptions > 0 ? totalRevenue / activeSubscriptions : 0;
+        // Calculate MRR and ARR (simplified)
+        const monthlyRevenue = successfulPayments
+            .filter(payment => payment.subscription?.plan?.interval === 'monthly')
+            .reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
+        const yearlyRevenue = successfulPayments
+            .filter(payment => payment.subscription?.plan?.interval === 'yearly')
+            .reduce((sum, payment) => sum + paymentAmount(payment).toNumber(), 0);
+        const monthlyRecurringRevenue = monthlyRevenue + yearlyRevenue / 12;
+        const annualRecurringRevenue = monthlyRecurringRevenue * 12;
+        // Group by tier and status
+        const subscriptionsByTier = {};
+        const subscriptionsByStatus = {
+            active: 0,
+            canceled: 0,
+            incomplete: 0,
+            incomplete_expired: 0,
+            past_due: 0,
+            paused: 0,
+            trialing: 0,
+            unpaid: 0,
+        };
+        for (const subscription of subscriptions) {
+            // Group by tier
+            const tier = subscription.plan?.tier || 'unknown';
+            subscriptionsByTier[tier] = (subscriptionsByTier[tier] || 0) + 1;
+            // Group by status
+            subscriptionsByStatus[subscription.status]++;
         }
-        catch (error) {
-            throw new Error(`Failed to get subscription analytics: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        return {
+            totalSubscriptions,
+            activeSubscriptions,
+            churnRate,
+            averageRevenuePerUser,
+            monthlyRecurringRevenue,
+            annualRecurringRevenue,
+            subscriptionsByTier,
+            subscriptionsByStatus,
+        };
     }
+    /**
+     * Store what the provider holds for the subscription. Returns the stored row, or a failure:
+     * `ReferenceNotFound` (`missing: 'row'` when we hold no such subscription, `missing: 'provider_id'`
+     * when the provider has none for it), or the refusal of the journal write.
+     */
     async syncSubscriptionWithProvider(subscriptionId) {
-        try {
-            // Get the subscription from our database
-            const localSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
-            if (!localSubscription) {
-                throw new Error('Subscription not found in local database');
-            }
-            // Get the subscription from the payment provider
-            const providerSubscription = await this.paymentProvider.getSubscription(subscriptionId);
-            if (!providerSubscription) {
-                throw new Error('Subscription not found in payment provider');
-            }
-            // Update our database with the provider data. An answer that changes nothing writes no event.
-            const updatedSubscription = await this.writes.syncSubscription({
-                userId: localSubscription.userId,
-                planId: localSubscription.planId,
-                customerId: localSubscription.customerId,
-                providerSubscriptionId: localSubscription.providerSubscriptionId,
-                status: providerSubscription.status,
-                currentPeriodStart: providerSubscription.currentPeriodStart,
-                currentPeriodEnd: providerSubscription.currentPeriodEnd,
-                trialStart: providerSubscription.trialStart,
-                trialEnd: providerSubscription.trialEnd,
-                canceledAt: providerSubscription.canceledAt,
-                cancelAtPeriodEnd: providerSubscription.cancelAtPeriodEnd,
-                metadata: providerSubscription.metadata,
-            });
-            return convertSubscriptionToDomain(updatedSubscription);
+        const localSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+        if (!localSubscription)
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
+        const providerSubscription = await this.paymentProvider.getSubscription(subscriptionId);
+        if (!providerSubscription) {
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'provider_id' });
         }
-        catch (error) {
-            throw new Error(`Failed to sync subscription with provider: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
+        // Update our database with the provider data. An answer that changes nothing writes no event.
+        return this.writes.syncSubscription({
+            userId: localSubscription.userId,
+            planId: localSubscription.planId,
+            customerId: localSubscription.customerId,
+            providerSubscriptionId: localSubscription.providerSubscriptionId,
+            status: providerSubscription.status,
+            currentPeriodStart: providerSubscription.currentPeriodStart,
+            currentPeriodEnd: providerSubscription.currentPeriodEnd,
+            trialStart: providerSubscription.trialStart,
+            trialEnd: providerSubscription.trialEnd,
+            canceledAt: providerSubscription.canceledAt,
+            cancelAtPeriodEnd: providerSubscription.cancelAtPeriodEnd,
+            metadata: providerSubscription.metadata,
+        });
     }
     async validateSubscriptionAccess(userId, requiredTiers = []) {
-        try {
-            const subscription = await this.getActiveSubscription(userId);
-            if (!subscription) {
-                return {
-                    hasAccess: false,
-                    subscription: null,
-                    reason: 'No active subscription found',
-                };
-            }
-            if (subscription.status !== 'active' && subscription.status !== 'trialing') {
-                return {
-                    hasAccess: false,
-                    subscription,
-                    reason: `Subscription is ${subscription.status}`,
-                };
-            }
-            // If we need to check tiers, we need to get plan data
-            if (requiredTiers.length > 0) {
-                const subscriptionWithPlan = await this.paymentRepository.findSubscriptionById(subscription.id);
-                if (!subscriptionWithPlan?.plan) {
-                    return {
-                        hasAccess: false,
-                        subscription,
-                        reason: 'Subscription plan not found',
-                    };
-                }
-                if (!requiredTiers.includes(subscriptionWithPlan.plan.tier)) {
-                    return {
-                        hasAccess: false,
-                        subscription,
-                        reason: `Subscription tier ${subscriptionWithPlan.plan.tier} not in required tiers: ${requiredTiers.join(', ')}`,
-                    };
-                }
-            }
-            return {
-                hasAccess: true,
-                subscription,
-            };
-        }
-        catch (error) {
+        const subscription = await this.getActiveSubscription(userId);
+        if (!subscription) {
             return {
                 hasAccess: false,
                 subscription: null,
-                reason: `Validation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                reason: 'No active subscription found',
             };
         }
+        if (subscription.status !== 'active' && subscription.status !== 'trialing') {
+            return {
+                hasAccess: false,
+                subscription,
+                reason: `Subscription is ${subscription.status}`,
+            };
+        }
+        // If we need to check tiers, we need to get plan data
+        if (requiredTiers.length > 0) {
+            const subscriptionWithPlan = await this.paymentRepository.findSubscriptionById(subscription.id);
+            if (!subscriptionWithPlan?.plan) {
+                return {
+                    hasAccess: false,
+                    subscription,
+                    reason: 'Subscription plan not found',
+                };
+            }
+            if (!requiredTiers.includes(subscriptionWithPlan.plan.tier)) {
+                return {
+                    hasAccess: false,
+                    subscription,
+                    reason: `Subscription tier ${subscriptionWithPlan.plan.tier} not in required tiers: ${requiredTiers.join(', ')}`,
+                };
+            }
+        }
+        return {
+            hasAccess: true,
+            subscription,
+        };
     }
 }
 export function createSubscriptionManager(paymentProvider, paymentRepository, writes) {

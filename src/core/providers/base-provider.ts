@@ -1,5 +1,8 @@
-import type { Money } from '@arki/money';
+import type { IdGenerationFailure } from '@arki/contracts';
+import type { FailureOf, Result } from '@arki/failure';
+import type { Money, MoneyFailure } from '@arki/money';
 
+import type { RefundId } from '../../refunds/primitives.js';
 import type {
   BillingInterval,
   Customer,
@@ -18,6 +21,26 @@ import type {
   SubscriptionStatus,
   WebhookValidationResult,
 } from '../types.js';
+import type {
+  CardDeclined,
+  IdempotencyConflict,
+  PaymentMethodRequired,
+  PlanPriceNotFlat,
+  ReferenceNotFound,
+} from './provider-error.js';
+
+type Declined = FailureOf<typeof CardDeclined>;
+type Conflict = FailureOf<typeof IdempotencyConflict>;
+type NotFound = FailureOf<typeof ReferenceNotFound>;
+type NoPaymentMethod = FailureOf<typeof PaymentMethodRequired>;
+/** A plan row whose provider price is not a flat recurring price (`payments.plan_price_not_flat`). */
+type NotFlat = FailureOf<typeof PlanPriceNotFlat>;
+/**
+ * An amount `@arki/money` refuses at the provider boundary: in a provider answer, an unknown currency or units
+ * off the provider's rule; in a request, an amount the provider cannot take (`money.provider_amount`: negative,
+ * a currency it has no rule for, a fraction it lacks; `money.out_of_range`: past 2^53 units).
+ */
+type BadAmount = MoneyFailure;
 
 export type PaymentProviderConfig = {
   apiKey: string;
@@ -27,10 +50,16 @@ export type PaymentProviderConfig = {
   environment: 'sandbox' | 'production';
 }
 
-/** What a refund call answers: the provider's refund id, and the payment as the provider now has it. */
+/**
+ * What a refund call answers: the provider's refund id and where the refund stands. A refund the
+ * provider failed or canceled is an answer, not an error: the caller reads `status`.
+ */
 export type ProviderRefundResult = {
   providerRefundId: string;
-  payment: Payment;
+  /** As the provider reports it. Stripe: `pending`, `requires_action`, `succeeded`, `failed` or `canceled`. */
+  status: string | null;
+  /** Why the provider failed the refund, in its own words (Stripe: `insufficient_funds`, `declined`, ...). Null otherwise. */
+  failureReason: string | null;
 };
 
 export abstract class BasePaymentProvider {
@@ -47,7 +76,7 @@ export abstract class BasePaymentProvider {
     email: string;
     name?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<Customer>;
+  }): Promise<Result<Customer, IdGenerationFailure>>;
 
   abstract getCustomer(customerId: CustomerId): Promise<Customer | null>;
 
@@ -58,9 +87,9 @@ export abstract class BasePaymentProvider {
       name?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<Customer>;
+  ): Promise<Result<Customer, NotFound>>;
 
-  abstract deleteCustomer(customerId: CustomerId): Promise<void>;
+  abstract deleteCustomer(customerId: CustomerId): Promise<Result<undefined, NotFound>>;
 
   // Plan Management
   abstract createPlan(params: {
@@ -73,9 +102,10 @@ export abstract class BasePaymentProvider {
     intervalCount?: number;
     trialPeriodDays?: number;
     metadata?: Record<string, unknown>;
-  }): Promise<Plan>;
+  }): Promise<Result<Plan, IdGenerationFailure | BadAmount>>;
 
-  abstract getPlan(planId: PlanId): Promise<Plan | null>;
+  /** `null` when the plan has no row; `ReferenceNotFound` when its row has no provider price. */
+  abstract getPlan(planId: PlanId): Promise<Result<Plan | null, NotFound | NotFlat | BadAmount>>;
 
   abstract updatePlan(
     planId: PlanId,
@@ -83,11 +113,11 @@ export abstract class BasePaymentProvider {
       name?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<Plan>;
+  ): Promise<Result<Plan, NotFound | NotFlat | BadAmount>>;
 
-  abstract deletePlan(planId: PlanId): Promise<void>;
+  abstract deletePlan(planId: PlanId): Promise<Result<undefined, NotFound>>;
 
-  abstract listPlans(): Promise<Plan[]>;
+  abstract listPlans(): Promise<Result<Plan[], NotFlat | BadAmount>>;
 
   // Subscription Management
   abstract createSubscription(params: {
@@ -98,7 +128,7 @@ export abstract class BasePaymentProvider {
     metadata?: Record<string, unknown>;
     /** Same key, same parameters: the provider returns the first result instead of creating a second subscription. */
     idempotencyKey?: string;
-  }): Promise<Subscription>;
+  }): Promise<Result<Subscription, Declined | Conflict | NotFound | IdGenerationFailure>>;
 
   abstract getSubscription(subscriptionId: SubscriptionId): Promise<Subscription | null>;
 
@@ -113,7 +143,7 @@ export abstract class BasePaymentProvider {
       prorationBehavior?: 'create_prorations' | 'none' | 'always_invoice';
       idempotencyKey?: string;
     },
-  ): Promise<Subscription>;
+  ): Promise<Result<Subscription, Declined | Conflict | NotFound>>;
 
   abstract cancelSubscription(
     subscriptionId: SubscriptionId,
@@ -123,19 +153,19 @@ export abstract class BasePaymentProvider {
       reason?: string;
       idempotencyKey?: string;
     },
-  ): Promise<Subscription>;
+  ): Promise<Result<Subscription, Conflict | NotFound>>;
 
-  abstract reactivateSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
+  abstract reactivateSubscription(subscriptionId: SubscriptionId): Promise<Result<Subscription, NotFound>>;
 
-  abstract pauseSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
+  abstract pauseSubscription(subscriptionId: SubscriptionId): Promise<Result<Subscription, NotFound>>;
 
-  abstract resumeSubscription(subscriptionId: SubscriptionId): Promise<Subscription>;
+  abstract resumeSubscription(subscriptionId: SubscriptionId): Promise<Result<Subscription, NotFound>>;
 
   abstract previewSubscriptionChange(params: {
     subscriptionId: SubscriptionId;
     planId: PlanId;
     prorationBehavior?: 'create_prorations' | 'none' | 'always_invoice';
-  }): Promise<SubscriptionPreview>;
+  }): Promise<Result<SubscriptionPreview, NotFound | BadAmount>>;
 
   // Payment Management
   abstract createPayment(params: {
@@ -144,38 +174,43 @@ export abstract class BasePaymentProvider {
     paymentMethodId: string;
     description?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<Payment>;
+  }): Promise<Result<Payment, Declined | NotFound | IdGenerationFailure | BadAmount>>;
 
-  abstract getPayment(paymentId: PaymentId): Promise<Payment | null>;
+  abstract getPayment(paymentId: PaymentId): Promise<Result<Payment | null, BadAmount>>;
 
-  abstract confirmPayment(paymentId: PaymentId): Promise<Payment>;
+  abstract confirmPayment(paymentId: PaymentId): Promise<Result<Payment, Declined | NotFound | BadAmount>>;
 
-  abstract cancelPayment(paymentId: PaymentId): Promise<Payment>;
+  abstract cancelPayment(paymentId: PaymentId): Promise<Result<Payment, NotFound | BadAmount>>;
 
+  /** `amount` must be in the payment's currency: another currency throws (`RefundService` checks it first). */
   abstract refundPayment(
     paymentId: PaymentId,
     params: {
+      /** Our refund id. Stored on the provider's refund as `metadata.refundId`, so it can be found again. */
+      refundId: RefundId;
+      /** Sent to the provider, so a retry with the same key makes no second refund. */
+      idempotencyKey: string;
       /** Left out: the whole payment. */
       amount?: Money;
       reason?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<ProviderRefundResult>;
+  ): Promise<Result<ProviderRefundResult, NotFound | Conflict | BadAmount>>;
 
   // Payment Methods
   abstract attachPaymentMethod(params: {
     customerId: CustomerId;
     paymentMethodId: string;
-  }): Promise<PaymentMethodInfo>;
+  }): Promise<Result<PaymentMethodInfo, Declined | NotFound>>;
 
   abstract detachPaymentMethod(paymentMethodId: string): Promise<void>;
 
-  abstract listPaymentMethods(customerId: CustomerId): Promise<PaymentMethodInfo[]>;
+  abstract listPaymentMethods(customerId: CustomerId): Promise<Result<PaymentMethodInfo[], NotFound>>;
 
   abstract setDefaultPaymentMethod(params: {
     customerId: CustomerId;
     paymentMethodId: string;
-  }): Promise<void>;
+  }): Promise<Result<undefined, NotFound>>;
 
   // Webhook Validation
   abstract validateWebhook(
@@ -189,25 +224,35 @@ export abstract class BasePaymentProvider {
   abstract createSetupIntent(
     customerId: CustomerId,
     options?: { idempotencyKey?: string },
-  ): Promise<{
-    clientSecret: string;
-    setupIntentId: string;
-  }>;
+  ): Promise<
+    Result<
+      {
+        clientSecret: string;
+        setupIntentId: string;
+      },
+      Conflict | NotFound
+    >
+  >;
 
   abstract createPaymentIntent(params: {
     customerId: CustomerId;
     amount: Money;
     paymentMethodId?: string;
     /**
-     * True: charge now without the customer present. Needs `paymentMethodId`.
+     * True: charge now without the customer present. Needs `paymentMethodId`; without one, `PaymentMethodRequired` is returned.
      * False: the customer finishes the payment in the client with the returned secret.
      */
     automatic: boolean;
     idempotencyKey?: string;
-  }): Promise<{
-    clientSecret: string;
-    paymentIntentId: string;
-  }>;
+  }): Promise<
+    Result<
+      {
+        clientSecret: string;
+        paymentIntentId: string;
+      },
+      Declined | Conflict | NotFound | NoPaymentMethod | BadAmount
+    >
+  >;
 
   // Health Check
   abstract healthCheck(): Promise<{ status: 'healthy' | 'degraded' | 'unhealthy'; details?: string }>;

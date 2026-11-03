@@ -1,4 +1,5 @@
 import type { Instant } from '@arki/date';
+import type { Failure } from '@arki/failure';
 import { Money } from '@arki/money';
 import type { StripeProvider } from '../core/providers/stripe-provider.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../core/types.js';
@@ -11,7 +12,7 @@ export type TaxServiceReads = {
     jurisdictions: Pick<TaxJurisdictionRepository, 'findJurisdictionById'>;
     records: Pick<TaxRecordRepository, 'findByReference' | 'recordMany' | 'totalsByJurisdiction' | 'countSaleTransactions'>;
 };
-type TaxBreakdownLine = Awaited<ReturnType<StripeProvider['calculateTax']>>['taxBreakdown'][number];
+type TaxBreakdownLine = Exclude<Awaited<ReturnType<StripeProvider['calculateTax']>>, Failure>['taxBreakdown'][number];
 /**
  * True when Stripe's tax line is the tax of our jurisdiction. The display name alone cannot say:
  * Georgia is a US state and a country. The line must be in the same country, at the same level, and
@@ -110,8 +111,11 @@ export declare class TaxService {
      * breakdown, unless the tax is inclusive (it is part of the price then, and stays). A line that is
      * wholly exempt is not sent to Stripe. An exemption needs what its type says it is for (a customer, a product or a
      * jurisdiction): one without would exempt every sale, so it is never applied.
+     *
+     * A Stripe amount that `@arki/money` refuses (an unknown currency, units off Stripe's rule) is returned as a
+     * `MoneyFailure`, so a sale is never priced with a wrong tax.
      */
-    calculateTax(input: TaxCalculationInput): Promise<TaxCalculationResult>;
+    calculateTax(input: TaxCalculationInput): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
     /**
      * Create a tax transaction for compliance tracking
      * Called when a payment is successful or a refund is processed
@@ -142,7 +146,19 @@ export declare class TaxService {
         occurredAt?: Instant;
         /** For a `refund`: the `reference` of the recorded sale it reverses. Required there, ignored for a sale. */
         originalReference?: string;
-    }): Promise<TaxTransaction>;
+    }): Promise<Failure<"money.input_too_large", undefined> | Failure<"money.invalid_text", undefined> | Failure<"money.out_of_range", undefined> | Failure<"money.provider_amount", undefined> | Failure<"money.unknown_currency", undefined> | Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription";
+        id: string;
+        missing: "provider_id" | "row";
+    }> | Failure<"payments.tax_address_incomplete", undefined> | Failure<"payments.tax_currency_mismatch", {
+        reference: string;
+        jurisdiction: string;
+        taxCurrency: string;
+        transactionCurrency: string;
+    }> | Failure<"payments.tax_refund_sale_not_found", {
+        reference: string;
+        originalReference: string | null;
+    }> | TaxTransaction>;
     /**
      * Get tax settings and configuration
      * Useful for displaying tax information to customers
@@ -174,7 +190,7 @@ export declare class TaxService {
         planInterval: 'monthly' | 'yearly' | 'weekly' | 'daily';
         taxCode?: string;
         customerDetails?: TaxCalculationInput['customerDetails'];
-    }): Promise<TaxCalculationResult>;
+    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
     /**
      * Calculate tax for one-time payments (tips, donations)
      * Special handling for non-recurring transactions
@@ -185,7 +201,7 @@ export declare class TaxService {
         description: string;
         taxCode?: string;
         customerDetails?: TaxCalculationInput['customerDetails'];
-    }): Promise<TaxCalculationResult>;
+    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
     /**
      * Check the format of a customer's tax ID. The format only: whether the number is registered
      * takes the registry (VIES, HMRC, the IRS). `format: 'unknown'` means no format is known for

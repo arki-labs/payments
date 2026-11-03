@@ -1,96 +1,99 @@
+import { z } from '@arki/contracts';
 import { now } from '@arki/date';
+import { isFailure } from '@arki/failure';
 import { refundAmountOf } from '../../refunds/repository.js';
-/**
- * Email-based Notification Service Implementation
- * Simple implementation that would typically integrate with an email service
- */
+import { misconfigured, NotificationFailed } from '../failures.js';
+import { ReferenceNotFound } from '../providers/provider-error.js';
+import { observePayments } from '../telemetry.js';
+const emailConfigSchema = z.object({
+    adminEmails: z.array(z.email()).min(1),
+    supportEmail: z.email(),
+    send: z.custom(value => typeof value === 'function', 'send must be a function'),
+    reads: z.object({
+        findPaymentById: z.custom(value => typeof value === 'function', 'reads.findPaymentById must be a function'),
+        findCustomerById: z.custom(value => typeof value === 'function', 'reads.findCustomerById must be a function'),
+    }),
+});
+/** Throws `payments.configuration_invalid` for `setting` when `config` does not match `schema`; the problem lists each bad field. */
+function checkNotificationConfig(config, schema, setting) {
+    const checked = schema.safeParse(config);
+    if (checked.success)
+        return;
+    throw misconfigured(setting, checked.error.issues.map(issue => `${issue.path.join('.') || '(config)'}: ${issue.message}`).join('; '));
+}
+/** Refund notifications by mail, sent through the transport the app passes in. */
 export class EmailNotificationService {
-    emailConfig;
-    constructor(emailConfig) {
-        this.emailConfig = emailConfig;
+    config;
+    /** Throws `payments.configuration_invalid` for a config without a transport, reads, an admin address or a valid support address. */
+    constructor(config) {
+        checkNotificationConfig(config, emailConfigSchema, 'notifications.email');
+        this.config = config;
     }
     async sendRefundApprovalRequest(refund) {
-        // In a real implementation, this would send an email to admins
-        console.log(`[EMAIL] Refund approval request for ${refund.id}`, {
-            to: this.emailConfig.adminEmails,
+        return this.mail('refund_approval_request', {
+            to: this.config.adminEmails,
             subject: `Refund Request Pending Approval - ${refund.id}`,
-            refundId: refund.id,
-            amount: refundAmountOf(refund).toString(),
-            reason: refund.reason,
-            requestedBy: refund.requestedBy,
+            text: [
+                `Refund ${refund.id} is waiting for approval.`,
+                `Amount: ${refundAmountOf(refund).toString()}`,
+                `Reason: ${refund.reason}`,
+                `Customer note: ${refund.customerNote || 'None'}`,
+            ].join('\n'),
         });
-        // Example integration with email service:
-        // await this.emailService.send({
-        //   to: this.emailConfig.adminEmails,
-        //   from: this.emailConfig.fromEmail,
-        //   subject: `Refund Request Pending Approval - ${refund.id}`,
-        //   template: 'refund-approval-request',
-        //   variables: {
-        //     refundId: refund.id,
-        //     amount: refund.refundAmount,
-        //     reason: refund.reason,
-        //     customerNote: refund.customerNote,
-        //     requestedAt: refund.requestedAt || refund.createdAt,
-        //   },
-        // });
     }
+    /** Mails the customer of the refund's payment. `ReferenceNotFound` when the payment or its customer is gone. */
     async sendRefundStatusUpdate(refund, status) {
-        // In a real implementation, this would send an email to the customer
-        console.log(`[EMAIL] Refund status update for ${refund.id}`, {
-            to: `customer-${refund.requestedBy}@example.com`, // Would look up customer email
+        const payment = await this.config.reads.findPaymentById(refund.paymentId);
+        if (!payment)
+            return ReferenceNotFound({ kind: 'payment', id: refund.paymentId, missing: 'row' });
+        const customer = await this.config.reads.findCustomerById(payment.customerId);
+        if (!customer)
+            return ReferenceNotFound({ kind: 'customer', id: payment.customerId, missing: 'row' });
+        return this.mail('refund_status_update', {
+            to: [customer.email],
             subject: `Refund ${status.toUpperCase()} - ${refund.id}`,
-            status,
-            refundId: refund.id,
-            amount: refundAmountOf(refund).toString(),
+            text: [`Your refund ${refund.id} is ${status}.`, `Amount: ${refundAmountOf(refund).toString()}`].join('\n'),
         });
-        // Example integration:
-        // const customer = await this.customerService.getById(refund.requestedBy);
-        // await this.emailService.send({
-        //   to: customer.email,
-        //   from: this.emailConfig.fromEmail,
-        //   subject: `Refund ${status.toUpperCase()} - ${refund.id}`,
-        //   template: 'refund-status-update',
-        //   variables: {
-        //     customerName: customer.name,
-        //     refundId: refund.id,
-        //     status,
-        //     amount: refund.refundAmount,
-        //     completedAt: refund.completedAt,
-        //   },
-        // });
     }
     async sendRefundFailureAlert(refund, error) {
-        // In a real implementation, this would send an alert to support team
-        console.log(`[EMAIL] Refund failure alert for ${refund.id}`, {
-            to: this.emailConfig.supportEmail,
+        return this.mail('refund_failure_alert', {
+            to: [this.config.supportEmail],
             subject: `URGENT: Refund Processing Failed - ${refund.id}`,
-            refundId: refund.id,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            text: [
+                `Refund ${refund.id} failed.`,
+                `Amount: ${refundAmountOf(refund).toString()}`,
+                `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                `Failed at: ${now().toString()}`,
+            ].join('\n'),
         });
-        // Example integration:
-        // await this.emailService.send({
-        //   to: this.emailConfig.supportEmail,
-        //   from: this.emailConfig.fromEmail,
-        //   subject: `URGENT: Refund Processing Failed - ${refund.id}`,
-        //   template: 'refund-failure-alert',
-        //   variables: {
-        //     refundId: refund.id,
-        //     amount: refund.refundAmount,
-        //     error: error instanceof Error ? error.message : 'Unknown error',
-        //     failedAt: now(),
-        //     customerNote: refund.customerNote,
-        //   },
-        // });
+    }
+    async mail(notification, mail) {
+        return observePayments('notification', { 'payments.channel': 'email', 'payments.notification': notification }, async () => {
+            const sent = await this.config.send(mail);
+            if (isFailure(sent))
+                return NotificationFailed({ channel: 'email', notification }, { cause: sent });
+            return;
+        });
     }
 }
+const slackConfigSchema = z.object({
+    webhookUrl: z.url({ protocol: /^https?$/ }),
+    adminChannel: z.string().min(1),
+    supportChannel: z.string().min(1),
+    adminUrl: z.url(),
+    timeoutMs: z.number().int().positive().optional(),
+});
+/** Refund notifications posted to a Slack incoming webhook. */
 export class SlackNotificationService {
-    slackConfig;
-    constructor(slackConfig) {
-        this.slackConfig = slackConfig;
+    config;
+    /** Throws `payments.configuration_invalid` for a config without a valid webhook URL, channels or admin URL. */
+    constructor(config) {
+        checkNotificationConfig(config, slackConfigSchema, 'notifications.slack');
+        this.config = config;
     }
     async sendRefundApprovalRequest(refund) {
-        const message = {
-            channel: this.slackConfig.adminChannel,
+        return this.post('refund_approval_request', {
+            channel: this.config.adminChannel,
             text: `🔄 New refund request requires approval`,
             blocks: [
                 {
@@ -107,35 +110,30 @@ export class SlackNotificationService {
                             type: 'button',
                             text: { type: 'plain_text', text: 'Approve' },
                             style: 'primary',
-                            url: `${this.slackConfig.adminUrl}/refunds/${refund.id}/approve`,
+                            url: `${this.config.adminUrl}/refunds/${refund.id}/approve`,
                         },
                         {
                             type: 'button',
                             text: { type: 'plain_text', text: 'Reject' },
                             style: 'danger',
-                            url: `${this.slackConfig.adminUrl}/refunds/${refund.id}/reject`,
+                            url: `${this.config.adminUrl}/refunds/${refund.id}/reject`,
                         },
                     ],
                 },
             ],
-        };
-        console.log('[SLACK] Refund approval request', message);
-        // Example integration:
-        // await fetch(this.slackConfig.webhookUrl, {
-        //   method: 'POST',
-        //   headers: { 'Content-Type': 'application/json' },
-        //   body: JSON.stringify(message),
-        // });
+        });
     }
+    /** Posts the new status to the admin channel. */
     async sendRefundStatusUpdate(refund, status) {
         const emoji = status === 'completed' ? '✅' : status === 'rejected' ? '❌' : '⏳';
-        console.log(`[SLACK] Refund status update: ${emoji} Refund ${refund.id} ${status}`);
-        // This would typically be sent to a customer notifications channel
-        // or directly to the customer via a bot DM
+        return this.post('refund_status_update', {
+            channel: this.config.adminChannel,
+            text: `${emoji} Refund ${refund.id} ${status}`,
+        });
     }
     async sendRefundFailureAlert(refund, error) {
-        const message = {
-            channel: this.slackConfig.supportChannel,
+        return this.post('refund_failure_alert', {
+            channel: this.config.supportChannel,
             text: `🚨 URGENT: Refund processing failed`,
             blocks: [
                 {
@@ -146,19 +144,34 @@ export class SlackNotificationService {
                     },
                 },
             ],
-        };
-        console.log('[SLACK] Refund failure alert', message);
-        // Example integration:
-        // await fetch(this.slackConfig.webhookUrl, {
-        //   method: 'POST',
-        //   headers: { 'Content-Type': 'application/json' },
-        //   body: JSON.stringify(message),
-        // });
+        });
+    }
+    /** POSTs `message` as JSON. A non-2xx answer, a network error or the timeout returns `NotificationFailed`. */
+    async post(notification, message) {
+        return observePayments('notification', { 'payments.channel': 'slack', 'payments.notification': notification }, async () => {
+            let response;
+            try {
+                response = await fetch(this.config.webhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(message),
+                    signal: AbortSignal.timeout(this.config.timeoutMs ?? 10_000),
+                });
+            }
+            catch (error) {
+                // Unreachable host, refused connection or the timeout: the message did not go out
+                return NotificationFailed({ channel: 'slack', notification }, { cause: error });
+            }
+            // Free the connection; Slack answers a short `ok` we do not need
+            await response.body?.cancel();
+            if (!response.ok)
+                return NotificationFailed({ channel: 'slack', notification, status: response.status });
+            return;
+        });
     }
 }
 /**
- * Multi-channel Notification Service
- * Combines multiple notification channels for comprehensive coverage
+ * Sends every notification on each channel. Every channel is tried; the first failure is returned.
  */
 export class MultiChannelNotificationService {
     services;
@@ -166,97 +179,53 @@ export class MultiChannelNotificationService {
         this.services = services;
     }
     async sendRefundApprovalRequest(refund) {
-        await Promise.allSettled(this.services.map(service => service.sendRefundApprovalRequest?.(refund)));
+        const results = await Promise.all(this.services.map(async (service) => service.sendRefundApprovalRequest?.(refund)));
+        return results.find(result => isFailure(result));
     }
     async sendRefundStatusUpdate(refund, status) {
-        await Promise.allSettled(this.services.map(service => service.sendRefundStatusUpdate?.(refund, status)));
+        const results = await Promise.all(this.services.map(async (service) => service.sendRefundStatusUpdate?.(refund, status)));
+        return results.find(result => isFailure(result));
     }
     async sendRefundFailureAlert(refund, error) {
-        await Promise.allSettled(this.services.map(service => service.sendRefundFailureAlert?.(refund, error)));
+        const results = await Promise.all(this.services.map(async (service) => service.sendRefundFailureAlert?.(refund, error)));
+        return results.find(result => isFailure(result));
     }
 }
+const multiConfigSchema = z
+    .object({ email: z.unknown().optional(), slack: z.unknown().optional() })
+    .refine(config => config.email !== undefined || config.slack !== undefined, 'multi needs email, slack or both');
+/**
+ * Builds the notification service a config names. Throws `payments.configuration_invalid` at boot for a config that
+ * cannot send: no transport, no webhook URL, a bad address, or a `multi` with no channel.
+ *
+ * @example
+ * const notifications = createNotificationService({
+ *   type: 'email',
+ *   email: {
+ *     adminEmails: ['admin@example.com'],
+ *     supportEmail: 'support@example.com',
+ *     send: mail => mailer.sendRaw(mail),
+ *     reads: paymentRepository,
+ *   },
+ * });
+ */
 export function createNotificationService(config) {
     switch (config.type) {
         case 'email': {
-            if (!config.email) {
-                throw new Error('Email configuration required for email notifications');
-            }
             return new EmailNotificationService(config.email);
         }
         case 'slack': {
-            if (!config.slack) {
-                throw new Error('Slack configuration required for Slack notifications');
-            }
             return new SlackNotificationService(config.slack);
         }
         case 'multi': {
+            checkNotificationConfig(config, multiConfigSchema, 'notifications.multi');
             const services = [];
-            if (config.email) {
+            if (config.email)
                 services.push(new EmailNotificationService(config.email));
-            }
-            if (config.slack) {
+            if (config.slack)
                 services.push(new SlackNotificationService(config.slack));
-            }
             return new MultiChannelNotificationService(services);
-        }
-        default: {
-            throw new Error(`Unsupported notification service type: ${config.type}`);
         }
     }
 }
-/**
- * Payment Notification Service Module
- *
- * This module provides comprehensive notification capabilities for the payment system,
- * specifically designed to handle refund-related communications.
- *
- * ## Key Features:
- *
- * ### Multiple Channels
- * - **Email**: Traditional email notifications for customers and admins
- * - **Slack**: Real-time team notifications with interactive elements
- * - **Multi-channel**: Combine multiple services for redundancy
- *
- * ### Notification Types
- * - **Approval Requests**: Notify admins when refunds need manual approval
- * - **Status Updates**: Inform customers about refund status changes
- * - **Failure Alerts**: Alert support team about processing failures
- *
- * ### Integration Points
- * - Seamlessly integrates with RefundService for automatic notifications
- * - Configurable notification rules and templates
- * - Support for custom notification channels via interface
- *
- * ## Usage Example:
- *
- * ```typescript
- * import { createNotificationService } from '@/features/payments/notifications';
- *
- * const notificationService = createNotificationService({
- *   type: 'multi',
- *   email: {
- *     fromEmail: 'noreply@example.com',
- *     supportEmail: 'support@example.com',
- *     adminEmails: ['admin@example.com'],
- *   },
- *   slack: {
- *     webhookUrl: process.env.SLACK_WEBHOOK_URL,
- *     adminChannel: '#refund-approvals',
- *     supportChannel: '#support-alerts',
- *   },
- * });
- *
- * // Use with RefundService
- * const refundService = createRefundService(
- *   db,
- *   paymentProvider,
- *   paymentRepository,
- *   notificationService
- * );
- * ```
- *
- * ## Configuration:
- * The service supports environment-based configuration for easy deployment
- * across different environments (development, staging, production).
- */ 
 //# sourceMappingURL=service.js.map

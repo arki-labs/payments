@@ -161,6 +161,10 @@ export type CustomerSegment = InferSelectModel<DunningTables['customerSegments']
 export type NewCustomerSegment = InferInsertModel<DunningTables['customerSegments']>;
 export type CustomerRiskProfile = InferSelectModel<DunningTables['customerRiskProfiles']>;
 export type NewCustomerRiskProfile = InferInsertModel<DunningTables['customerRiskProfiles']>;
+/** A campaign with its steps (its templates). */
+export type DunningCampaignWithSteps = DunningCampaign & {
+    templates: DunningTemplate[];
+};
 export type DunningCampaignWithTemplates = DunningCampaign & {
     templates?: DunningTemplate[];
 };
@@ -240,12 +244,6 @@ export type CampaignQueryRow = {
     created_by: string;
     created_at: Instant;
     updated_at: Instant;
-};
-export type CustomerQueryRow = {
-    customer_id: string;
-    subscription_id?: string;
-    payment_id?: string;
-    trigger_data: Record<string, unknown>;
 };
 export type SegmentCondition = {
     field: string;

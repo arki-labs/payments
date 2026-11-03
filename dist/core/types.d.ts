@@ -1,7 +1,7 @@
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import type { BillingInterval, CustomerId, PaymentId, PaymentMethodType, PaymentProviderId, PaymentProviderType, PaymentStatus, PlanId, PlanTier, SubscriptionId, SubscriptionStatus, WebhookEventType, WebhookId } from './primitives.js';
+import type { PaymentProviderType, WebhookEventType } from './primitives.js';
 import type { CoreTables } from './tables.js';
-export type { BillingInterval, CustomerId, PaymentId, PaymentMethodType, PaymentProviderId, PaymentProviderType, PaymentStatus, PlanId, PlanTier, SubscriptionId, SubscriptionStatus, WebhookEventType, WebhookId, };
+export type { BillingInterval, CustomerId, PaymentId, PaymentMethodType, PaymentProviderId, PaymentProviderType, PaymentStatus, PlanId, PlanTier, SubscriptionId, SubscriptionStatus, WebhookEventType, WebhookId, } from './primitives.js';
 export type { PaymentMethodInfo, SubscriptionPreview } from './contracts.js';
 export type Plan = InferSelectModel<CoreTables['plans']>;
 export type NewPlan = InferInsertModel<CoreTables['plans']>;

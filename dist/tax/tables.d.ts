@@ -2,7 +2,8 @@ import type { PgSchema } from 'drizzle-orm/pg-core';
 export type CreateTaxTablesDeps = {
     schema: PgSchema;
 };
-export declare function createTaxTables({ schema }: CreateTaxTablesDeps): {
+/** Builds the tables. `createTaxTables` returns them under the names declared below. */
+declare function buildTaxTables({ schema }: CreateTaxTablesDeps): {
     enums: {
         taxConfigStatusEnum: import("drizzle-orm/pg-core").PgEnum<["active", "inactive", "pending"]>;
         taxCalculationModeEnum: import("drizzle-orm/pg-core").PgEnum<["automatic", "manual", "disabled"]>;
@@ -1278,29 +1279,61 @@ export declare function createTaxTables({ schema }: CreateTaxTablesDeps): {
     foreignKeys: {
         taxConfigForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txc_${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txc_${string}`>;
         };
         taxJurisdictionForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txj_${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txj_${string}`>;
         };
         taxExemptionForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `txe_${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+                onDelete?: import("@arki/db/id").OnDelete;
             }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `txe_${string}`>;
         };
     };
 };
-export type TaxTables = ReturnType<typeof createTaxTables>;
+type BuiltTaxTables = ReturnType<typeof buildTaxTables>;
+type TaxConfigurationsTableType = BuiltTaxTables['taxConfigurations'];
+type TaxJurisdictionsTableType = BuiltTaxTables['taxJurisdictions'];
+type TaxExemptionsTableType = BuiltTaxTables['taxExemptions'];
+type TaxRecordsTableType = BuiltTaxTables['taxRecords'];
+type TaxAuditEntriesTableType = BuiltTaxTables['taxAuditEntries'];
+/** The `tax_configurations` table. */
+export interface TaxConfigurationsTable extends TaxConfigurationsTableType {
+}
+/** The `tax_jurisdictions` table. */
+export interface TaxJurisdictionsTable extends TaxJurisdictionsTableType {
+}
+/** The `tax_exemptions` table. */
+export interface TaxExemptionsTable extends TaxExemptionsTableType {
+}
+/** The `tax_records` table. */
+export interface TaxRecordsTable extends TaxRecordsTableType {
+}
+/** The `tax_audit_entries` table. */
+export interface TaxAuditEntriesTable extends TaxAuditEntriesTableType {
+}
+/** What `createTaxTables` returns: the enums, the five tables, and a foreign-key factory for three of them. */
+export type TaxTables = {
+    enums: BuiltTaxTables['enums'];
+    taxConfigurations: TaxConfigurationsTable;
+    taxJurisdictions: TaxJurisdictionsTable;
+    taxExemptions: TaxExemptionsTable;
+    taxRecords: TaxRecordsTable;
+    taxAuditEntries: TaxAuditEntriesTable;
+    foreignKeys: BuiltTaxTables['foreignKeys'];
+};
+export declare function createTaxTables(deps: CreateTaxTablesDeps): TaxTables;
+export {};
 //# sourceMappingURL=tables.d.ts.map

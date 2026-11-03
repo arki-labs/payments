@@ -1,15 +1,21 @@
 import type { SQL } from 'drizzle-orm';
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import type { Instant } from '@arki/date';
-import type { Money } from '@arki/money';
+import type { Money, MoneyFailure } from '@arki/money';
 import { z } from '@arki/contracts';
 import { add, fromDate, instant, isAfter, now, sub, toMillis } from '@arki/date';
 import { getLogger } from '@arki/log';
+import type { FailureOf } from '@arki/failure';
+import { invariant, isFailure } from '@arki/failure';
+import { Currency } from '@arki/money';
+import { ensure } from '@arki/schema';
 
 import type { CoreTables } from '../../core/tables.js';
 import type { PaymentRetryService } from '../../core/services/payment-retry-service.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../../core/types.js';
+import { customerIdSchema, paymentIdSchema, subscriptionIdSchema } from '../../core/primitives.js';
+import { ReferenceNotFound } from '../../core/providers/provider-error.js';
 import type {
   CreateDunningCampaignInput,
   ExecuteCampaignInput,
@@ -24,8 +30,8 @@ import type { DunningTables } from '../tables.js';
 import type {
   CampaignExecutionFilters,
   CustomerData,
-  CustomerQueryRow,
   DunningCampaign,
+  DunningCampaignWithSteps,
   DunningDashboardStats,
   DunningExecution,
   DunningTemplate,
@@ -36,6 +42,14 @@ import type {
 import type { CommunicationOrchestrationService } from './communication-service.js';
 import { fromMinorColumn, toMinorColumn } from '../../core/money.js';
 import { analyticsRowId, DEFAULT_ANALYTICS_CURRENCY } from '../analytics-money.js';
+import type { DunningTickReport } from '../failures.js';
+import {
+  DunningCampaignNotActive,
+  DunningCampaignNotFound,
+  DunningCampaignWithoutSteps,
+  DunningTemplateInUse,
+  tickFault,
+} from '../failures.js';
 import {
   createDunningCampaignRepository,
   createDunningExecutionRepository,
@@ -50,7 +64,7 @@ type EligibleCustomer = {
   triggerData?: Record<string, unknown>;
 };
 
-const logger = getLogger('dunning.campaign');
+const logger = getLogger('arki:payments:dunning');
 
 /** Narrows a cross-domain query to (or away from) the customers a caller named. */
 function customerFilters(column: SQL, filters?: CampaignExecutionFilters): SQL[] {
@@ -61,8 +75,34 @@ function customerFilters(column: SQL, filters?: CampaignExecutionFilters): SQL[]
   return conditions;
 }
 
+/**
+ * The rows the eligibility queries select (`customer_id`, `subscription_id`, `payment_id`, `trigger_data`).
+ * They are our own query's columns, so a row that does not match is a bug and `ensure` throws.
+ */
+const eligibleRowsSchema = z.array(
+  z.object({
+    customer_id: customerIdSchema,
+    subscription_id: subscriptionIdSchema.nullish(),
+    payment_id: paymentIdSchema.nullish(),
+    trigger_data: z.record(z.string(), z.unknown()),
+  }),
+);
+
+/** The eligible customers of one eligibility query's rows. */
+function eligibleCustomers(rows: unknown): EligibleCustomer[] {
+  return ensure(rows, eligibleRowsSchema).map(row => ({
+    id: row.customer_id,
+    subscriptionId: row.subscription_id ?? undefined,
+    paymentId: row.payment_id ?? undefined,
+    triggerData: row.trigger_data,
+  }));
+}
+
 /** The payment row `checkAndStopOnPaymentSuccess` reads; node-postgres sends `bigint` as text. */
-const paymentRowSchema = z.object({ amount_minor: z.union([z.number(), z.string()]), currency: z.string() });
+const paymentRowSchema = z.object({
+  amount_minor: z.union([z.number().int(), z.string().regex(/^-?\d+$/)]),
+  currency: z.string(),
+});
 
 /**
  * Service for managing dunning campaigns
@@ -101,10 +141,7 @@ export class DunningCampaignService {
   /**
    * Create a new dunning campaign with templates
    */
-  async createCampaign(
-    input: CreateDunningCampaignInput,
-    createdBy: string,
-  ): Promise<DunningCampaign & { templates: DunningTemplate[] }> {
+  async createCampaign(input: CreateDunningCampaignInput, createdBy: string): Promise<DunningCampaignWithSteps> {
     return this.db.transaction(async tx => {
       // The repositories run on the transaction: a template that fails takes the campaign with it
       const campaignRepo = createDunningCampaignRepository(tx, {
@@ -118,9 +155,7 @@ export class DunningCampaignService {
         createdBy,
       });
 
-      if (!campaignModel) {
-        throw new Error('Failed to create campaign');
-      }
+      invariant(campaignModel, 'the campaign insert returned no row');
 
       const templates = [];
       for (const templateInput of input.templates) {
@@ -147,15 +182,17 @@ export class DunningCampaignService {
    * When `input.templates` is given it is the complete new set of steps (replace semantics, like create).
    * Steps are matched by `stepNumber`: a matching step is updated in place (its id, and so the history
    * that points at it, survives), a new number is inserted, and a number that is gone is deleted.
-   * A step that already sent a communication cannot be deleted (the database refuses), so the whole
-   * update fails and nothing changes. Omit `templates` to leave the steps alone.
+   * A step that already sent a communication cannot be deleted: the update returns
+   * `DunningTemplateInUse` and nothing changes. Returns `null` for an unknown campaign.
+   * Omit `templates` to leave the steps alone.
    */
   async updateCampaign(
     campaignId: DunningCampaignId,
     input: UpdateDunningCampaignInput,
     updatedBy: string,
-  ): Promise<(DunningCampaign & { templates: DunningTemplate[] }) | null> {
+  ): Promise<DunningCampaignWithSteps | null | FailureOf<typeof DunningTemplateInUse>> {
     const { templates: nextTemplates, ...campaignFields } = input;
+    const { dunningCommunications } = this.tables;
 
     return this.db.transaction(async tx => {
       const campaignRepo = createDunningCampaignRepository(tx, {
@@ -164,18 +201,30 @@ export class DunningCampaignService {
       });
       const templateRepo = createDunningTemplateRepository(tx, { dunningTemplates: this.tables.dunningTemplates });
 
+      const existing = nextTemplates ? await templateRepo.findByCampaignId(campaignId) : [];
+      const keptSteps = new Set(nextTemplates?.map(template => template.stepNumber));
+      const removed = existing.filter(template => !keptSteps.has(template.stepNumber));
+
+      // A sent communication keeps its step (the foreign key restricts the delete): refuse before any write
+      if (removed.length > 0) {
+        const [used] = await tx
+          .select({ templateId: dunningCommunications.templateId })
+          .from(dunningCommunications)
+          .where(inArray(dunningCommunications.templateId, removed.map(template => template.id)))
+          .limit(1);
+        const usedTemplate = used && removed.find(template => template.id === used.templateId);
+        if (usedTemplate) {
+          return DunningTemplateInUse({ templateId: usedTemplate.id, stepNumber: usedTemplate.stepNumber });
+        }
+      }
+
       const campaignModel = await campaignRepo.update(campaignId, { ...campaignFields, updatedBy });
       if (!campaignModel) {
         return null;
       }
 
       if (nextTemplates) {
-        const existing = await templateRepo.findByCampaignId(campaignId);
-        const keptSteps = new Set(nextTemplates.map(template => template.stepNumber));
-
-        for (const template of existing) {
-          if (!keptSteps.has(template.stepNumber)) await templateRepo.delete(template.id);
-        }
+        for (const template of removed) await templateRepo.delete(template.id);
         for (const next of nextTemplates) {
           const current = existing.find(template => template.stepNumber === next.stepNumber);
           if (current) {
@@ -199,7 +248,7 @@ export class DunningCampaignService {
   /**
    * Get campaign by ID with templates
    */
-  async getCampaign(campaignId: DunningCampaignId) {
+  async getCampaign(campaignId: DunningCampaignId): Promise<DunningCampaignWithSteps | null> {
     const campaign = await this.campaignRepo.findById(campaignId);
     if (!campaign) return null;
 
@@ -214,7 +263,7 @@ export class DunningCampaignService {
   /**
    * List campaigns with filtering and pagination
    */
-  async listCampaigns(query: ListDunningCampaignsQuery) {
+  async listCampaigns(query: ListDunningCampaignsQuery): Promise<DunningCampaign[]> {
     return this.campaignRepo.findMany(query);
   }
 
@@ -228,27 +277,42 @@ export class DunningCampaignService {
   /**
    * Activate or deactivate a campaign
    */
-  async updateCampaignStatus(campaignId: DunningCampaignId, status: DunningCampaignStatus, updatedBy: string) {
+  async updateCampaignStatus(
+    campaignId: DunningCampaignId,
+    status: DunningCampaignStatus,
+    updatedBy: string,
+  ): Promise<DunningCampaign | undefined> {
     return this.campaignRepo.updateStatus(campaignId, status, updatedBy);
   }
 
   /**
-   * Execute a campaign manually or through automation
+   * Execute a campaign manually or through automation: one scheduled execution per active step for
+   * each eligible customer. An unknown campaign returns `DunningCampaignNotFound`, a campaign that is
+   * not active `DunningCampaignNotActive`, one with no active step `DunningCampaignWithoutSteps`;
+   * each writes nothing.
    */
-  async executeCampaign(input: ExecuteCampaignInput, _executedBy: string): Promise<DunningExecution[]> {
+  async executeCampaign(
+    input: ExecuteCampaignInput,
+    _executedBy: string,
+  ): Promise<
+    | DunningExecution[]
+    | FailureOf<typeof DunningCampaignNotFound>
+    | FailureOf<typeof DunningCampaignNotActive>
+    | FailureOf<typeof DunningCampaignWithoutSteps>
+  > {
     const campaign = await this.campaignRepo.findById(input.campaignId);
     if (!campaign) {
-      throw new Error(`Campaign ${input.campaignId} not found`);
+      return DunningCampaignNotFound({ campaignId: input.campaignId });
     }
 
     if (campaign.status !== 'active') {
-      throw new Error(`Campaign ${input.campaignId} is not active`);
+      return DunningCampaignNotActive({ campaignId: input.campaignId, status: campaign.status });
     }
 
     // Get campaign templates
     const templates = await this.templateRepo.findActiveTemplates(input.campaignId);
     if (templates.length === 0) {
-      throw new Error(`No active templates found for campaign ${input.campaignId}`);
+      return DunningCampaignWithoutSteps({ campaignId: input.campaignId });
     }
 
     // Find eligible customers based on campaign trigger conditions
@@ -401,13 +465,7 @@ export class DunningCampaignService {
       LIMIT 1000
     `);
 
-    const customers = (result.rows || []) as unknown as CustomerQueryRow[];
-    return customers.map(row => ({
-      id: row.customer_id as CustomerId,
-      subscriptionId: row.subscription_id as SubscriptionId,
-      paymentId: row.payment_id as PaymentId,
-      triggerData: row.trigger_data,
-    }));
+    return eligibleCustomers(result.rows);
   }
 
   private async findCustomersWithSubscriptionStatus(
@@ -440,13 +498,7 @@ export class DunningCampaignService {
       LIMIT 1000
     `);
 
-    const customers = (result.rows || []) as unknown as CustomerQueryRow[];
-    return customers.map(row => ({
-      id: row.customer_id as CustomerId,
-      subscriptionId: row.subscription_id as SubscriptionId,
-      paymentId: row.payment_id as PaymentId,
-      triggerData: row.trigger_data,
-    }));
+    return eligibleCustomers(result.rows);
   }
 
   private async findCustomersWithEndingTrials(
@@ -484,30 +536,32 @@ export class DunningCampaignService {
       LIMIT 1000
     `);
 
-    const customers = (result.rows || []) as unknown as CustomerQueryRow[];
-    return customers.map(row => ({
-      id: row.customer_id as CustomerId,
-      subscriptionId: row.subscription_id as SubscriptionId,
-      paymentId: row.payment_id as PaymentId,
-      triggerData: row.trigger_data,
-    }));
+    return eligibleCustomers(result.rows);
   }
 
   /**
-   * Process scheduled executions
+   * Run the scheduled executions that are due. Returns how many ran and each one that threw (it is
+   * marked `failed`); a fault that stops the whole tick is thrown.
    */
-  async processScheduledExecutions(limit = 100): Promise<void> {
+  async processScheduledExecutions(limit = 100): Promise<DunningTickReport> {
     const scheduledExecutions = await this.executionRepo.findScheduledExecutions(limit);
+    const report: DunningTickReport = { processed: scheduledExecutions.length, failed: [] };
 
     for (const executionDb of scheduledExecutions) {
       try {
         const execution = executionDb;
-        await this.executeIndividualExecution(execution);
+        const stopped = await this.executeIndividualExecution(execution);
+        if (isFailure(stopped)) {
+          // The message went out and the execution is complete; only the stop check met a bad stored payment
+          logger.error('Payment success check failed', { executionId: executionDb.id, code: stopped.code });
+          report.failed.push(tickFault(executionDb.id, stopped));
+        }
       } catch (error) {
         logger.error('Failed to execute campaign', {
           executionId: executionDb.id,
           error: error instanceof Error ? error.message : String(error),
         });
+        report.failed.push(tickFault(executionDb.id, error));
         await this.executionRepo.updateStatus(
           executionDb.id,
           'failed',
@@ -516,12 +570,14 @@ export class DunningCampaignService {
         );
       }
     }
+    return report;
   }
 
   /**
-   * Execute a single scheduled execution
+   * Execute a single scheduled execution. Returns the `MoneyFailure` of a stored payment the stop
+   * check could not read; the execution itself is then complete and nothing was cancelled.
    */
-  private async executeIndividualExecution(execution: DunningExecution): Promise<void> {
+  private async executeIndividualExecution(execution: DunningExecution): Promise<MoneyFailure | undefined> {
     // Update status to running
     await this.executionRepo.updateStatus(execution.id, 'running');
 
@@ -529,8 +585,10 @@ export class DunningCampaignService {
     const campaign = await this.campaignRepo.findById(execution.campaignId);
     const template = execution.templateId ? await this.templateRepo.findById(execution.templateId) : null;
 
+    // The campaign or its step was deleted after the execution was scheduled: record it, nothing to send
     if (!campaign || !template) {
-      throw new Error('Campaign or template not found');
+      await this.executionRepo.updateStatus(execution.id, 'failed', undefined, 'Campaign or template not found');
+      return;
     }
 
     // Check business hours and allowed days if configured
@@ -560,8 +618,9 @@ export class DunningCampaignService {
 
     // Check if payment was successful and stop subsequent executions if configured
     if (campaign.settings.stopOnPaymentSuccess) {
-      await this.checkAndStopOnPaymentSuccess(execution);
+      return this.checkAndStopOnPaymentSuccess(execution);
     }
+    return undefined;
   }
 
   /**
@@ -591,7 +650,13 @@ export class DunningCampaignService {
         .limit(1);
 
       if (!row) {
-        throw new Error(`Customer ${execution.customerId} not found`);
+        const missing = ReferenceNotFound({ kind: 'customer', id: execution.customerId, missing: 'row' });
+        return {
+          customersProcessed: 1,
+          communicationsSent: 0,
+          errors: [{ customerId: execution.customerId, error: missing.message, timestamp: now() }],
+          performance: { processingTime: Date.now() - startTime, successRate: 0 },
+        };
       }
 
       const customer: CustomerData = {
@@ -636,7 +701,13 @@ export class DunningCampaignService {
         customer_name: customer.name || 'Customer',
         customer_email: customer.email || '',
         campaign_name: campaign.name,
-        ...(execution.triggerData as Record<string, string>),
+        // Trigger data is stored JSON: text stays as it is, any other value is written as its JSON
+        ...Object.fromEntries(
+          Object.entries(execution.triggerData).map(([key, value]) => [
+            key,
+            typeof value === 'string' ? value : JSON.stringify(value),
+          ]),
+        ),
       };
 
       // Send communication using the correct service interface
@@ -653,8 +724,8 @@ export class DunningCampaignService {
         communicationsSent: 1,
       });
 
-      // Check if communication was sent successfully
-      const wasSuccessful = communicationResult.status === 'sent' || communicationResult.status === 'pending';
+      // A provider refusal, a timeout or a channel with no provider is returned, and recorded on the communication
+      const wasSuccessful = !isFailure(communicationResult);
 
       return {
         customersProcessed: 1,
@@ -664,7 +735,7 @@ export class DunningCampaignService {
           : [
               {
                 customerId: execution.customerId,
-                error: communicationResult.failureReason || 'Communication failed',
+                error: communicationResult.message,
                 timestamp: now(),
               },
             ],
@@ -814,9 +885,11 @@ export class DunningCampaignService {
   }
 
   /**
-   * Check if payment was successful and stop subsequent executions
+   * Check if payment was successful and stop subsequent executions. The payment row is read and
+   * checked first, so a stored currency `@arki/money` refuses returns its `MoneyFailure` before any
+   * execution is cancelled. A row of another shape than the query selects is a bug (`AssertError`).
    */
-  private async checkAndStopOnPaymentSuccess(execution: DunningExecution): Promise<void> {
+  private async checkAndStopOnPaymentSuccess(execution: DunningExecution): Promise<MoneyFailure | undefined> {
     // Check if the customer has made a successful payment since the execution started
     const paymentResult = await this.db.execute(sql`
       SELECT p.id, p.amount_minor, p.currency, p.created_at
@@ -829,37 +902,39 @@ export class DunningCampaignService {
     `);
 
     const recentSuccessfulPayments = paymentResult.rows || [];
-    if (recentSuccessfulPayments.length > 0) {
-      logger.info('Payment success detected, stopping dunning campaign', {
-        customerId: execution.customerId,
-      });
+    if (recentSuccessfulPayments.length === 0) return undefined;
 
-      // Cancel future scheduled executions for this customer and campaign
-      const scheduledExecutions = await this.executionRepo.findScheduledExecutions(100);
+    const payment = ensure(recentSuccessfulPayments[0], paymentRowSchema, { at: 'payments.row' });
+    const currency = Currency.parse(payment.currency.toUpperCase());
+    if (isFailure(currency)) return currency;
+    const revenueRecovered = fromMinorColumn(payment.amount_minor, currency.code);
 
-      for (const scheduledExec of scheduledExecutions) {
-        if (
-          scheduledExec.customerId === execution.customerId &&
-          scheduledExec.campaignId === execution.campaignId &&
-          scheduledExec.scheduledAt &&
-          isAfter(scheduledExec.scheduledAt, now())
-        ) {
-          await this.executionRepo.updateStatus(
-            scheduledExec.id,
-            'cancelled',
-            undefined,
-            'Cancelled due to successful payment',
-          );
-        }
+    logger.info('Payment success detected, stopping dunning campaign', {
+      customerId: execution.customerId,
+    });
+
+    // Cancel future scheduled executions for this customer and campaign
+    const scheduledExecutions = await this.executionRepo.findScheduledExecutions(100);
+
+    for (const scheduledExec of scheduledExecutions) {
+      if (
+        scheduledExec.customerId === execution.customerId &&
+        scheduledExec.campaignId === execution.campaignId &&
+        scheduledExec.scheduledAt &&
+        isAfter(scheduledExec.scheduledAt, now())
+      ) {
+        await this.executionRepo.updateStatus(
+          scheduledExec.id,
+          'cancelled',
+          undefined,
+          'Cancelled due to successful payment',
+        );
       }
-
-      // Update campaign analytics with successful recovery
-      const payment = paymentRowSchema.parse(recentSuccessfulPayments[0]);
-      await this.updateCampaignAnalytics(execution.campaignId, {
-        paymentsRecovered: 1,
-        revenueRecovered: fromMinorColumn(payment.amount_minor, payment.currency),
-      });
     }
+
+    // Update campaign analytics with successful recovery
+    await this.updateCampaignAnalytics(execution.campaignId, { paymentsRecovered: 1, revenueRecovered });
+    return undefined;
   }
 
   /**
@@ -974,10 +1049,11 @@ export class DunningCampaignService {
    * Retry failed executions with exponential backoff
    * This method finds executions that are ready to retry (nextRetryAt is in the past)
    * and attempts to execute them again. If they fail again, it schedules the next retry
-   * with exponential backoff.
+   * with exponential backoff. Returns how many were retried and each retry that threw again.
    */
-  async retryFailedExecutions(limit = 50): Promise<void> {
+  async retryFailedExecutions(limit = 50): Promise<DunningTickReport> {
     const retryableExecutions = await this.executionRepo.findRetryableExecutions(limit);
+    const report: DunningTickReport = { processed: retryableExecutions.length, failed: [] };
 
     for (const executionDb of retryableExecutions) {
       try {
@@ -989,12 +1065,17 @@ export class DunningCampaignService {
 
         // Execute the retry
         const execution = executionDb;
-        await this.executeIndividualExecution(execution);
+        const stopped = await this.executeIndividualExecution(execution);
+        if (isFailure(stopped)) {
+          logger.error('Payment success check failed', { executionId: executionDb.id, code: stopped.code });
+          report.failed.push(tickFault(executionDb.id, stopped));
+        }
       } catch (error) {
         logger.error('Retry failed for execution', {
           executionId: executionDb.id,
           error: error instanceof Error ? error.message : String(error),
         });
+        report.failed.push(tickFault(executionDb.id, error));
 
         // If max retries reached, mark as permanently failed
         if (executionDb.retryCount >= 3) {
@@ -1006,19 +1087,25 @@ export class DunningCampaignService {
         }
       }
     }
+    return report;
   }
 
   /**
    * Find active campaigns for a specific trigger
    */
-  async findActiveCampaignsForTrigger(triggerType: string, customerSegmentIds?: string[]) {
+  async findActiveCampaignsForTrigger(triggerType: string, customerSegmentIds?: string[]): Promise<DunningCampaign[]> {
     return this.campaignRepo.findActiveForTrigger(triggerType, customerSegmentIds);
   }
 }
 
 export type DunningCampaignServiceTables = Pick<
   DunningTables,
-  'dunningCampaigns' | 'dunningCampaignAnalytics' | 'dunningTemplates' | 'dunningExecutions' | 'customerRiskProfiles'
+  | 'dunningCampaigns'
+  | 'dunningCampaignAnalytics'
+  | 'dunningTemplates'
+  | 'dunningExecutions'
+  | 'dunningCommunications'
+  | 'customerRiskProfiles'
 > &
   Pick<CoreTables, 'customers' | 'payments' | 'subscriptions'>;
 

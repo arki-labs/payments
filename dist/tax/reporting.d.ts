@@ -4,6 +4,7 @@ import type { PaymentRepository } from '../core/repository.js';
 import type { CustomerId } from '../core/types.js';
 import type { ExemptionType } from './primitives.js';
 import type { TaxAuditRepository, TaxConfigurationRepository, TaxExemptionRepository, TaxJurisdictionRepository, TaxRecordRepository } from './repository.js';
+import type { ExportTaxDataInput } from './contracts.js';
 /**
  * Tax compliance and reporting periods
  */
@@ -135,7 +136,12 @@ export declare class TaxReportingService {
      * Get customer tax summary for a specific year (UTC): the customer's succeeded payments with the
      * tax recorded on each, and the exemptions in force during the year.
      */
-    getCustomerTaxSummary(customerId: CustomerId, year: number): Promise<CustomerTaxSummary>;
+    getCustomerTaxSummary(customerId: CustomerId, year: number): Promise<CustomerTaxSummary | import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_shape", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.stored_tax_invalid", {
+        paymentId: string;
+        problem: "not_money" | "other_currency";
+        paymentCurrency: string;
+        taxCurrency: string | null;
+    }>>;
     /**
      * Create audit trail entry for tax-related actions. The entry is stored; `id` and `timestamp` are the stored ones.
      */
@@ -178,7 +184,7 @@ export declare class TaxReportingService {
      * prefixed with a quote. XML text is escaped, and characters XML 1.0 cannot hold are dropped.
      */
     exportTaxData(params: {
-        format: 'csv' | 'json' | 'xml';
+        format: ExportTaxDataInput['format'];
         period: ReportingPeriod;
         includeExemptions?: boolean;
     }): Promise<{

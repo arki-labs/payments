@@ -1,12 +1,13 @@
-import type { UserId } from '../../core/user-id.js';
 import type { Instant } from '@arki/date';
+import type { MoneyFailure } from '@arki/money';
 import { Money } from '@arki/money';
 import type { PaymentRetryService } from '../../core/services/payment-retry-service.js';
 import type { CoreTables } from '../../core/tables.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../../core/types.js';
 import type { DunningTables } from '../tables.js';
+import type { DunningTickReport } from '../failures.js';
 import type { CommunicationOrchestrationConfig } from './communication-service.js';
-import { type DunningDatabase } from '../repository.js';
+import type { DunningDatabase } from '../repository.js';
 /**
  * Events that trigger dunning campaigns
  */
@@ -23,8 +24,8 @@ export type DunningTriggerEvent = {
  * Handles event-driven triggers and coordinates between payment retry and dunning
  */
 export type DunningIntegrationConfig = {
-    /** User ID used to attribute system-driven executions (e.g. dunning created automatically). */
-    systemUserId: UserId | string;
+    /** User ID (any text, usually a `usr_...` id) used to attribute system-driven executions. */
+    systemUserId: string;
     /** Channel-provider config forwarded to `createCommunicationOrchestrationService`. */
     communication?: CommunicationOrchestrationConfig;
 };
@@ -38,9 +39,15 @@ export declare class DunningIntegrationService {
     private segmentationService;
     private readonly systemUserId;
     private readonly dunningExecutions;
+    private readonly dunningCampaigns;
+    private readonly dunningCommunications;
+    private readonly customerSegments;
     constructor(db: DunningDatabase, coreTables: DunningIntegrationCoreTables, dunningTables: DunningIntegrationDunningTables, config: DunningIntegrationConfig, paymentRetryService?: PaymentRetryService | undefined);
     /**
-     * Handle payment failure events from the payment system
+     * Handle payment failure events from the payment system.
+     *
+     * A campaign whose stored spend range is not valid money (`@arki/money` refuses it) is skipped, and the
+     * first such failure is returned after the other campaigns have run, so one bad campaign stops no other.
      */
     handlePaymentFailure(event: {
         paymentId: PaymentId;
@@ -50,7 +57,7 @@ export declare class DunningIntegrationService {
         amount: Money;
         failureCount: number;
         metadata?: Record<string, unknown>;
-    }): Promise<void>;
+    }): Promise<void | MoneyFailure>;
     /**
      * Handle subscription status changes
      */
@@ -60,7 +67,7 @@ export declare class DunningIntegrationService {
         oldStatus: string;
         newStatus: string;
         metadata?: Record<string, unknown>;
-    }): Promise<void>;
+    }): Promise<void | MoneyFailure>;
     /**
      * Handle trial ending notifications
      */
@@ -70,7 +77,7 @@ export declare class DunningIntegrationService {
         trialEndDate: Instant;
         daysUntilEnd: number;
         metadata?: Record<string, unknown>;
-    }): Promise<void>;
+    }): Promise<void | MoneyFailure>;
     /**
      * Handle successful payment events (can stop dunning campaigns)
      */
@@ -80,7 +87,7 @@ export declare class DunningIntegrationService {
         subscriptionId?: SubscriptionId;
         amount: Money;
         metadata?: Record<string, unknown>;
-    }): Promise<void>;
+    }): Promise<void | MoneyFailure>;
     /**
      * Execute a specific campaign for a customer
      */
@@ -110,27 +117,24 @@ export declare class DunningIntegrationService {
      */
     private evaluateTrialEndingConditions;
     /**
-     * Process all scheduled dunning executions
+     * Run the scheduled executions that are due. Returns the tick report: each execution that failed is
+     * listed. A fault that stops the whole tick is logged and thrown.
      */
-    processScheduledExecutions(): Promise<void>;
+    processScheduledExecutions(): Promise<DunningTickReport>;
+    /** Send the pending communications. Returns the tick report: each communication not sent is listed. */
+    processPendingCommunications(): Promise<DunningTickReport>;
+    /** Retry the failed executions that are due. Returns the tick report: each retry that failed again is listed. */
+    retryFailedExecutions(): Promise<DunningTickReport>;
+    /** Recalculate customer risk profiles. Returns the tick report: each customer not updated is listed. */
+    updateRiskProfiles(): Promise<DunningTickReport>;
+    /** Recount the auto-update segments. Returns the tick report: each segment not counted is listed. */
+    processAutoUpdateSegments(): Promise<DunningTickReport>;
+    /** Runs one scheduled tick: logs its item faults and a fault that stopped it, and hands both to the scheduler. */
+    private tick;
     /**
-     * Process pending communications
-     */
-    processPendingCommunications(): Promise<void>;
-    /**
-     * Retry failed executions
-     */
-    retryFailedExecutions(): Promise<void>;
-    /**
-     * Update customer risk profiles in bulk
-     */
-    updateRiskProfiles(): Promise<void>;
-    /**
-     * Process auto-update segments
-     */
-    processAutoUpdateSegments(): Promise<void>;
-    /**
-     * Integration health check
+     * Integration health check. Campaigns, communications and segmentation are healthy when their
+     * tables answer a read; `paymentRetry` says whether a `PaymentRetryService` was passed (it is
+     * optional, so it does not change `status`). `providers` is each registered channel's own check.
      */
     healthCheck(): Promise<{
         status: 'healthy' | 'degraded' | 'unhealthy';
@@ -142,10 +146,14 @@ export declare class DunningIntegrationService {
         };
         providers: Record<string, boolean>;
     }>;
+    /** True when one row (or none) can be read from the table; a failed read is logged and answers false. */
+    private tableAnswers;
     /**
-     * Get integration metrics
+     * Execution and communication counts of the last `days` days, from the stored rows. `successRate`
+     * is completed executions over all executions (0 to 1); `averageProcessingTime` is the mean
+     * processing time, in milliseconds, recorded on completed executions.
      */
-    getIntegrationMetrics(_days?: number): Promise<{
+    getIntegrationMetrics(days?: number): Promise<{
         totalExecutions: number;
         successfulExecutions: number;
         failedExecutions: number;

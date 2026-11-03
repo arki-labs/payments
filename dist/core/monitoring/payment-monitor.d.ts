@@ -1,6 +1,7 @@
 import type { Instant } from '@arki/date';
 import type { KV } from '@arki/kv';
 import type { Money } from '@arki/money';
+import type { PaymentRepository } from '../repository.js';
 type AlertingService = {
     sendCriticalAlert(alert: unknown): Promise<void>;
     sendWarningAlert(alert: unknown): Promise<void>;
@@ -25,24 +26,30 @@ type PaymentSystemHealth = {
     payments: {
         successRate: number;
         avgProcessingTime: number;
+        /** Subscriptions whose stored status is `active`. */
         activeSubscriptions: number;
     };
     webhooks: {
         avgProcessingTime: number;
         successRate: number;
     };
-    providers: Record<string, boolean>;
     lastUpdated: Instant;
 };
+/** The stored counts the monitor reads. A `PaymentRepository` fits. */
+type MonitorReads = Pick<PaymentRepository, 'getActiveSubscriptionCount' | 'countPaymentsCreatedBetween'>;
+/**
+ * Counts payment, webhook, subscription and refund outcomes in memory (the last hour) and in KV,
+ * and raises an alert when a rate crosses its threshold. It starts no timer: old metrics are
+ * dropped when a new one is recorded, so a monitor built per request leaves nothing running.
+ */
 export declare class PaymentMonitoringService {
     private kv;
+    private reads;
     private alertingService?;
     private metrics;
     private alertThresholds;
-    private metricsCollectionInterval?;
-    constructor(kv: KV, alertingService?: AlertingService | undefined);
+    constructor(kv: KV, reads: MonitorReads, alertingService?: AlertingService | undefined);
     private initializeThresholds;
-    private startMetricsCollection;
     recordPaymentAttempt(result: PaymentResult): Promise<void>;
     recordWebhookProcessing(duration: number, success: boolean): Promise<void>;
     recordSubscriptionEvent(event: 'created' | 'canceled' | 'upgraded' | 'downgraded'): Promise<void>;
@@ -59,12 +66,8 @@ export declare class PaymentMonitoringService {
     private calculateSuccessRate;
     private getAverageMetric;
     private calculateOverallHealth;
-    private getHourlyVolume;
-    private getHistoricalAverageVolume;
-    private getActiveSubscriptionCount;
     private cleanupOldMetrics;
-    destroy(): void;
 }
-export declare function createPaymentMonitoringService(kv: KV, alertingService?: AlertingService): PaymentMonitoringService;
+export declare function createPaymentMonitoringService(kv: KV, reads: MonitorReads, alertingService?: AlertingService): PaymentMonitoringService;
 export {};
 //# sourceMappingURL=payment-monitor.d.ts.map

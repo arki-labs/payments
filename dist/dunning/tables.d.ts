@@ -18,7 +18,8 @@ export type CreateDunningTablesDeps = {
  * if it needs stricter typing in queries.
  */
 type ExecutionResultJson = Record<string, unknown>;
-export declare function createDunningTables({ schema, customerIdRef, paymentIdRef, subscriptionIdRef, }: CreateDunningTablesDeps): {
+/** Builds the tables. `createDunningTables` returns them under the names declared below. */
+declare function buildDunningTables({ schema, customerIdRef, paymentIdRef, subscriptionIdRef }: CreateDunningTablesDeps): {
     enums: {
         dunningCampaignTypeEnum: import("drizzle-orm/pg-core").PgEnum<["payment_failed", "subscription_past_due", "trial_ending", "renewal_reminder"]>;
         dunningCampaignStatusEnum: import("drizzle-orm/pg-core").PgEnum<["active", "paused", "archived", "draft"]>;
@@ -32,11 +33,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "dunning_campaigns";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_campaigns", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dc_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_campaigns", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dc${string}`>>, {
                 name: string;
                 tableName: "dunning_campaigns";
                 dataType: "string";
-                data: `dc_${string}`;
+                data: `dc${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -302,11 +303,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "dunning_templates";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_templates", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dt_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_templates", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dt${string}`>>, {
                 name: string;
                 tableName: "dunning_templates";
                 dataType: "string";
-                data: `dt_${string}`;
+                data: `dt${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -317,11 +318,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_templates", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc_${string}`>, {
+            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_templates", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc${string}`>, {
                 name: string;
                 tableName: "dunning_templates";
                 dataType: "string";
-                data: `dc_${string}`;
+                data: `dc${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -517,11 +518,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "dunning_executions";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `de_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `de${string}`>>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `de_${string}`;
+                data: `de${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -532,11 +533,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc_${string}`>, {
+            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc${string}`>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `dc_${string}`;
+                data: `dc${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -547,11 +548,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            templateId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dt_${string}`>, {
+            templateId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dt${string}`>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `dt_${string}`;
+                data: `dt${string}`;
                 driverParam: string;
                 notNull: false;
                 hasDefault: false;
@@ -562,11 +563,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>, {
+            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -577,11 +578,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            subscriptionId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub_${string}`>, {
+            subscriptionId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `sub${string}`>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `sub_${string}`;
+                data: `sub${string}`;
                 driverParam: string;
                 notNull: false;
                 hasDefault: false;
@@ -592,11 +593,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            paymentId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `pay_${string}`>, {
+            paymentId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_executions", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `pay${string}`>, {
                 name: string;
                 tableName: "dunning_executions";
                 dataType: "string";
-                data: `pay_${string}`;
+                data: `pay${string}`;
                 driverParam: string;
                 notNull: false;
                 hasDefault: false;
@@ -833,11 +834,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "dunning_communications";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dcm_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `dcm${string}`>>, {
                 name: string;
                 tableName: "dunning_communications";
                 dataType: "string";
-                data: `dcm_${string}`;
+                data: `dcm${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -848,11 +849,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            executionId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `de_${string}`>, {
+            executionId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `de${string}`>, {
                 name: string;
                 tableName: "dunning_communications";
                 dataType: "string";
-                data: `de_${string}`;
+                data: `de${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -863,11 +864,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>, {
+            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>, {
                 name: string;
                 tableName: "dunning_communications";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -878,11 +879,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            templateId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dt_${string}`>, {
+            templateId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_communications", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dt${string}`>, {
                 name: string;
                 tableName: "dunning_communications";
                 dataType: "string";
-                data: `dt_${string}`;
+                data: `dt${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -1164,11 +1165,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "customer_segments";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"customer_segments", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `cs_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"customer_segments", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `cs${string}`>>, {
                 name: string;
                 tableName: "customer_segments";
                 dataType: "string";
-                data: `cs_${string}`;
+                data: `cs${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -1441,11 +1442,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
         name: "customer_risk_profiles";
         schema: string;
         columns: {
-            id: import("drizzle-orm/pg-core").PgBuildColumn<"customer_risk_profiles", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `crp_${string}`>>, {
+            id: import("drizzle-orm/pg-core").PgBuildColumn<"customer_risk_profiles", import("drizzle-orm/pg-core").SetHasRuntimeDefault<import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetIsPrimaryKey<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>>, `crp${string}`>>, {
                 name: string;
                 tableName: "customer_risk_profiles";
                 dataType: "string";
-                data: `crp_${string}`;
+                data: `crp${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: true;
@@ -1456,11 +1457,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"customer_risk_profiles", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust_${string}`>, {
+            customerId: import("drizzle-orm/pg-core").PgBuildColumn<"customer_risk_profiles", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cust${string}`>, {
                 name: string;
                 tableName: "customer_risk_profiles";
                 dataType: "string";
-                data: `cust_${string}`;
+                data: `cust${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -1708,11 +1709,11 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
                 identity: undefined;
                 generated: undefined;
             }>;
-            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_campaign_analytics", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc_${string}`>, {
+            campaignId: import("drizzle-orm/pg-core").PgBuildColumn<"dunning_campaign_analytics", import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc${string}`>, {
                 name: string;
                 tableName: "dunning_campaign_analytics";
                 dataType: "string";
-                data: `dc_${string}`;
+                data: `dc${string}`;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
@@ -2056,54 +2057,95 @@ export declare function createDunningTables({ schema, customerIdRef, paymentIdRe
     foreignKeys: {
         dunningCampaignForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dc${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dc_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dc${string}`>;
         };
         dunningTemplateForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dt_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dt${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dt_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dt${string}`>;
         };
         dunningExecutionForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `de_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `de${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `de_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `de${string}`>;
         };
         dunningCommunicationForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dcm_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `dcm${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dcm_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `dcm${string}`>;
         };
         customerSegmentForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cs_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `cs${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `cs_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `cs${string}`>;
         };
         customerRiskProfileForeignKeys: {
             required: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `crp_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").SetNotNull<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>>, `crp${string}`>;
             optional: (name: string, options?: {
-                onDelete?: 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
-            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `crp_${string}`>;
+                onDelete?: import("@arki/db/id").OnDelete;
+            }) => import("drizzle-orm/pg-core").Set$Type<import("drizzle-orm/pg-core").PgVarcharBuilder<[string, ...string[]]>, `crp${string}`>;
         };
     };
 };
-export type DunningTables = ReturnType<typeof createDunningTables>;
+type BuiltDunningTables = ReturnType<typeof buildDunningTables>;
+type DunningCampaignsTableType = BuiltDunningTables['dunningCampaigns'];
+type DunningTemplatesTableType = BuiltDunningTables['dunningTemplates'];
+type DunningExecutionsTableType = BuiltDunningTables['dunningExecutions'];
+type DunningCommunicationsTableType = BuiltDunningTables['dunningCommunications'];
+type CustomerSegmentsTableType = BuiltDunningTables['customerSegments'];
+type CustomerRiskProfilesTableType = BuiltDunningTables['customerRiskProfiles'];
+type DunningCampaignAnalyticsTableType = BuiltDunningTables['dunningCampaignAnalytics'];
+/** The `dunning_campaigns` table. */
+export interface DunningCampaignsTable extends DunningCampaignsTableType {
+}
+/** The `dunning_templates` table. */
+export interface DunningTemplatesTable extends DunningTemplatesTableType {
+}
+/** The `dunning_executions` table. */
+export interface DunningExecutionsTable extends DunningExecutionsTableType {
+}
+/** The `dunning_communications` table. */
+export interface DunningCommunicationsTable extends DunningCommunicationsTableType {
+}
+/** The `customer_segments` table. */
+export interface CustomerSegmentsTable extends CustomerSegmentsTableType {
+}
+/** The `customer_risk_profiles` table. */
+export interface CustomerRiskProfilesTable extends CustomerRiskProfilesTableType {
+}
+/** The `dunning_campaign_analytics` table. */
+export interface DunningCampaignAnalyticsTable extends DunningCampaignAnalyticsTableType {
+}
+/** What `createDunningTables` returns: the enums, the seven tables, and a foreign-key factory for six of them. */
+export type DunningTables = {
+    enums: BuiltDunningTables['enums'];
+    dunningCampaigns: DunningCampaignsTable;
+    dunningTemplates: DunningTemplatesTable;
+    dunningExecutions: DunningExecutionsTable;
+    dunningCommunications: DunningCommunicationsTable;
+    customerSegments: CustomerSegmentsTable;
+    customerRiskProfiles: CustomerRiskProfilesTable;
+    dunningCampaignAnalytics: DunningCampaignAnalyticsTable;
+    foreignKeys: BuiltDunningTables['foreignKeys'];
+};
+export declare function createDunningTables(deps: CreateDunningTablesDeps): DunningTables;
 export {};
 //# sourceMappingURL=tables.d.ts.map

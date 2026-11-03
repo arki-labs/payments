@@ -9,7 +9,14 @@ import type { AnyRelations } from 'drizzle-orm';
 import type { PgAsyncDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import type { Instant } from '@arki/date';
 import type { CoreTables } from './tables.js';
+import type { FailureOf } from '@arki/failure';
 import type { NewWebhookEvent, WebhookEvent, WebhookId } from './types.js';
+import { WebhookClaimConflict } from './services/webhook-failures.js';
+/** A claimed webhook event: its row, and whether this caller's insert created it. */
+export type WebhookClaim = {
+    event: WebhookEvent;
+    created: boolean;
+};
 /** The parts of a Drizzle Postgres database (or transaction) the claims use. */
 export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations>, 'insert' | 'select' | 'update'>;
 /**
@@ -19,11 +26,11 @@ export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations
  *
  * `onConflictDoNothing()` takes no target on purpose: it covers the unique
  * index on `provider_event_id` and the primary key alike.
+ *
+ * Returns `WebhookClaimConflict` (retryable) when the insert conflicted but no
+ * row holds the event's `providerEventId`.
  */
-export declare function claimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], data: NewWebhookEvent): Promise<{
-    event: WebhookEvent;
-    created: boolean;
-}>;
+export declare function claimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], data: NewWebhookEvent): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict>>;
 /**
  * Take over an unprocessed event for one more attempt. True only for the one
  * caller whose update matched.
