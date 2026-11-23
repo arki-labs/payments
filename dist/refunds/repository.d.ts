@@ -22,15 +22,28 @@ export declare class RefundRepository {
     private readonly db;
     private readonly refunds;
     constructor(db: RefundsDatabase, tables: Pick<RefundsTables, 'refunds'>);
+    /** Null too for an id no row can hold (U+0000), without a query. */
     findById(refundId: RefundId): Promise<Refund | null>;
     /** The refund the provider knows by `providerRefundId`: the link between a webhook and our row. */
+    /** No row holds U+0000, so an id with one finds nothing (Postgres would refuse the parameter). */
     findByProviderRefundId(providerRefundId: string): Promise<Refund | null>;
+    /** Empty too for an id no row can hold (U+0000), without a query. */
     findByPaymentId(paymentId: PaymentId): Promise<Refund[]>;
+    /** Empty too for a text that is not a refund status, without a query. */
     findByStatus(status: RefundStatus): Promise<Refund[]>;
     findPending(): Promise<Refund[]>;
+    /** Empty too for an id no row can hold (U+0000), without a query. */
     findByUser(userId: UserId): Promise<Refund[]>;
-    /** Completed refunds of a payment, in the payment's currency. */
+    /**
+     * Completed refunds of a payment, in the payment's currency. A `paymentId` or `currency` no row can
+     * hold (U+0000) has no refunds: zero, without a query. `currency` must be ISO 4217: another code
+     * throws `UnknownCurrencyError` (the `@arki/money` builder), as for the zero.
+     */
     getTotalRefundedAmount(paymentId: PaymentId, currency: string): Promise<Money>;
+    /**
+     * Refunds created in the range (both bounds optional): their count, one total per currency, and
+     * counts by status and reason. The bounds fall in the years 1 to 9999, or it throws `FailureError` (`invariant`).
+     */
     getRefundMetrics(startDate?: Instant, endDate?: Instant): Promise<{
         totalCount: number;
         /** One exact total per currency: refunds in USD and EUR do not add up to one number */
@@ -39,6 +52,12 @@ export declare class RefundRepository {
         byReason: Record<string, number>;
     }>;
     getAverageProcessingTime(): Promise<number>;
+    /**
+     * The refunds that match every filter given, newest first. `startDate` and `endDate` fall in the years
+     * 1 to 9999, and `minAmount` and `maxAmount` are whole minor units of their currency, at most 2^53 - 1 of
+     * them, as the amount column holds; anything else throws `FailureError` (`invariant`) before a query.
+     * A `userId` no row can hold (U+0000), or a `status` or `reason` that is not a refund status or reason, matches none.
+     */
     searchRefunds(filters: {
         status?: RefundStatus;
         reason?: RefundReason;

@@ -1,15 +1,23 @@
+/** The checks `WebhookSecurityService.validateWebhook` runs, in order; `WebhookRejected.check` names the one that refused. */
+export declare const WEBHOOK_CHECKS: readonly ['source_ip', 'timestamp', 'replay', 'signature'];
+/** One of `WEBHOOK_CHECKS`. */
+export type WebhookCheck = (typeof WEBHOOK_CHECKS)[number];
 /**
- * The webhook validator refused the delivery: a bad or missing signature, a source address that is
- * not allowed, a timestamp outside the window, a replayed delivery, or no webhook secret. `reason`
- * is the validator's own text, for logs only; branch on the code. Nothing was stored.
+ * The webhook validator refused the delivery. `check` says which check: `source_ip` (the source is
+ * not an allowed address), `timestamp` (outside the window or not Unix seconds), `replay` (this
+ * process saw the same delivery) or `signature` (a bad, malformed or missing signature, no webhook
+ * secret, or a provider whose signature is not verified). `reason` is the validator's own text, for
+ * logs only; branch on the code and `check`. Nothing was stored.
  *
  * @fix Check the webhook secret and the provider's signing setup. A resend of the same delivery is refused again.
  * @verify bun run test -- src/core/services/webhook-handler.test.ts
  */
 export declare const WebhookRejected: import("@arki/failure").FailureDefinition<"payments.webhook_rejected", import("@standard-schema/spec").StandardSchemaV1<{
+    check: "replay" | "signature" | "source_ip" | "timestamp";
     reason: string;
     retryable: false;
 }, {
+    check: "replay" | "signature" | "source_ip" | "timestamp";
     reason: string;
     retryable: false;
 }>>;
@@ -90,9 +98,11 @@ export declare const WebhookClaimConflict: import("@arki/failure").FailureDefini
 }>>;
 /** Every failure `processWebhook` defines for itself. */
 export declare const WEBHOOK_FAILURES: readonly [import("@arki/failure").FailureDefinition<"payments.webhook_rejected", import("@standard-schema/spec").StandardSchemaV1<{
+    check: "replay" | "signature" | "source_ip" | "timestamp";
     reason: string;
     retryable: false;
 }, {
+    check: "replay" | "signature" | "source_ip" | "timestamp";
     reason: string;
     retryable: false;
 }>>, import("@arki/failure").FailureDefinition<"payments.webhook_payload_invalid", import("@standard-schema/spec").StandardSchemaV1<{

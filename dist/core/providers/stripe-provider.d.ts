@@ -1,19 +1,21 @@
-import type { IdGenerationFailure } from '@arki/contracts';
 import Stripe from 'stripe';
-import type { UserId } from '../user-id.js';
-import type { FailureOf, Result } from '@arki/failure';
+import type { IdGenerationFailure } from '@arki/contracts';
+import type { FailureOf, Result, SchemaFailure } from '@arki/failure';
 import type { MoneyFailure } from '@arki/money';
 import { Money } from '@arki/money';
 import { fromStripeAmount } from '@arki/money/stripe';
 import type { RefundId } from '../../refunds/primitives.js';
 import type { BillingInterval, Customer, CustomerId, Payment, PaymentId, PaymentMethodInfo, Plan, PlanId, PlanTier, Subscription, SubscriptionId, SubscriptionPreview, WebhookValidationResult } from '../types.js';
+import type { UserId } from '../user-id.js';
 import type { PaymentProviderConfig, ProviderRefundResult } from './base-provider.js';
 import type { CardDeclined, IdempotencyConflict } from './provider-error.js';
+import { PaymentsConfigurationInvalid } from '../failures.js';
 import { BasePaymentProvider } from './base-provider.js';
 import { PlanPriceNotFlat, ReferenceNotFound, TaxAddressIncomplete } from './provider-error.js';
 /**
  * The rows the provider reads to turn our ids into Stripe ids. A `PaymentRepository` fits.
- * Without it, the calls that take a customer, plan, subscription or payment id throw `not_configured`.
+ * Without it, the calls that take a customer, plan, subscription or payment id return
+ * `PaymentsConfigurationInvalid` (`payments.configuration_invalid`, setting `references`) and send no request.
  * An id with no row, or a row with no Stripe id, is returned as `ReferenceNotFound` before any request.
  */
 export type StripeReferenceReads = {
@@ -26,7 +28,10 @@ export type StripeProviderOptions = {
     references?: StripeReferenceReads;
     /** Replaces Stripe's HTTP layer. Tests pass one that never leaves the process. */
     httpClient?: Stripe.HttpClient;
-    /** Retries of network failures and 5xx answers. Stripe's default is 1. */
+    /**
+     * Retries of network failures and 5xx answers: a whole number, 0 or more. Stripe's default is 1.
+     * Anything else is returned as `payments.configuration_invalid` when the provider is built.
+     */
     maxNetworkRetries?: number;
 };
 /**
@@ -43,6 +48,8 @@ type SendAmountFailure = Exclude<ReturnType<typeof stripeAmountOf>, number>;
 type ReadAmountFailure = Exclude<ReturnType<typeof fromStripeAmount>, Money>;
 type NotFound = FailureOf<typeof ReferenceNotFound>;
 type NotFlat = FailureOf<typeof PlanPriceNotFlat>;
+/** The provider was built without `references`, which the call needs (`payments.configuration_invalid`). */
+type NotConfigured = FailureOf<typeof PaymentsConfigurationInvalid>;
 type Declined = FailureOf<typeof CardDeclined>;
 type Conflict = FailureOf<typeof IdempotencyConflict>;
 type TaxCustomerDetails = {
@@ -88,14 +95,25 @@ export declare class StripeProvider extends BasePaymentProvider {
         taxCompliance: boolean;
         taxReporting: boolean;
     };
-    constructor(config: PaymentProviderConfig, options?: StripeProviderOptions);
+    /**
+     * Build a Stripe provider with `StripeProvider.create`. The constructor is private so that a bad
+     * setting is a returned failure, not a throw.
+     */
+    private constructor();
+    /**
+     * A Stripe provider for `config`. Returns `PaymentsConfigurationInvalid` (`payments.configuration_invalid`) when
+     * `config.apiKey` is empty (the Stripe client throws on one) or `options.maxNetworkRetries` is not a whole
+     * number of retries, 0 or more.
+     */
+    static create(config: PaymentProviderConfig, options?: StripeProviderOptions): StripeProvider | FailureOf<typeof PaymentsConfigurationInvalid>;
     /**
      * Runs one Stripe request in a `payments.<operation>` span, where `operation` names the Stripe
      * resource and method (`stripe.payment_intents.create`). `answer` turns the errors the call expects
      * (a declined card, a reused idempotency key) into returned failures, which the span records as
-     * `payments.failure_code`; any other Stripe error is thrown as a `PaymentProviderError`.
+     * `failure.code`; any other Stripe error is thrown as a `PaymentProviderError`.
      */
     private call;
+    /** `references`, or `PaymentsConfigurationInvalid` when the provider was built without it: the call then sends no request. */
     private requireReferences;
     private customerRef;
     private planRef;
@@ -106,22 +124,27 @@ export declare class StripeProvider extends BasePaymentProvider {
     private subscriptionRef;
     /** Our subscription shape from Stripe's. `base` carries what Stripe does not know: our ids. */
     private toSubscription;
+    /** A Stripe customer for the user, and the customer row to store. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
     createCustomer(params: {
         userId: UserId;
         email: string;
         name?: string;
         metadata?: Record<string, unknown>;
-    }): Promise<Customer | IdGenerationFailure>;
+    }): Promise<Customer | IdGenerationFailure | SchemaFailure>;
     /** Our customer row, refreshed with what Stripe holds now. */
     private toCustomer;
-    getCustomer(customerId: CustomerId): Promise<Customer | null>;
+    getCustomer(customerId: CustomerId): Promise<Result<Customer | null, NotConfigured>>;
+    /** The customer after Stripe applied the change. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
     updateCustomer(customerId: CustomerId, params: {
         email?: string;
         name?: string;
         metadata?: Record<string, unknown>;
-    }): Promise<Result<Customer, NotFound>>;
-    deleteCustomer(customerId: CustomerId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }): Promise<Result<Customer, NotFound | NotConfigured | SchemaFailure>>;
+    deleteCustomer(customerId: CustomerId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | undefined>;
@@ -130,6 +153,11 @@ export declare class StripeProvider extends BasePaymentProvider {
     private productIdOf;
     /** The product's name when the price was fetched with `expand: ['product']` and the product still exists. */
     private expandedProductName;
+    /**
+     * A Stripe product and recurring price for the plan, and the plan row to store. `intervalCount` and
+     * `trialPeriodDays`, when given, are whole numbers from 1 to 365 (a precondition: anything else throws
+     * an invariant failure before any request). `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request.
+     */
     createPlan(params: {
         name: string;
         description?: string;
@@ -141,16 +169,25 @@ export declare class StripeProvider extends BasePaymentProvider {
         intervalCount?: number;
         trialPeriodDays?: number;
         metadata?: Record<string, unknown>;
-    }): Promise<Result<Plan, IdGenerationFailure | SendAmountFailure>>;
+    }): Promise<Result<Plan, IdGenerationFailure | SendAmountFailure | SchemaFailure>>;
+    /**
+     * Deletes a product `createPlan` made whose price Stripe refused. A failed delete is logged at WARN
+     * with the product id, and the caller still gets the price error `createPlan` throws.
+     */
+    private deleteOrphanProduct;
     /** `null` when the plan has no row; `ReferenceNotFound` when its row has no Stripe price. */
-    getPlan(planId: PlanId): Promise<Result<Plan | null, NotFound | NotFlat | ReadAmountFailure>>;
+    getPlan(planId: PlanId): Promise<Result<Plan | null, NotFound | NotFlat | ReadAmountFailure | NotConfigured>>;
+    /** The plan after Stripe applied the new name or metadata. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
     updatePlan(planId: PlanId, params: {
         name?: string;
         metadata?: Record<string, unknown>;
-    }): Promise<Result<Plan, NotFound | NotFlat | ReadAmountFailure>>;
+    }): Promise<Result<Plan, NotFound | NotFlat | ReadAmountFailure | NotConfigured | SchemaFailure>>;
     /** Stripe prices cannot be deleted, so a deleted plan is archived: the price and its product stop being sold. */
-    deletePlan(planId: PlanId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    deletePlan(planId: PlanId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | undefined>;
@@ -158,7 +195,11 @@ export declare class StripeProvider extends BasePaymentProvider {
      * The active plans Stripe sells that this package created: prices carrying our `planId` in their
      * metadata, whose row still exists. Prices made in the Stripe dashboard have no row here and are left out.
      */
-    listPlans(): Promise<Result<Plan[], NotFlat | ReadAmountFailure>>;
+    listPlans(): Promise<Result<Plan[], NotFlat | ReadAmountFailure | NotConfigured>>;
+    /**
+     * A Stripe subscription to the plan's price. `trialPeriodDays`, when given, is a whole number from 1 to
+     * 365 (a precondition: anything else throws an invariant failure before any request). `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request.
+     */
     createSubscription(params: {
         customerId: CustomerId;
         planId: PlanId;
@@ -169,12 +210,18 @@ export declare class StripeProvider extends BasePaymentProvider {
     }): Promise<import("@arki/failure").Failure<"payments.card_declined", {
         providerCode?: string | undefined;
         declineCode?: string | undefined;
+    }> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
     }> | import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Subscription | IdGenerationFailure>;
-    getSubscription(subscriptionId: SubscriptionId): Promise<Subscription | null>;
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | Subscription | IdGenerationFailure>;
+    getSubscription(subscriptionId: SubscriptionId): Promise<Result<Subscription | null, NotConfigured>>;
+    /** The subscription after Stripe applied the change. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
     updateSubscription(subscriptionId: SubscriptionId, params: {
         planId?: PlanId;
         paymentMethodId?: string;
@@ -185,36 +232,55 @@ export declare class StripeProvider extends BasePaymentProvider {
     }): Promise<import("@arki/failure").Failure<"payments.card_declined", {
         providerCode?: string | undefined;
         declineCode?: string | undefined;
+    }> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
     }> | import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Subscription>;
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | Subscription>;
     cancelSubscription(subscriptionId: SubscriptionId, options: {
         immediately?: boolean;
         reason?: string;
         idempotencyKey?: string;
-    }): Promise<import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Subscription>;
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | Subscription>;
     /** Updates the Stripe subscription and returns our subscription row as Stripe now has it. */
     private updateStripeSubscription;
     /** Undoes a cancellation that is set to happen at the end of the paid period. */
-    reactivateSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    reactivateSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | Subscription>;
     /** Stops charging and keeps the subscription: invoices are voided until `resumeSubscription`. */
-    pauseSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    pauseSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | Subscription>;
-    resumeSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    resumeSubscription(subscriptionId: SubscriptionId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | Subscription>;
@@ -227,11 +293,11 @@ export declare class StripeProvider extends BasePaymentProvider {
         subscriptionId: SubscriptionId;
         planId: PlanId;
         prorationBehavior?: 'create_prorations' | 'none' | 'always_invoice';
-    }): Promise<Result<SubscriptionPreview, NotFound | ReadAmountFailure>>;
+    }): Promise<Result<SubscriptionPreview, NotFound | ReadAmountFailure | NotConfigured | SchemaFailure>>;
     /** Our payment from a Stripe payment intent fetched with `expand: ['payment_method', 'latest_charge']`. */
     private toPayment;
     private mapPaymentIntentStatus;
-    /** Charges the payment method now, with the customer present. */
+    /** Charges the payment method now, with the customer present. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
     createPayment(params: {
         customerId: CustomerId;
         amount: Money;
@@ -241,26 +307,37 @@ export declare class StripeProvider extends BasePaymentProvider {
     }): Promise<import("@arki/failure").Failure<"payments.card_declined", {
         providerCode?: string | undefined;
         declineCode?: string | undefined;
+    }> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Payment | IdGenerationFailure | MoneyFailure>;
-    getPayment(paymentId: PaymentId): Promise<Payment | MoneyFailure | null>;
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | Payment | IdGenerationFailure | ReadAmountFailure>;
+    getPayment(paymentId: PaymentId): Promise<Payment | ReadAmountFailure | NotConfigured | null>;
     /** Confirms the payment intent: also how a failed payment is tried again. */
     confirmPayment(paymentId: PaymentId): Promise<import("@arki/failure").Failure<"payments.card_declined", {
         providerCode?: string | undefined;
         declineCode?: string | undefined;
+    }> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Payment | MoneyFailure>;
-    cancelPayment(paymentId: PaymentId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }> | Payment | ReadAmountFailure>;
+    cancelPayment(paymentId: PaymentId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | Payment | MoneyFailure>;
+    }> | Payment | ReadAmountFailure>;
     /**
      * Refunds the payment's Stripe charge. `paymentId` is our payment id; the Stripe payment intent comes
      * from its row. `idempotencyKey` goes to Stripe, so a retry with the same key gets the first refund back
@@ -270,6 +347,7 @@ export declare class StripeProvider extends BasePaymentProvider {
      * The answer holds the Stripe refund id, its status and Stripe's `failure_reason`. A `pending`, `requires_action`, `failed` or
      * `canceled` refund is returned, not thrown. A key reused with different parameters returns
      * `IdempotencyConflict`; any other Stripe error throws a `PaymentProviderError`.
+     * `metadata` holding a `bigint` or U+0000, or an `idempotencyKey` a header cannot carry, is `InvalidInput` (`schema.invalid_input`) before any request.
      */
     refundPayment(paymentId: PaymentId, params: {
         refundId: RefundId;
@@ -277,14 +355,17 @@ export declare class StripeProvider extends BasePaymentProvider {
         amount?: Money;
         reason?: string;
         metadata?: Record<string, unknown>;
-    }): Promise<Result<ProviderRefundResult, NotFound | Conflict | SendAmountFailure>>;
+    }): Promise<Result<ProviderRefundResult, NotFound | Conflict | SendAmountFailure | NotConfigured | SchemaFailure>>;
     /**
      * The Stripe refund of our payment whose `metadata.refundId` is `refundId`, or null when Stripe has none.
      * Use it before `refundPayment` once its idempotency key may be older than Stripe's 24 hours, so a late
      * retry never refunds twice. Reads the payment intent's refunds page by page and stops at the match.
      */
-    findRefund(paymentId: PaymentId, refundId: RefundId): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    findRefund(paymentId: PaymentId, refundId: RefundId): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | {
@@ -300,8 +381,8 @@ export declare class StripeProvider extends BasePaymentProvider {
     attachPaymentMethod(params: {
         customerId: CustomerId;
         paymentMethodId: string;
-    }): Promise<Result<PaymentMethodInfo, Declined | NotFound>>;
-    detachPaymentMethod(paymentMethodId: string): Promise<void>;
+    }): Promise<Result<PaymentMethodInfo, Declined | NotFound | NotConfigured | SchemaFailure>>;
+    detachPaymentMethod(paymentMethodId: string): Promise<Result<undefined, SchemaFailure>>;
     listPaymentMethods(customerId: CustomerId): Promise<{
         id: string;
         type: "apple_pay" | "bank_account" | "card" | "google_pay" | "paypal";
@@ -310,19 +391,31 @@ export declare class StripeProvider extends BasePaymentProvider {
         expiryMonth?: number | undefined;
         expiryYear?: number | undefined;
         isDefault: boolean;
-    }[] | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }[] | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }>>;
     setDefaultPaymentMethod(params: {
         customerId: CustomerId;
         paymentMethodId: string;
-    }): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | undefined>;
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | undefined>;
+    /**
+     * Checks the signature with Stripe's async `constructEventAsync`, which runs on Node, Bun, Deno and
+     * workers (their crypto is async only). A bad signature or an unreadable payload is `isValid: false`.
+     */
     validateWebhook(payload: string | Buffer, signature: string, _timestamp: string, _sourceIp: string): Promise<WebhookValidationResult>;
     /**
      * Verify a webhook signature and return the **typed** Stripe event.
@@ -332,15 +425,21 @@ export declare class StripeProvider extends BasePaymentProvider {
      * `Stripe.Event` so it can narrow on `event.type` and read `event.data.object` as a
      * `Stripe.Subscription` with no unsafe cast. A bad, missing or stale signature returns
      * `InvalidWebhookSignature` (the Stripe error is its `cause`); a webhook route answers it with HTTP 400.
+     * Async: it uses Stripe's `constructEventAsync`, so it runs on Node, Bun, Deno and workers alike.
      */
-    constructWebhookEvent(payload: string | Buffer, signature: string): import("@arki/failure").Failure<"payments.invalid_signature", undefined> | Stripe.Event;
+    constructWebhookEvent(payload: string | Buffer, signature: string): Promise<import("@arki/failure").Failure<"payments.invalid_signature", undefined> | Stripe.Event>;
     createSetupIntent(customerId: CustomerId, options?: {
         idempotencyKey?: string;
-    }): Promise<import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }): Promise<import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | {
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
         clientSecret: string;
         setupIntentId: string;
     }>;
@@ -353,17 +452,22 @@ export declare class StripeProvider extends BasePaymentProvider {
     }): Promise<import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"payments.card_declined", {
         providerCode?: string | undefined;
         declineCode?: string | undefined;
+    }> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
     }> | import("@arki/failure").Failure<"payments.idempotency_conflict", undefined> | import("@arki/failure").Failure<"payments.payment_method_required", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | {
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
         clientSecret: string;
         paymentIntentId: string;
     }>;
-    createCustomerPortalSession(providerCustomerId: string, returnUrl: string): Promise<{
+    createCustomerPortalSession(providerCustomerId: string, returnUrl: string): Promise<Result<{
         url: string;
-    }>;
+    }, SchemaFailure>>;
     /**
      * Create a Stripe Checkout Session for a subscription — the modern hosted subscribe flow.
      *
@@ -372,6 +476,9 @@ export declare class StripeProvider extends BasePaymentProvider {
      * `customer.subscription.*` webhooks that the billing preset projects into the `subscriptions`
      * table. We deliberately use Checkout rather than the raw `subscriptions.create` API so we never
      * touch card data (no PCI scope) and get trials + Stripe Tax for free.
+     *
+     * `trialPeriodDays`, when given, is a whole number from 1 to 730, Stripe's longest trial (a
+     * precondition: anything else throws an invariant failure before any request).
      */
     createCheckoutSession(params: {
         /** Stripe Price ID for the plan being subscribed to. */
@@ -389,10 +496,15 @@ export declare class StripeProvider extends BasePaymentProvider {
         metadata?: Record<string, string>;
         /** Enable Stripe Tax (must be configured on the account) so EU VAT is calculated at checkout. */
         automaticTax?: boolean;
-    }): Promise<{
+    }): Promise<Result<{
         url: string;
         sessionId: string;
-    }>;
+    }, SchemaFailure>>;
+    /**
+     * The tax Stripe calculates for the line items. Precondition: every line item is in `currency` (one
+     * calculation has one currency); one in another currency throws an invariant failure before any request.
+     * At most `MAX_BATCH_ITEMS` (1,000) line items, and as many tax ids: more is `InvalidInput` (`schema.invalid_input`).
+     */
     calculateTax(params: {
         customerId: CustomerId;
         /** Every line item is in `currency`: one calculation has one currency. */
@@ -433,7 +545,7 @@ export declare class StripeProvider extends BasePaymentProvider {
             level: string;
             taxCode?: string;
         }[];
-    } | MoneyFailure | FailureOf<typeof TaxAddressIncomplete>>;
+    } | MoneyFailure | SchemaFailure | FailureOf<typeof TaxAddressIncomplete>>;
     /**
      * Records a sale or a refund with Stripe Tax, for tax reporting.
      *
@@ -442,12 +554,22 @@ export declare class StripeProvider extends BasePaymentProvider {
      *   the whole transaction is reversed. With them, the refunded total (tax included) is reversed.
      *
      * The totals are read from the line items of the recorded transaction: negative for a refund.
+     *
+     * At most `MAX_BATCH_ITEMS` (1,000) line items, and as many tax ids: more is `InvalidInput` (`schema.invalid_input`).
+     *
+     * Preconditions (an invariant failure before any request): every line item is in `currency`, and a
+     * `quantity`, when given, is a whole number of 1 or more.
      */
-    createTaxTransaction(params: TaxTransactionParams): Promise<import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    createTaxTransaction(params: TaxTransactionParams): Promise<import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
-    }> | import("@arki/failure").Failure<"payments.tax_address_incomplete", undefined> | {
+    }> | import("@arki/failure").Failure<"payments.tax_address_incomplete", undefined> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
         id: string;
         amountTotal: Money<string>;
         taxAmountExclusive: Money<string>;

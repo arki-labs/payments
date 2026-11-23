@@ -1,13 +1,40 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { now, toMillis } from '@arki/date';
 import { getLogger } from '@arki/log';
-import { invariant, isFailure } from '@arki/failure';
-import { Money } from '@arki/money';
-import { toMinorColumn } from '../../core/money.js';
+import { invariant, isFailure, orThrow } from '@arki/failure';
+import { AmountOutOfRange, Money, RoundingNecessary } from '@arki/money';
+import { is, parse } from '@arki/schema';
+import { segmentCriteriaSchema } from '../contracts.js';
+import { pgJsonRecordSchema, pgTextSchema } from '../../core/pg-values.js';
+import { ReferenceNotFound } from '../../core/providers/provider-error.js';
 import { CustomerSegmentNotFound, tickFault } from '../failures.js';
 import { createCustomerRiskProfileRepository, createCustomerSegmentRepository } from '../repository.js';
 import { valueList } from '../sql-list.js';
+/**
+ * Segment criteria as they are stored: the contract's criteria, with the spend range already turned into
+ * stored JSON (`spendBoundMinor` checks it when the criteria become SQL). A plan tier no plan has, a
+ * span or count outside its range, or NaN is refused here, so it never reaches a query.
+ */
+const storedCriteriaSchema = segmentCriteriaSchema.extend({ totalSpent: pgJsonRecordSchema.optional() });
 const logger = getLogger('arki:payments:dunning');
+/**
+ * A spend bound in the whole minor units the payments' `amount_minor` column holds. The bound is caller or
+ * stored JSON, so it is read as a door, never thrown on: an amount or currency `@arki/money` refuses
+ * returns its `MoneyFailure`, digits below the currency's minor unit (`1.001 EUR`) return
+ * `RoundingNecessary`, and more than 2^53 - 1 minor units `AmountOutOfRange`.
+ */
+function spendBoundMinor(bound) {
+    const amount = Money.fromJSON(bound);
+    if (isFailure(amount))
+        return amount;
+    const minor = amount.toScale(amount.currency.scale, 'down');
+    if (!minor.eq(amount))
+        return RoundingNecessary();
+    // `units` is a number exactly when it is a safe integer
+    if (typeof minor.units !== 'number')
+        return AmountOutOfRange();
+    return minor.units;
+}
 export class CustomerSegmentationService {
     db;
     segmentRepo;
@@ -30,11 +57,15 @@ export class CustomerSegmentationService {
         this.plans = coreTables.plans;
     }
     /**
-     * Create a new customer segment. The criteria are checked first: a spend range that is not valid money
-     * returns its `MoneyFailure` and nothing is written. After a good write, the count can only fail with a
+     * Create a new customer segment. The criteria are checked first: criteria `segmentCriteriaSchema`
+     * refuses, or an actor id, text or JSON Postgres cannot store, return `schema.invalid_input`, and a spend
+     * range that is not valid money returns its `MoneyFailure`; nothing is written then. After a good write, the count can only fail with a
      * database error, which throws (this service holds no transaction, so the saved row stays).
      */
     async createSegment(input, createdBy) {
+        const criteria = parse(storedCriteriaSchema, input.criteria);
+        if (isFailure(criteria))
+            return criteria;
         const valid = this.buildSegmentConditions(input.criteria);
         if (isFailure(valid))
             return valid;
@@ -43,6 +74,8 @@ export class CustomerSegmentationService {
             createdBy,
         });
         invariant(dbSegment, 'the segment insert returned no row');
+        if (isFailure(dbSegment))
+            return dbSegment;
         const segment = dbSegment;
         // Calculate initial customer count if auto-update is enabled
         if (input.autoUpdate) {
@@ -53,16 +86,22 @@ export class CustomerSegmentationService {
         return segment;
     }
     /**
-     * Update an existing segment. As in `createSegment`, new criteria with a spend range that is not valid
-     * money return their `MoneyFailure` before anything is written.
+     * Update an existing segment. As in `createSegment`, new criteria the schema refuses, or text, JSON or an
+     * update frequency Postgres cannot store, return `schema.invalid_input`, and a spend range that is not
+     * valid money returns its `MoneyFailure`, before anything is written. `null` for an unknown segment.
      */
     async updateSegment(segmentId, input) {
         if (input.criteria) {
+            const criteria = parse(storedCriteriaSchema, input.criteria);
+            if (isFailure(criteria))
+                return criteria;
             const valid = this.buildSegmentConditions(input.criteria);
             if (isFailure(valid))
                 return valid;
         }
         const dbSegment = await this.segmentRepo.update(segmentId, input);
+        if (isFailure(dbSegment))
+            return dbSegment;
         if (!dbSegment) {
             return null;
         }
@@ -83,7 +122,9 @@ export class CustomerSegmentationService {
         return dbSegment ?? null;
     }
     /**
-     * List segments with filtering and pagination
+     * List segments with filtering and pagination. `limit` and `offset` are whole numbers of 0 or more (a
+     * precondition: anything else throws an invariant failure); a `search` holding U+0000 matches nothing. A
+     * `type` or `sortBy` outside its list returns `schema.invalid_input`.
      */
     async listSegments(query) {
         const dbSegments = await this.segmentRepo.findMany(query);
@@ -108,7 +149,10 @@ export class CustomerSegmentationService {
         const customerCount = await this.calculateSegmentCustomerCount(segment.criteria);
         if (isFailure(customerCount))
             return customerCount;
-        await this.segmentRepo.updateCustomerCount(segmentId, customerCount);
+        // A count `customer_count` (int4) cannot hold returns `schema.invalid_input`
+        const stored = await this.segmentRepo.updateCustomerCount(segmentId, customerCount);
+        if (isFailure(stored))
+            return stored;
         return customerCount;
     }
     /**
@@ -128,8 +172,11 @@ export class CustomerSegmentationService {
     }
     /**
      * Get customers matching segment criteria. An unknown segment returns `CustomerSegmentNotFound`.
+     * `limit` is a whole number of 0 or more (a precondition: anything else throws an invariant failure
+     * before any query).
      */
     async getCustomersInSegment(segmentId, limit = 100) {
+        assertLimit(limit);
         const dbSegment = await this.segmentRepo.findById(segmentId);
         if (!dbSegment) {
             return CustomerSegmentNotFound({ segmentId });
@@ -138,9 +185,16 @@ export class CustomerSegmentationService {
         return this.getCustomersMatchingCriteria(segment.criteria, limit);
     }
     /**
-     * Get customers matching specific criteria
+     * Get customers matching specific criteria. Criteria the stored-criteria schema refuses (a plan tier
+     * no plan has, a span or count outside its range, NaN) return `schema.invalid_input`, and a spend
+     * range money refuses its `MoneyFailure`, before any query. `limit` is a whole number of 0 or more (a
+     * precondition: anything else throws an invariant failure).
      */
     async getCustomersMatchingCriteria(criteria, limit = 100) {
+        assertLimit(limit);
+        const checked = parse(storedCriteriaSchema, criteria);
+        if (isFailure(checked))
+            return checked;
         const conditions = this.buildSegmentConditions(criteria);
         if (isFailure(conditions))
             return conditions;
@@ -170,7 +224,8 @@ export class CustomerSegmentationService {
     }
     /**
      * Build SQL conditions from segment criteria. The spend range comes from a stored jsonb column, so
-     * an amount `@arki/money` refuses is returned as that `MoneyFailure`, never turned into a wrong filter.
+     * an amount `@arki/money` refuses, one finer than the currency's minor unit or one past 2^53 - 1 minor
+     * units is returned as its `MoneyFailure` (`spendBoundMinor`), never thrown or turned into a wrong filter.
      */
     buildSegmentConditions(criteria) {
         const conditions = [];
@@ -181,10 +236,10 @@ export class CustomerSegmentationService {
             const bound = Money.fromJSON(spendBound);
             if (isFailure(bound))
                 return bound;
-            const min = criteria.totalSpent.min === undefined ? undefined : Money.fromJSON(criteria.totalSpent.min);
+            const min = criteria.totalSpent.min === undefined ? undefined : spendBoundMinor(criteria.totalSpent.min);
             if (isFailure(min))
                 return min;
-            const max = criteria.totalSpent.max === undefined ? undefined : Money.fromJSON(criteria.totalSpent.max);
+            const max = criteria.totalSpent.max === undefined ? undefined : spendBoundMinor(criteria.totalSpent.max);
             if (isFailure(max))
                 return max;
             const totalSpentSubquery = this.db
@@ -196,7 +251,7 @@ export class CustomerSegmentationService {
                 conditions.push(sql `
             ${this.customers.id} IN (
                         SELECT customer_id FROM (${totalSpentSubquery}) AS totals
-                        WHERE total >= ${toMinorColumn(min)}
+                        WHERE total >= ${min}
                       )
           `);
             }
@@ -204,7 +259,7 @@ export class CustomerSegmentationService {
                 conditions.push(sql `
             ${this.customers.id} IN (
                         SELECT customer_id FROM (${totalSpentSubquery}) AS totals
-                        WHERE total <= ${toMinorColumn(max)}
+                        WHERE total <= ${max}
                       )
           `);
             }
@@ -271,9 +326,13 @@ export class CustomerSegmentationService {
         return conditions;
     }
     /**
-     * Calculate risk score for a customer
+     * Calculate the risk score of a customer from their payments and subscriptions. An unknown customer
+     * returns `ReferenceNotFound` (`kind: 'customer'`): there is nobody to score. An id no row can hold
+     * (U+0000) is unknown too, answered without a query.
      */
     async calculateCustomerRiskScore(customerId) {
+        if (!(await this.customerExists(customerId)))
+            return ReferenceNotFound({ kind: 'customer', id: customerId, missing: 'row' });
         const paymentHistory = await this.getCustomerPaymentHistory(customerId);
         const subscriptionHistory = await this.getCustomerSubscriptionHistory(customerId);
         const engagementMetrics = await this.getCustomerEngagementMetrics(customerId);
@@ -691,10 +750,16 @@ export class CustomerSegmentationService {
         };
     }
     /**
-     * Update or create customer risk profile
+     * Update or create the customer risk profile. An unknown customer (also an id no row can hold) returns
+     * `ReferenceNotFound` (`kind: 'customer'`) and writes nothing. A stored segment whose spend range is not
+     * valid money returns its `MoneyFailure` (see `getCustomerSegments`). The repository's
+     * `schema.invalid_input` for JSON Postgres cannot store is passed on; the profile is built from rows
+     * Postgres already stored, so it is not expected here.
      */
     async updateCustomerRiskProfile(customerId) {
         const riskScore = await this.calculateCustomerRiskScore(customerId);
+        if (isFailure(riskScore))
+            return riskScore;
         const paymentHistory = await this.getCustomerPaymentHistory(customerId);
         const subscriptionHistory = await this.getCustomerSubscriptionHistory(customerId);
         const engagementMetrics = await this.getCustomerEngagementMetrics(customerId);
@@ -721,20 +786,16 @@ export class CustomerSegmentationService {
             communicationPreferences,
             metadata: null,
         };
-        const dbProfile = await this.riskProfileRepo.upsert(profileData);
-        invariant(dbProfile, () => `the risk profile upsert for customer ${customerId} returned no row`);
-        return dbProfile;
+        // An unknown customer returns `ReferenceNotFound`; the upsert writes nothing then
+        return this.riskProfileRepo.upsert(profileData);
     }
     /**
-     * Get segments that a customer belongs to
+     * The active segments the customer belongs to. An unknown customer (also an id no row can hold, without a
+     * query) belongs to none: `[]`. A stored segment whose spend range is not valid money returns its
+     * `MoneyFailure` (`money.unknown_currency`, `money.rounding_necessary`, `money.out_of_range`, …).
      */
     async getCustomerSegments(customerId) {
-        const [customer] = await this.db
-            .select({ id: this.customers.id })
-            .from(this.customers)
-            .where(eq(this.customers.id, customerId))
-            .limit(1);
-        if (!customer)
+        if (!(await this.customerExists(customerId)))
             return [];
         const dbSegments = await this.segmentRepo.findMany({
             limit: 100,
@@ -743,7 +804,8 @@ export class CustomerSegmentationService {
             sortBy: 'createdAt',
             sortOrder: 'desc',
         });
-        const segments = dbSegments;
+        // The query above is built from constants, so a refusal is a bug
+        const segments = orThrow(dbSegments);
         const matchingSegments = [];
         for (const segment of segments) {
             const conditions = this.buildSegmentConditions(segment.criteria);
@@ -760,6 +822,17 @@ export class CustomerSegmentationService {
             }
         }
         return matchingSegments;
+    }
+    /** Whether a customer row has this id. An id no row can hold (U+0000) has none, answered without a query. */
+    async customerExists(customerId) {
+        if (!is(customerId, pgTextSchema))
+            return false;
+        const [customer] = await this.db
+            .select({ id: this.customers.id })
+            .from(this.customers)
+            .where(eq(this.customers.id, customerId))
+            .limit(1);
+        return customer !== undefined;
     }
     /**
      * Validate and sanitize risk calculation results
@@ -784,9 +857,11 @@ export class CustomerSegmentationService {
     }
     /**
      * Recalculate the risk profile of up to `limit` customers. Returns how many were tried and each
-     * customer whose profile was not updated (a stored range money refuses, or a thrown error).
+     * customer whose profile was not updated (a stored range money refuses, or a thrown error). `limit` is
+     * a whole number of 0 or more (a precondition: anything else throws an invariant failure before any query).
      */
     async bulkUpdateRiskProfiles(limit = 100) {
+        assertLimit(limit);
         const customerIds = await this.db.select({ id: this.customers.id }).from(this.customers).limit(limit);
         const report = { processed: customerIds.length, failed: [] };
         const results = {
@@ -868,15 +943,14 @@ export class CustomerSegmentationService {
         }
         return report;
     }
-    /**
-     * Get risk profile for a customer
-     */
+    /** The customer's risk profile, or `null` when there is none (also for an id no row can hold, without a query). */
     async getCustomerRiskProfile(customerId) {
         const dbProfile = await this.riskProfileRepo.findByCustomerId(customerId);
         return dbProfile ?? null;
     }
     /**
-     * Get customers by risk category
+     * Get customers by risk category. `limit` is a whole number of 0 or more (a precondition: anything else
+     * throws an invariant failure before any query). A category no profile has returns `schema.invalid_input`.
      */
     async getCustomersByRiskCategory(category, limit = 100) {
         const dbProfiles = await this.riskProfileRepo.findByRiskCategory(category, limit);
@@ -888,5 +962,9 @@ export class CustomerSegmentationService {
  */
 export function createCustomerSegmentationService(db, coreTables, dunningTables) {
     return new CustomerSegmentationService(db, coreTables, dunningTables);
+}
+/** The precondition of a row count: a whole number Postgres takes in LIMIT. */
+function assertLimit(limit) {
+    invariant(Number.isSafeInteger(limit) && limit >= 0, '[@arki/payments] limit must be a whole number of 0 or more');
 }
 //# sourceMappingURL=segmentation-service.js.map

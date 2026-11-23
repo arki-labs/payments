@@ -7,6 +7,7 @@
  * total over rows is a `MoneyBag`: it keeps each currency apart and never adds
  * two of them.
  */
+import type { SchemaFailure } from '@arki/failure';
 import { MoneyBag } from '@arki/money/bag';
 import type { DunningCampaignId } from './primitives.js';
 /**
@@ -17,9 +18,16 @@ import type { DunningCampaignId } from './primitives.js';
 export declare const DEFAULT_ANALYTICS_CURRENCY = "USD";
 /** The row id of one campaign, day (`YYYY-MM-DD`) and currency. */
 export declare function analyticsRowId(campaignId: DunningCampaignId, day: string, currency: string): string;
-/** Sums `(currency, minor units)` pairs into one bag, a balance per currency. */
+/**
+ * Sums `(currency, minor units)` pairs into one bag, a balance per currency. It folds row by row
+ * instead of spreading the rows into one call, so any number of rows fits (a spread past about
+ * 150,000 arguments throws `RangeError`); the rows are a stored result set, not a caller batch, so
+ * they have no `MAX_BATCH_ITEMS` cap. A row whose currency is not an ISO 4217 code, or whose units are
+ * not a safe whole number (a fraction, `NaN`, past 2^53 - 1, text that is not digits), returns
+ * `schema.invalid_input` and sums nothing.
+ */
 export declare function sumMinorByCurrency(rows: readonly {
     currency: string;
     units: number | string;
-}[]): MoneyBag;
+}[]): MoneyBag | SchemaFailure;
 //# sourceMappingURL=analytics-money.d.ts.map

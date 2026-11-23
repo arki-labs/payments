@@ -2,32 +2,57 @@ import { fromDate, isSameOrBefore, now, toDate, toMillis } from '@arki/date';
 import { z } from '@arki/contracts';
 import { isFailure } from '@arki/failure';
 import { getLogger } from '@arki/log';
-import { misconfigured } from '../failures.js';
+import { PaymentsConfigurationInvalid } from '../failures.js';
 import { paymentAmount } from '../money.js';
+import { MAX_BATCH_ITEMS } from '../pg-values.js';
 import { ReferenceNotFound } from '../providers/provider-error.js';
 const logger = getLogger('arki:payments:dunning');
 /** An `email` step's config: the template the app's mailer sends. */
 const emailStepConfigSchema = z.looseObject({ template: z.string().min(1) });
+/** A `cancel_subscription` step's config: the reason sent to the provider, when it names one. */
+const cancelStepConfigSchema = z.looseObject({ reason: z.string().min(1) });
+/** A rule's delay: whole days from 0 to ten years, so the scheduled day is always a real date. */
+const delayDaysSchema = z.number().int().min(0).max(3650);
+/** A list of rules or retry days: at most `MAX_BATCH_ITEMS` (1,000) items. */
+const configListSchema = z.array(z.unknown()).max(MAX_BATCH_ITEMS);
 /**
- * Throws `payments.configuration_invalid` when an enabled rule needs a sender the app did not pass,
- * or an `email` rule names no template. Runs when the service is built and when its rules change.
+ * Nothing, or `payments.configuration_invalid` when `rules` or `retrySchedule` holds more than
+ * `MAX_BATCH_ITEMS` items, an enabled rule needs a sender the app did not pass, an `email` rule
+ * names no template, or a rule's `trigger.delayDays` is not a whole number from 0 to 3650. Runs
+ * when the service is built and when its configuration changes.
  */
-function checkRulesHaveSenders(rules, senders) {
-    for (const rule of rules) {
+function checkConfiguration(config, senders) {
+    for (const [setting, list] of [['rules', config.rules], ['retrySchedule', config.retrySchedule]]) {
+        if (!configListSchema.safeParse(list).success) {
+            return PaymentsConfigurationInvalid({ setting, problem: `at most ${MAX_BATCH_ITEMS} items` });
+        }
+    }
+    for (const rule of config.rules) {
+        if (!delayDaysSchema.safeParse(rule.trigger.delayDays).success) {
+            return PaymentsConfigurationInvalid({
+                setting: `rules.${rule.id}.trigger.delayDays`,
+                problem: 'a delay is a whole number of days from 0 to 3650',
+            });
+        }
         if (!rule.enabled)
             continue;
-        const { type, config } = rule.action;
+        const { type, config: step } = rule.action;
         if (type === 'email') {
-            if (!senders.sendEmail)
-                throw misconfigured('senders.sendEmail', `rule ${rule.id} sends email`);
-            if (!emailStepConfigSchema.safeParse(config).success) {
-                throw misconfigured(`rules.${rule.id}.action.config.template`, 'an email step needs a template name');
+            if (!senders.sendEmail) {
+                return PaymentsConfigurationInvalid({ setting: 'senders.sendEmail', problem: `rule ${rule.id} sends email` });
+            }
+            if (!emailStepConfigSchema.safeParse(step).success) {
+                return PaymentsConfigurationInvalid({
+                    setting: `rules.${rule.id}.action.config.template`,
+                    problem: 'an email step needs a template name',
+                });
             }
         }
         if (type === 'webhook' && !senders.sendWebhook) {
-            throw misconfigured('senders.sendWebhook', `rule ${rule.id} calls a webhook`);
+            return PaymentsConfigurationInvalid({ setting: 'senders.sendWebhook', problem: `rule ${rule.id} calls a webhook` });
         }
     }
+    return;
 }
 const DEFAULT_DUNNING_CONFIG = {
     gracePeriodDays: 7,
@@ -131,19 +156,31 @@ export class DunningService {
     senders;
     config;
     dunningEvents = new Map();
-    /** Throws `payments.configuration_invalid` when an enabled rule needs a sender that `senders` lacks. */
-    constructor(paymentProvider, paymentRepository, writes, config = {}, senders = {}) {
+    /** Use `DunningService.create`: it checks the configuration first. */
+    constructor(paymentProvider, paymentRepository, writes, config, senders) {
         this.paymentProvider = paymentProvider;
         this.paymentRepository = paymentRepository;
         this.writes = writes;
         this.senders = senders;
-        this.config = { ...DEFAULT_DUNNING_CONFIG, ...config };
-        checkRulesHaveSenders(this.config.rules, senders);
+        this.config = config;
+    }
+    /**
+     * Build the service. Returns it, or `payments.configuration_invalid` when an enabled rule needs a
+     * sender that `senders` lacks, a rule's delay is not whole days from 0 to 3650, or `rules` or
+     * `retrySchedule` holds more than `MAX_BATCH_ITEMS` (1,000) items.
+     */
+    static create(paymentProvider, paymentRepository, writes, config = {}, senders = {}) {
+        const resolved = { ...DEFAULT_DUNNING_CONFIG, ...config };
+        const invalid = checkConfiguration(resolved, senders);
+        if (invalid)
+            return invalid;
+        return new DunningService(paymentProvider, paymentRepository, writes, resolved, senders);
     }
     /**
      * Handle a payment failure and initiate dunning process. Returns nothing, or a failure:
-     * `ReferenceNotFound` for an unknown payment or subscription (nothing is scheduled or written),
-     * or the refusal of the journal write.
+     * `ReferenceNotFound` for an unknown payment or subscription, or the refusal of the journal write
+     * that marks the subscription `past_due` (a canceled one, say). Nothing is scheduled then: the
+     * steps are scheduled only once the subscription is stored as past due.
      */
     async handlePaymentFailure(paymentId, subscriptionId, failureReason) {
         const payment = await this.paymentRepository.findPaymentById(paymentId);
@@ -152,6 +189,11 @@ export class DunningService {
         const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
         if (!subscription)
             return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
+        // Update subscription status to past_due. A refused write schedules nothing: the steps would
+        // retry, pause or cancel a subscription the journal says is not past due.
+        const marked = await this.writes.markSubscriptionPastDue({ subscriptionId });
+        if (isFailure(marked))
+            return marked;
         // Create dunning events based on configured rules
         const failureDate = now();
         for (const rule of this.config.rules.filter(r => r.enabled && r.trigger.event === 'payment_failed')) {
@@ -176,10 +218,6 @@ export class DunningService {
             };
             this.dunningEvents.set(dunningEvent.id, dunningEvent);
         }
-        // Update subscription status to past_due
-        const marked = await this.writes.markSubscriptionPastDue({ subscriptionId });
-        if (isFailure(marked))
-            return marked;
         logger.debug('Initiated dunning for payment {paymentId} on subscription {subscriptionId}', {
             paymentId,
             subscriptionId,
@@ -187,33 +225,45 @@ export class DunningService {
         return;
     }
     /**
-     * Process scheduled dunning events
+     * Run the dunning steps that are due, oldest first, and report what each did, in that order:
+     *
+     * - `done`: the step ran.
+     * - `refused`: the step returned a failure (the provider refused the pause, cancel or retry, the
+     *   journal refused the write, a sender failed, or a row is gone). It is not run again; `failure`
+     *   says why, so the caller can act on it (the subscription may still be `past_due`).
+     * - `thrown`: the step threw (a fault). It stays scheduled and runs again on the next call.
+     *
+     * One broken step never stops the others.
      */
     async processDunningEvents() {
         const current = now();
         const eventsToProcess = [...this.dunningEvents.values()]
             .filter(event => !event.processedAt && event.scheduledFor && isSameOrBefore(event.scheduledFor, current))
             .toSorted((a, b) => (a.scheduledFor ? toMillis(a.scheduledFor) : 0) - (b.scheduledFor ? toMillis(b.scheduledFor) : 0));
-        // One broken step must not stop the others. A step that threw stays unprocessed and runs again next time.
+        const reports = [];
         for (const event of eventsToProcess) {
-            try {
-                const processed = await this.processEvent(event);
-                if (isFailure(processed)) {
-                    logger.warn('Dunning event {eventId} was refused: {code}', {
-                        eventId: event.id,
-                        code: processed.code,
-                        failure: processed,
-                    });
-                }
-                event.processedAt = now();
-                logger.debug('Processed dunning event {eventId}', { eventId: event.id });
+            reports.push(await this.runStep(event));
+        }
+        return reports;
+    }
+    /** One due step, run and reported (see `processDunningEvents`). */
+    async runStep(event) {
+        try {
+            const processed = await this.processEvent(event);
+            event.processedAt = now();
+            if (isFailure(processed)) {
+                logger.warn('Dunning event {eventId} was refused: {code}', { eventId: event.id, code: processed.code });
+                return { eventId: event.id, status: 'refused', failure: processed };
             }
-            catch (error) {
-                logger.error('Dunning event {eventId} failed and stays scheduled: {error}', {
-                    eventId: event.id,
-                    error: error instanceof Error ? error : String(error),
-                });
-            }
+            logger.debug('Processed dunning event {eventId}', { eventId: event.id });
+            return { eventId: event.id, status: 'done' };
+        }
+        catch (error) {
+            logger.error('Dunning event {eventId} failed and stays scheduled: {error}', {
+                eventId: event.id,
+                error: error instanceof Error ? error : String(error),
+            });
+            return { eventId: event.id, status: 'thrown', error };
         }
     }
     /** Process an individual dunning event. Nothing, or the failure that refused it. */
@@ -229,12 +279,10 @@ export class DunningService {
                 return this.retryPayment(event, action.config);
             }
             case 'pause_subscription': {
-                await this.pauseSubscription(event);
-                break;
+                return this.pauseSubscription(event);
             }
             case 'cancel_subscription': {
-                await this.cancelSubscription(event, action.config);
-                break;
+                return this.cancelSubscription(event, action.config);
             }
             case 'webhook': {
                 return this.triggerWebhook(event, action.config);
@@ -253,8 +301,9 @@ export class DunningService {
         const { sendEmail } = this.senders;
         // Checked when the rules were set: an enabled email rule always has a sender and a template
         const step = emailStepConfigSchema.safeParse(config);
-        if (!sendEmail || !step.success)
-            throw misconfigured('senders.sendEmail', 'an email step ran without a sender');
+        if (!sendEmail || !step.success) {
+            return PaymentsConfigurationInvalid({ setting: 'senders.sendEmail', problem: 'an email step ran without a sender' });
+        }
         const subscription = await this.paymentRepository.findSubscriptionById(event.subscriptionId);
         if (!subscription)
             return ReferenceNotFound({ kind: 'subscription', id: event.subscriptionId, missing: 'row' });
@@ -270,8 +319,10 @@ export class DunningService {
         });
     }
     /**
-     * Retry failed payment. Nothing, or `ReferenceNotFound` when the event names no payment or an
-     * unknown one. A refused retry or write is logged and ends the step.
+     * Retry failed payment. Nothing (the retry ran; a payment that is still not paid is logged), or
+     * the failure that refused it: `ReferenceNotFound` when the event names no payment or an unknown
+     * one, the provider's refusal of the retry, or the journal's refusal to reactivate the subscription
+     * after the money came in (a canceled subscription stays canceled).
      */
     async retryPayment(event, _config) {
         if (!event.paymentId) {
@@ -283,26 +334,14 @@ export class DunningService {
         }
         // Attempt to retry the payment through the provider
         const retryResult = await this.paymentProvider.confirmPayment(event.paymentId);
-        if (isFailure(retryResult)) {
-            logger.warn('Payment retry failed for {paymentId}: {code}', {
-                paymentId: event.paymentId,
-                code: retryResult.code,
-                failure: retryResult,
-            });
-            return;
-        }
+        if (isFailure(retryResult))
+            return retryResult;
         if (retryResult.status === 'succeeded') {
             // Payment recovered - update subscription status.
-            // A canceled subscription stays canceled: the command refuses, and the refusal is logged.
+            // A canceled subscription stays canceled: the command refuses, and the refusal is returned.
             const activated = await this.writes.activateSubscription({ subscriptionId: event.subscriptionId });
-            if (isFailure(activated)) {
-                logger.warn('Could not reactivate subscription {subscriptionId}: {code}', {
-                    subscriptionId: event.subscriptionId,
-                    code: activated.code,
-                    failure: activated,
-                });
-                return;
-            }
+            if (isFailure(activated))
+                return activated;
             // Remove remaining dunning events for this subscription
             this.cancelDunningEventsForSubscription(event.subscriptionId);
             logger.info('Payment {paymentId} recovered on retry', { paymentId: event.paymentId });
@@ -316,76 +355,58 @@ export class DunningService {
         return;
     }
     /**
-     * Pause subscription due to payment failure
+     * Pause subscription due to payment failure. Nothing, or the failure that refused it: the
+     * provider's (the row is left as it is) or the journal's.
      */
     async pauseSubscription(event) {
         const paused = await this.paymentProvider.pauseSubscription(event.subscriptionId);
         // The provider did not pause it, so the row must not say paused
-        if (isFailure(paused)) {
-            logger.warn('Could not pause subscription {subscriptionId}: {code}', {
-                subscriptionId: event.subscriptionId,
-                code: paused.code,
-                failure: paused,
-            });
-            return;
-        }
+        if (isFailure(paused))
+            return paused;
         // Update local database
         const stored = await this.writes.pauseSubscription({ subscriptionId: event.subscriptionId });
-        if (isFailure(stored)) {
-            logger.warn('Could not store the pause of subscription {subscriptionId}: {code}', {
-                subscriptionId: event.subscriptionId,
-                code: stored.code,
-                failure: stored,
-            });
-            return;
-        }
+        if (isFailure(stored))
+            return stored;
         logger.info('Paused subscription {subscriptionId} after a failed payment', {
             subscriptionId: event.subscriptionId,
         });
+        return;
     }
     /**
-     * Cancel subscription due to payment failure
+     * Cancel subscription due to payment failure. Nothing, or the failure that refused it: the
+     * provider's (the row is left as it is) or the journal's.
      */
     async cancelSubscription(event, config) {
+        const step = cancelStepConfigSchema.safeParse(config);
         const canceled = await this.paymentProvider.cancelSubscription(event.subscriptionId, {
             immediately: true,
-            reason: config['reason'] || 'payment_failure',
+            reason: step.success ? step.data.reason : 'payment_failure',
         });
         // The provider did not cancel it, so the row must not say canceled
-        if (isFailure(canceled)) {
-            logger.warn('Could not cancel subscription {subscriptionId}: {code}', {
-                subscriptionId: event.subscriptionId,
-                code: canceled.code,
-                failure: canceled,
-            });
-            return;
-        }
+        if (isFailure(canceled))
+            return canceled;
         // Update local database
         const stored = await this.writes.cancelSubscription({
             subscriptionId: event.subscriptionId,
             status: 'canceled',
             canceledAt: now(),
         });
-        if (isFailure(stored)) {
-            logger.warn('Could not store the cancellation of subscription {subscriptionId}: {code}', {
-                subscriptionId: event.subscriptionId,
-                code: stored.code,
-                failure: stored,
-            });
-            return;
-        }
+        if (isFailure(stored))
+            return stored;
         // Remove remaining dunning events
         this.cancelDunningEventsForSubscription(event.subscriptionId);
         logger.info('Canceled subscription {subscriptionId} after a failed payment', {
             subscriptionId: event.subscriptionId,
         });
+        return;
     }
     /** Hand the step to the app's `sendWebhook`. Nothing, or the sender's failure. */
     async triggerWebhook(event, config) {
         const { sendWebhook } = this.senders;
         // Checked when the rules were set: an enabled webhook rule always has a sender
-        if (!sendWebhook)
-            throw misconfigured('senders.sendWebhook', 'a webhook step ran without a sender');
+        if (!sendWebhook) {
+            return PaymentsConfigurationInvalid({ setting: 'senders.sendWebhook', problem: 'a webhook step ran without a sender' });
+        }
         return sendWebhook({
             eventId: event.id,
             subscriptionId: event.subscriptionId,
@@ -428,7 +449,7 @@ export class DunningService {
         return;
     }
     /**
-     * Get dunning statistics for analytics
+     * Get dunning statistics for analytics. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     async getDunningStats(startDate, endDate) {
         const payments = await this.paymentRepository.getPaymentStats(startDate, endDate);
@@ -462,11 +483,18 @@ export class DunningService {
     /**
      * Update dunning configuration
      */
-    /** Throws `payments.configuration_invalid`, and keeps the old rules, when a new rule needs a missing sender. */
+    /**
+     * Returns nothing, or `payments.configuration_invalid` (and keeps the old configuration) when a new
+     * rule needs a missing sender, has a delay outside whole days from 0 to 3650, or `rules` or
+     * `retrySchedule` holds more than `MAX_BATCH_ITEMS` (1,000) items.
+     */
     updateConfiguration(config) {
         const next = { ...this.config, ...config };
-        checkRulesHaveSenders(next.rules, this.senders);
+        const invalid = checkConfiguration(next, this.senders);
+        if (invalid)
+            return invalid;
         this.config = next;
+        return;
     }
     /**
      * Get current dunning configuration
@@ -476,6 +504,6 @@ export class DunningService {
     }
 }
 export function createDunningService(paymentProvider, paymentRepository, writes, config, senders) {
-    return new DunningService(paymentProvider, paymentRepository, writes, config, senders);
+    return DunningService.create(paymentProvider, paymentRepository, writes, config, senders);
 }
 //# sourceMappingURL=dunning-service.js.map

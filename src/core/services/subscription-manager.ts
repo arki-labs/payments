@@ -2,11 +2,12 @@ import type { UserId } from '../user-id.js';
 import type { Instant } from '@arki/date';
 import { fromDate } from '@arki/date';
 import type { IdGenerationFailure } from '@arki/contracts';
-import type { FailureOf, Result } from '@arki/failure';
+import type { FailureOf, Result, SchemaFailure } from '@arki/failure';
 import type { CommandNotFound } from '@arki/journal';
 import type { MoneyFailure } from '@arki/money';
-import { isFailure } from '@arki/failure';
+import { invariant, isFailure } from '@arki/failure';
 
+import type { PaymentsConfigurationInvalid } from '../failures.js';
 import type { CoreWrites } from '../journal.js';
 import type { JournalWriteFailure } from '../journal/support.js';
 import type { CardDeclined, IdempotencyConflict } from '../providers/provider-error.js';
@@ -26,6 +27,8 @@ type Inactive = FailureOf<typeof PlanInactive>;
 type AlreadyActive = FailureOf<typeof SubscriptionAlreadyActive>;
 type Declined = FailureOf<typeof CardDeclined>;
 type Conflict = FailureOf<typeof IdempotencyConflict>;
+/** The provider was built without what the call needs, such as Stripe's `references` (`payments.configuration_invalid`). */
+type NotConfigured = FailureOf<typeof PaymentsConfigurationInvalid>;
 /** What a `writes.*` call here returns besides the row: a journal failure, or no row to change. */
 type StoreFailure = JournalWriteFailure | CommandNotFound;
 
@@ -104,13 +107,26 @@ export class SubscriptionManager {
   /**
    * Start a subscription for a user who has a customer and no active subscription. Returns the
    * provider's subscription, or a failure: `ReferenceNotFound` (no customer for the user, or no
-   * plan), `PlanInactive`, `SubscriptionAlreadyActive`, or what the provider returned.
+   * plan), `PlanInactive`, `SubscriptionAlreadyActive`, or what the provider returned (its
+   * `InvalidInput` for `options.metadata` no column or provider can hold among them).
+   * `options.trialPeriodDays`, when given, is a whole number from 1 to 365, as the contract says (a
+   * precondition: anything else throws an invariant failure before any read).
    */
   async createSubscription(
     userId: UserId,
     planId: PlanId,
     options: SubscriptionCreationOptions = {},
-  ): Promise<Result<Subscription, Declined | Conflict | NotFound | IdGenerationFailure | Inactive | AlreadyActive>> {
+  ): Promise<
+    Result<
+      Subscription,
+      Declined | Conflict | NotFound | NotConfigured | IdGenerationFailure | Inactive | AlreadyActive | SchemaFailure
+    >
+  > {
+    const days = options.trialPeriodDays;
+    invariant(
+      days === undefined || (Number.isInteger(days) && days >= 1 && days <= 365),
+      '[@arki/payments] trialPeriodDays must be a whole number from 1 to 365',
+    );
     const customer = await this.paymentRepository.findCustomerByUserId(userId);
     if (!customer) return ReferenceNotFound({ kind: 'customer', id: userId, missing: 'row' });
 
@@ -141,7 +157,16 @@ export class SubscriptionManager {
     newPlanId: PlanId,
     options: SubscriptionChangeOptions = {},
   ): Promise<
-    SubscriptionChange | NotFound | InvalidState | Inactive | MoneyFailure | Declined | Conflict | StoreFailure
+    | SubscriptionChange
+    | NotFound
+    | InvalidState
+    | Inactive
+    | MoneyFailure
+    | Declined
+    | Conflict
+    | NotConfigured
+    | SchemaFailure
+    | StoreFailure
   > {
     const currentSubscription = await this.subscriptionIn(subscriptionId, ['active'], 'update');
     if (isFailure(currentSubscription)) return currentSubscription;
@@ -182,7 +207,9 @@ export class SubscriptionManager {
   async setCancelAtPeriodEnd(
     subscriptionId: SubscriptionId,
     cancelAtPeriodEnd: boolean,
-  ): Promise<Subscription | NotFound | InvalidState | Declined | Conflict | StoreFailure> {
+  ): Promise<
+    Subscription | NotFound | NotConfigured | InvalidState | Declined | Conflict | SchemaFailure | StoreFailure
+  > {
     const currentSubscription = await this.subscriptionNotCanceled(subscriptionId, 'set_cancel_at_period_end');
     if (isFailure(currentSubscription)) return currentSubscription;
 
@@ -201,7 +228,7 @@ export class SubscriptionManager {
   async cancelSubscription(
     subscriptionId: SubscriptionId,
     options: SubscriptionCancellationOptions = {},
-  ): Promise<Subscription | NotFound | InvalidState | Conflict | StoreFailure> {
+  ): Promise<Subscription | NotFound | NotConfigured | InvalidState | Conflict | StoreFailure> {
     const currentSubscription = await this.subscriptionNotCanceled(subscriptionId, 'cancel');
     if (isFailure(currentSubscription)) return currentSubscription;
 
@@ -226,7 +253,7 @@ export class SubscriptionManager {
 
   async reactivateSubscription(
     subscriptionId: SubscriptionId,
-  ): Promise<Subscription | NotFound | InvalidState | StoreFailure> {
+  ): Promise<Subscription | NotFound | NotConfigured | InvalidState | StoreFailure> {
     const currentSubscription = await this.subscriptionIn(subscriptionId, ['canceled', 'past_due'], 'reactivate');
     if (isFailure(currentSubscription)) return currentSubscription;
 
@@ -246,7 +273,7 @@ export class SubscriptionManager {
 
   async pauseSubscription(
     subscriptionId: SubscriptionId,
-  ): Promise<Subscription | NotFound | InvalidState | StoreFailure> {
+  ): Promise<Subscription | NotFound | NotConfigured | InvalidState | StoreFailure> {
     const currentSubscription = await this.subscriptionIn(subscriptionId, ['active'], 'pause');
     if (isFailure(currentSubscription)) return currentSubscription;
 
@@ -263,7 +290,7 @@ export class SubscriptionManager {
 
   async resumeSubscription(
     subscriptionId: SubscriptionId,
-  ): Promise<Subscription | NotFound | InvalidState | StoreFailure> {
+  ): Promise<Subscription | NotFound | NotConfigured | InvalidState | StoreFailure> {
     const currentSubscription = await this.subscriptionIn(subscriptionId, ['paused'], 'resume');
     if (isFailure(currentSubscription)) return currentSubscription;
 
@@ -324,13 +351,13 @@ export class SubscriptionManager {
 
   /**
    * What a move to `newPlanId` would cost, from the provider. Returns the preview, or a failure:
-   * `ReferenceNotFound`, `PlanInactive`, or what the provider returned.
+   * `ReferenceNotFound`, `PlanInactive`, or what the provider returned (its `InvalidInput` among them).
    */
   async previewSubscriptionChange(
     subscriptionId: SubscriptionId,
     newPlanId: PlanId,
     options: SubscriptionChangeOptions = {},
-  ): Promise<Result<SubscriptionPreview, NotFound | Inactive | MoneyFailure>> {
+  ): Promise<Result<SubscriptionPreview, NotFound | NotConfigured | Inactive | MoneyFailure | SchemaFailure>> {
     const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
     if (!subscription) return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
 
@@ -344,17 +371,23 @@ export class SubscriptionManager {
     });
   }
 
-  /** Trialing subscriptions whose period ends in the local calendar day `daysBeforeExpiration` days from now. */
+  /**
+   * Trialing subscriptions whose period (the trial) ends in the local calendar day
+   * `daysBeforeExpiration` days from now. `daysBeforeExpiration` is a whole number from 0 to 365 (a
+   * precondition: anything else throws).
+   */
   async handleTrialEndingSoon(daysBeforeExpiration = 3): Promise<Subscription[]> {
+    invariant(
+      Number.isInteger(daysBeforeExpiration) && daysBeforeExpiration >= 0 && daysBeforeExpiration <= 365,
+      '[@arki/payments] daysBeforeExpiration must be a whole number from 0 to 365',
+    );
     // Local-time calendar days, as before: the working values stay `Date`s until the query.
     const startDate = new Date();
     startDate.setDate(startDate.getDate() + daysBeforeExpiration - 1);
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + daysBeforeExpiration);
 
-    const subscriptions = await this.paymentRepository.findSubscriptionsEndingInRange(fromDate(startDate), fromDate(endDate));
-
-    return subscriptions.filter(sub => sub.status === 'trialing');
+    return this.paymentRepository.findSubscriptionsEndingInRange(fromDate(startDate), fromDate(endDate), 'trialing');
   }
 
   /** Every past due subscription. */
@@ -362,6 +395,7 @@ export class SubscriptionManager {
     return this.paymentRepository.findSubscriptionsByStatus('past_due');
   }
 
+  /** Subscription and revenue figures for the range. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure). */
   async getSubscriptionAnalytics(startDate?: Instant, endDate?: Instant): Promise<SubscriptionAnalytics> {
     const subscriptions = await this.paymentRepository.getSubscriptionStats(startDate, endDate);
     const payments = await this.paymentRepository.getPaymentStats(startDate, endDate);
@@ -427,15 +461,17 @@ export class SubscriptionManager {
   /**
    * Store what the provider holds for the subscription. Returns the stored row, or a failure:
    * `ReferenceNotFound` (`missing: 'row'` when we hold no such subscription, `missing: 'provider_id'`
-   * when the provider has none for it), or the refusal of the journal write.
+   * when the provider has none for it), the provider's `PaymentsConfigurationInvalid` (built without what
+   * the read needs), or the refusal of the journal write.
    */
   async syncSubscriptionWithProvider(
     subscriptionId: SubscriptionId,
-  ): Promise<Subscription | NotFound | JournalWriteFailure> {
+  ): Promise<Subscription | NotFound | NotConfigured | JournalWriteFailure> {
     const localSubscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
     if (!localSubscription) return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
 
     const providerSubscription = await this.paymentProvider.getSubscription(subscriptionId);
+    if (isFailure(providerSubscription)) return providerSubscription;
     if (!providerSubscription) {
       return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'provider_id' });
     }
@@ -457,12 +493,20 @@ export class SubscriptionManager {
     });
   }
 
+  /**
+   * Whether the user may use the product: an `active` or `trialing` subscription (newest first)
+   * grants access, as `getEntitlement` does, and with `requiredTiers` its plan must be in one of
+   * them. Without one, `subscription` is the user's newest subscription, if any, and `reason` says why.
+   */
   async validateSubscriptionAccess(userId: UserId, requiredTiers: string[] = []): Promise<{
     hasAccess: boolean;
     subscription: Subscription | null;
     reason?: string;
   }> {
-    const subscription = await this.getActiveSubscription(userId);
+    const subscriptions = await this.paymentRepository.findSubscriptionsByUserId(userId);
+    const subscription =
+      subscriptions.find(candidate => candidate.status === 'active' || candidate.status === 'trialing') ??
+      subscriptions[0];
 
     if (!subscription) {
       return {

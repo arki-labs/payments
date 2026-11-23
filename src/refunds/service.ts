@@ -7,12 +7,10 @@ import { TransactionDefect, TransactionRejected } from '@arki/db/errors';
 import type { FailureOf } from '@arki/failure';
 import { isFailure } from '@arki/failure';
 import { isJournalError } from '@arki/journal';
-import { getLogger } from '@arki/log';
 import { sum } from '@arki/money';
 import { currencyCodeSchema } from '@arki/money/zod';
 import { parse } from '@arki/schema';
 
-import type { NotificationService } from '../core/notifications/service.js';
 import type { PaymentRepository } from '../core/repository.js';
 import type { PaymentId } from '../core/types.js';
 import type { RefundWrites } from './journal.js';
@@ -20,7 +18,7 @@ import type { RefundId } from './primitives.js';
 import type { RefundRepository, RefundsDatabase } from './repository.js';
 import type { RefundsTables } from './tables.js';
 import type { Refund, RefundApprovalData, RefundRejectionData, RefundRequestData } from './types.js';
-import { misconfigured } from '../core/failures.js';
+import { PaymentsConfigurationInvalid } from '../core/failures.js';
 import { nonNegativeMoneySchema, paymentAmount } from '../core/money.js';
 import { refundRejectionReasonSchema } from './contracts.js';
 import {
@@ -35,14 +33,11 @@ import {
 import { createRefundRepository, refundAmountOf } from './repository.js';
 import { pendingRefundIndexName } from './tables.js';
 
-/** Logs ids only, never refund data. */
-const logger = getLogger('arki:payments');
-
 /**
  * The largest refund approved without a person, per currency: `{ USD: '10.00', JPY: '1500' }`.
  * Each amount is exact text in its own currency, so 10 USD and 1500 JPY are both "small".
  * A currency missing here has no small-refund rule: its refunds wait for a person.
- * Parsed once when the service is built; a bad code or amount throws there, not on a refund.
+ * Parsed once when the service is built; a bad code or amount is returned there as `payments.configuration_invalid`, not on a refund.
  */
 export const refundAutoApproveLimitsSchema = z.record(currencyCodeSchema, z.string()).transform((limits, ctx) => {
   const parsed = new Map<string, Money>();
@@ -62,6 +57,9 @@ export const refundAutoApproveLimitsSchema = z.record(currencyCodeSchema, z.stri
 
 export type RefundAutoApproveLimits = z.input<typeof refundAutoApproveLimitsSchema>;
 
+/** The refund window: whole milliseconds, 0 or more. Checked once when the service is built. */
+const refundWindowMsSchema = z.int().min(0);
+
 /** About ten dollars' worth where it is set; other currencies wait for a person. */
 export const DEFAULT_REFUND_AUTO_APPROVE_LIMITS: RefundAutoApproveLimits = {
   USD: '10.00',
@@ -72,7 +70,10 @@ export const DEFAULT_REFUND_AUTO_APPROVE_LIMITS: RefundAutoApproveLimits = {
 export type RefundServiceConfig = {
   /** User ID attributed for system-driven auto-approvals (e.g. small-amount refunds). */
   systemUserId: UserId;
-  /** Refund window in milliseconds. Defaults to 90 days. */
+  /**
+   * Refund window in milliseconds. Defaults to 90 days. A whole number of 0 or more: anything else
+   * (NaN, a fraction, a negative number) makes `RefundService.create` return `payments.configuration_invalid`.
+   */
   refundWindowMs?: number;
   /** Small refunds approved without a person. Defaults to `DEFAULT_REFUND_AUTO_APPROVE_LIMITS`. */
   autoApproveLimits?: RefundAutoApproveLimits;
@@ -129,25 +130,46 @@ export class RefundService {
   private readonly systemUserId: UserId;
   private readonly autoApproveLimits: ReadonlyMap<string, Money>;
 
-  constructor(
+  private constructor(
     private readonly refundRepository: RefundReads,
     private readonly writes: RefundWrites,
     private readonly paymentRepository: PaymentReads,
-    config: RefundServiceConfig,
-    /** Sends the customer's rejection mail only. The approvers' mail is an effect: `createRefundEffects`. */
-    private readonly notificationService?: NotificationService,
+    systemUserId: UserId,
+    refundWindow: number,
+    autoApproveLimits: ReadonlyMap<string, Money>,
   ) {
-    this.refundWindow = config.refundWindowMs ?? 90 * 24 * 60 * 60 * 1000;
-    this.systemUserId = config.systemUserId;
-    // A bad limit is a configuration fault: `payments.configuration_invalid` when the service is built
+    this.systemUserId = systemUserId;
+    this.refundWindow = refundWindow;
+    this.autoApproveLimits = autoApproveLimits;
+  }
+
+  /**
+   * Build the service. A bad setting is returned as `PaymentsConfigurationInvalid`
+   * (`payments.configuration_invalid`): a `refundWindowMs` that is not a whole number of 0 or more
+   * (a NaN window compared false and turned the window off), or an `autoApproveLimits` with a bad
+   * currency code or amount.
+   */
+  static create(
+    refundRepository: RefundReads,
+    writes: RefundWrites,
+    paymentRepository: PaymentReads,
+    config: RefundServiceConfig,
+  ): RefundService | FailureOf<typeof PaymentsConfigurationInvalid> {
+    const window = refundWindowMsSchema.safeParse(config.refundWindowMs ?? 90 * 24 * 60 * 60 * 1000);
+    if (!window.success) {
+      return PaymentsConfigurationInvalid({
+        setting: 'refunds.refundWindowMs',
+        problem: `must be a whole number of milliseconds, 0 or more; got ${String(config.refundWindowMs)}`,
+      });
+    }
     const limits = refundAutoApproveLimitsSchema.safeParse(config.autoApproveLimits ?? DEFAULT_REFUND_AUTO_APPROVE_LIMITS);
     if (!limits.success) {
-      throw misconfigured(
-        'refunds.autoApproveLimits',
-        limits.error.issues.map(issue => `${issue.path.join('.') || '(limits)'}: ${issue.message}`).join('; '),
-      );
+      return PaymentsConfigurationInvalid({
+        setting: 'refunds.autoApproveLimits',
+        problem: limits.error.issues.map(issue => `${issue.path.join('.') || '(limits)'}: ${issue.message}`).join('; '),
+      });
     }
-    this.autoApproveLimits = limits.data;
+    return new RefundService(refundRepository, writes, paymentRepository, config.systemUserId, window.data, limits.data);
   }
 
   async requestRefund(
@@ -225,12 +247,7 @@ export class RefundService {
       rejectedBy: data.rejectedBy,
       rejectionReason: reason,
     });
-    if (isFailure(rejectedRefund)) return rejectedRefund;
-
-    if (this.notificationService) {
-      await this.notifyCustomer(rejectedRefund, 'rejected');
-    }
-
+    // The customer hears from the `refund-rejection-notice` effect (`createRefundEffects`), after the commit
     return rejectedRefund;
   }
 
@@ -303,28 +320,6 @@ export class RefundService {
     return limit !== undefined && amount.lte(limit);
   }
 
-  private async notifyCustomer(refund: Refund, event: 'rejected'): Promise<void> {
-    if (this.notificationService?.sendRefundStatusUpdate) {
-      try {
-        const sent = await this.notificationService.sendRefundStatusUpdate(refund, event);
-        if (isFailure(sent)) {
-          logger.warn('Refund {event} mail for {refundId} was not sent: {code}', {
-            refundId: refund.id,
-            event,
-            code: sent.code,
-            failure: sent,
-          });
-        }
-      } catch (error) {
-        logger.error('Refund {event} mail for {refundId} was not sent: {error}', {
-          refundId: refund.id,
-          event,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-  }
-
   // Analytics methods
   async getRefundMetrics(startDate?: Instant, endDate?: Instant) {
     return this.refundRepository.getRefundMetrics(startDate, endDate);
@@ -339,13 +334,13 @@ export class RefundService {
   }
 }
 
+/** A `RefundService` over the refunds table, or the `PaymentsConfigurationInvalid` of `RefundService.create`. */
 export function createRefundService(
   db: RefundsDatabase,
   tables: Pick<RefundsTables, 'refunds'>,
   writes: RefundWrites,
   paymentRepository: PaymentRepository,
   config: RefundServiceConfig,
-  notificationService?: NotificationService,
 ) {
-  return new RefundService(createRefundRepository(db, tables), writes, paymentRepository, config, notificationService);
+  return RefundService.create(createRefundRepository(db, tables), writes, paymentRepository, config);
 }

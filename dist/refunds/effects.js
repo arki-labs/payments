@@ -1,41 +1,62 @@
+import { eq } from 'drizzle-orm';
+import { isFailure } from '@arki/failure';
+import { backoff, need } from '@arki/journal';
 /**
  * Refund effects: what happens after a refund write commits
  *
- * `createRefundEffects(j, refundsJournal)` returns the refund effects, to list in the app's `compose({ effects })`.
- * There is one today:
+ * `createRefundEffects(j, refundsJournal)` returns the refund effects, to list in the app's `compose({ effects })`:
  *
  * - `refund-approval-request` mails the approvers about a refund that waits for a person. It runs on
  *   `RefundRequestedV2`, after the request committed: a request that rolled back sends nothing, and a retried
  *   request sends nothing more, because its receipt replays and records no event. A refund the auto-approval
  *   approved in the same request is no longer `pending` when the job runs, so it gets no mail; neither does one a
  *   person decided before the job ran.
+ * - `refund-rejection-notice` tells the customer their refund was rejected (`sendRefundStatusUpdate(row,
+ *   'rejected')`). It runs on `RefundRejected`, after the rejection committed.
  *
- * It needs `notifications`, given once in the app's `services`. A worker runs it. The mailer takes no key, so a
- * crash between the send and the ack sends the mail a second time.
+ * Both need `notifications`, given once in the app's `services`. A worker runs them. A mail that did not go out is
+ * returned, never dropped. `payments.notification_failed` (the transport or Slack was down, so nothing was sent) is
+ * retried with the journal's default backoff (8 tries, 1 s up to 5 minutes), like a throw; any other returned
+ * failure makes the job dead at once. A dead job keeps the failure as its `lastError`, and
+ * `journal.jobs(db, { status: 'dead' })` lists it; an operator retries it with `journal.retry`. The mailer takes no
+ * key, so a crash between the send and the ack sends the mail a second time.
  */
-import { eq } from 'drizzle-orm';
-import { isFailure } from '@arki/failure';
-import { need } from '@arki/journal';
-import { getLogger } from '@arki/log';
+/**
+ * The retry of both mail effects: the journal default (8 tries, 1 s doubling up to 5 minutes), for a throw and for a
+ * returned `payments.notification_failed`. Another returned failure is final.
+ */
+export const refundMailRetry = backoff
+    .exponential({ base: 1000, max: 300_000, jitter: 0.25 })
+    .upTo(7)
+    .while(reason => !isFailure(reason) || reason.code === 'payments.notification_failed');
 export function createRefundEffects(j, refundsJournal) {
     const { refund } = refundsJournal.entities;
     const refunds = refund.table;
-    const approvalRequest = j.effect('refund-approval-request', refund, { notifications: need() }, {
+    const approvalRequest = j
+        .effect('refund-approval-request', refund, { notifications: need() }, {
         RefundRequestedV2: async (e, { db, notifications }) => {
             const [row] = await db.select().from(refunds).where(eq(refunds.id, e.entityId)).limit(1);
             if (row?.status !== 'pending') {
-                return;
+                return null;
             }
             const sent = await notifications.sendRefundApprovalRequest?.(row);
-            if (isFailure(sent)) {
-                getLogger('arki:payments').warn('Refund {refundId} approval request was not sent: {code}', {
-                    refundId: row.id,
-                    code: sent.code,
-                    failure: sent,
-                });
-            }
+            // Returned, never acked as if the approvers knew: retried while the transport is down, then dead and visible
+            return isFailure(sent) ? sent : null;
         },
-    });
-    return [approvalRequest];
+    })
+        .withSchedule({ retry: refundMailRetry });
+    const rejectionNotice = j
+        .effect('refund-rejection-notice', refund, { notifications: need() }, {
+        RefundRejected: async (e, { db, notifications }) => {
+            const [row] = await db.select().from(refunds).where(eq(refunds.id, e.entityId)).limit(1);
+            if (row?.status !== 'rejected') {
+                return null;
+            }
+            const sent = await notifications.sendRefundStatusUpdate?.(row, 'rejected');
+            return isFailure(sent) ? sent : null;
+        },
+    })
+        .withSchedule({ retry: refundMailRetry });
+    return [approvalRequest, rejectionNotice];
 }
 //# sourceMappingURL=effects.js.map

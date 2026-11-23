@@ -32,9 +32,9 @@ export const IdempotencyConflict = defineFailure('payments.idempotency_conflict'
 });
 
 /**
- * A customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no
+ * A user, customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no
  * provider id (`missing: 'provider_id'`, such as a plan without a Stripe price). Returned before any
- * provider request is made.
+ * provider request is made, and before any row that would point at the missing one is written.
  *
  * @fix Check the id, or create the row with the provider first.
  * @verify bun run test -- src/core/providers
@@ -42,7 +42,7 @@ export const IdempotencyConflict = defineFailure('payments.idempotency_conflict'
 export const ReferenceNotFound = defineFailure('payments.reference_not_found', {
   status: 404,
   data: z.object({
-    kind: z.enum(['customer', 'plan', 'payment', 'subscription']),
+    kind: z.enum(['user', 'customer', 'plan', 'payment', 'subscription']),
     id: z.string(),
     missing: z.enum(['row', 'provider_id']),
   }),
@@ -114,11 +114,10 @@ export const TaxAddressIncomplete = /* @__PURE__ */ defineFailure('payments.tax_
  * - `invalid_request`: the provider rejected the request itself. Retrying the same call fails again.
  * - `authentication`: the API key is wrong or lacks permission.
  * - `rate_limited` / `unavailable`: a later retry can work.
- * - `not_configured`: the provider was built without what the call needs.
  * - `unknown`: anything else. `cause` holds the original error.
  */
 export type PaymentProviderErrorCode =
-  'invalid_request' | 'authentication' | 'rate_limited' | 'unavailable' | 'not_configured' | 'unknown';
+  'invalid_request' | 'authentication' | 'rate_limited' | 'unavailable' | 'unknown';
 
 export class PaymentProviderError extends Error {
   readonly code: PaymentProviderErrorCode;

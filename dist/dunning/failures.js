@@ -14,6 +14,54 @@ export const DunningCampaignNotFound = /* @__PURE__ */ defineFailure('payments.d
     remediation: 'Check the campaign id; list the campaigns to find it.',
 });
 /**
+ * No dunning step (template) has this id. Nothing was written.
+ *
+ * @fix Check the step id; read the campaign to list its steps.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts
+ */
+export const DunningTemplateNotFound = /* @__PURE__ */ defineFailure('payments.dunning_template_not_found', {
+    status: 404,
+    data: z.object({ templateId: z.string() }),
+    message: 'Dunning step {templateId} not found',
+    remediation: 'Check the step id; read the campaign to list its steps.',
+});
+/**
+ * No dunning execution has this id. Nothing was written.
+ *
+ * @fix Check the execution id; list the campaign's executions to find it.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts
+ */
+export const DunningExecutionNotFound = /* @__PURE__ */ defineFailure('payments.dunning_execution_not_found', {
+    status: 404,
+    data: z.object({ executionId: z.string() }),
+    message: 'Dunning execution {executionId} not found',
+    remediation: "Check the execution id; list the campaign's executions to find it.",
+});
+/**
+ * The customer already has a risk profile, so `CustomerRiskProfileRepository.create` wrote nothing.
+ *
+ * @fix Use `upsert` to replace the stored profile, or `update` to change it.
+ * @verify bun run test -- src/dunning/customer-risk-profile.test.ts
+ */
+export const CustomerRiskProfileExists = /* @__PURE__ */ defineFailure('payments.customer_risk_profile_exists', {
+    status: 409,
+    data: z.object({ customerId: z.string() }),
+    message: 'Customer {customerId} already has a risk profile',
+    remediation: 'Use upsert to replace the stored profile, or update to change it.',
+});
+/**
+ * A delivery callback names a provider message id that no dunning communication has. Nothing was written.
+ *
+ * @fix Check that the callback comes from the provider that sent the message; a message sent before its id was stored has none.
+ * @verify bun run test -- src/dunning/communication-service.test.ts
+ */
+export const DunningCommunicationNotFound = /* @__PURE__ */ defineFailure('payments.dunning_communication_not_found', {
+    status: 404,
+    data: z.object({ providerMessageId: z.string() }),
+    message: 'No dunning communication has the provider message id {providerMessageId}',
+    remediation: 'Check that the callback comes from the provider that sent the message.',
+});
+/**
  * The campaign exists but is not active, so it cannot run. Nothing was written.
  *
  * @fix Set the campaign status to `active` first.
@@ -50,10 +98,11 @@ export const CustomerSegmentNotFound = /* @__PURE__ */ defineFailure('payments.c
     remediation: 'Check the segment id; list the segments to find it.',
 });
 /**
- * A campaign update removes a step that already sent a communication. The sent message keeps its
- * step (its history points at it), so the update was refused and nothing changed.
+ * A campaign update removes a step that already sent a communication, or `deleteCampaign` deletes
+ * a campaign with such a step. The sent message keeps its step (its history points at it), so the
+ * update or delete was refused and nothing changed.
  *
- * @fix Keep the step in `templates` (change its content or delay instead), or deactivate the campaign and create a new one.
+ * @fix Keep the step in `templates` (change its content or delay instead), or deactivate (archive) the campaign instead of deleting it.
  * @verify bun run test -- src/dunning/campaign-service.test.ts
  */
 export const DunningTemplateInUse = /* @__PURE__ */ defineFailure('payments.dunning_template_in_use', {
@@ -129,10 +178,10 @@ export const NotificationWebhookHostNotAllowed = /* @__PURE__ */ defineFailure('
     message: 'Webhook host {host} is not on the allowed hosts list',
     remediation: "Add the host to webhook.allowedHosts if the operator trusts it, or correct the customer's webhookUrl.",
 });
-/** The tick fault for one item: a returned failure keeps its code, a thrown error has none. */
+/** The tick fault for one item: a returned failure is `refused` and keeps the failure, anything else is `thrown` and keeps the error. */
 export function tickFault(id, fault) {
     if (isFailure(fault))
-        return { id, code: fault.code, message: fault.message };
-    return { id, code: null, message: fault instanceof Error ? fault.message : String(fault) };
+        return { id, status: 'refused', failure: fault };
+    return { id, status: 'thrown', error: fault };
 }
 //# sourceMappingURL=failures.js.map

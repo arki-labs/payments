@@ -4,7 +4,8 @@ import { WebhookSecurityService } from '../services/webhook-security.js';
  * there is one implementation of signature, timestamp and replay checks.
  */
 export * from '../services/webhook-security.js';
+/** Builds a `WebhookSecurityService`: the same as `WebhookSecurityService.create`, which returns `payments.configuration_invalid` for a bad config. */
 export function createWebhookSecurityService(config) {
-    return new WebhookSecurityService(config);
+    return WebhookSecurityService.create(config);
 }
 //# sourceMappingURL=webhook-security.js.map

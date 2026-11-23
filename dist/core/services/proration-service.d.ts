@@ -1,7 +1,8 @@
 import type { Instant } from '@arki/date';
+import type { FailureOf } from '@arki/failure';
 import { Money } from '@arki/money';
 import type { PaymentRepository } from '../repository.js';
-import type { Plan, PlanId, Subscription, SubscriptionId, SubscriptionPreview } from '../types.js';
+import type { Plan, PlanId, Subscription, SubscriptionId } from '../types.js';
 export type ProrationCalculation = {
     currentPlan: Plan;
     newPlan: Plan;
@@ -52,7 +53,7 @@ export declare class ProrationService {
     }> | import("@arki/failure").Failure<"payments.plan_inactive", {
         planId: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | ProrationCalculation>;
@@ -70,7 +71,7 @@ export declare class ProrationService {
     }> | import("@arki/failure").Failure<"payments.plan_inactive", {
         planId: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | {
@@ -93,10 +94,43 @@ export declare class ProrationService {
         nextBillingDate: import("temporal-spec").Temporal.Instant;
     }>;
     /**
-     * A preview per plan. A plan whose preview is refused (inactive, another currency, unknown) is
-     * left out and logged at WARN with its failure code.
+     * A preview per plan, for comparing plans. At most `MAX_BATCH_ITEMS` (1,000) plan ids: more
+     * returns `schema.invalid_input` before anything is read. `ReferenceNotFound` (kind `subscription`)
+     * when no subscription has this id. Otherwise `previews` holds each plan that can be previewed, by plan id,
+     * and `refused` each plan that cannot, with the failure `previewSubscriptionChange` returned for it
+     * (inactive, another currency, unknown), in the order asked.
      */
-    previewMultiplePlanChanges(subscriptionId: SubscriptionId, planIds: PlanId[], options?: ProrationOptions): Promise<Record<string, SubscriptionPreview>>;
+    previewMultiplePlanChanges(subscriptionId: SubscriptionId, planIds: PlanId[], options?: ProrationOptions): Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
+        id: string;
+        missing: "provider_id" | "row";
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
+        previews: Record<string, {
+            planId: `plan${string}`;
+            proration: {
+                immediateTotal: {
+                    amount: string;
+                    currency: string;
+                };
+                nextInvoiceTotal: {
+                    amount: string;
+                    currency: string;
+                };
+                creditApplied: {
+                    amount: string;
+                    currency: string;
+                };
+            };
+            trialEnd?: import("temporal-spec").Temporal.Instant | undefined;
+            nextBillingDate: import("temporal-spec").Temporal.Instant;
+        }>;
+        refused: {
+            planId: PlanId;
+            failure: FailureOf<ProrationService['previewSubscriptionChange']>;
+        }[];
+    }>;
     /** Whether to change now or at the next billing cycle, or a failure of `calculateProration`. */
     getOptimalChangeTimings(subscriptionId: SubscriptionId, newPlanId: PlanId): Promise<import("@arki/failure").Failure<"payments.effective_date_outside_period", {
         subscriptionId: string;
@@ -111,7 +145,7 @@ export declare class ProrationService {
     }> | import("@arki/failure").Failure<"payments.plan_inactive", {
         planId: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | {
@@ -147,7 +181,7 @@ export declare class ProrationService {
     }> | import("@arki/failure").Failure<"payments.plan_inactive", {
         planId: string;
     }> | import("@arki/failure").Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | {

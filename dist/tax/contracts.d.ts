@@ -250,6 +250,14 @@ export declare const exemptionTargetSchema: z.ZodObject<{
     productCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     jurisdictionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
+/**
+ * When an exemption applies: it must not end before it starts (`validTo` may equal `validFrom`; no
+ * `validTo` means it never ends). `TaxExemptionRepository` checks every new and updated row with it.
+ */
+export declare const exemptionPeriodSchema: z.ZodObject<{
+    validFrom: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
+    validTo: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+}, z.core.$strip>;
 export declare const createExemptionSchema: z.ZodObject<{
     type: z.ZodEnum<{
         customer: "customer";
@@ -267,7 +275,7 @@ export declare const createExemptionSchema: z.ZodObject<{
     validTo: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     documents: z.ZodOptional<z.ZodArray<z.ZodObject<{
         type: z.ZodString;
-        url: z.ZodURL;
+        url: z.ZodPipe<z.ZodString, z.ZodURL>;
         uploadedAt: z.ZodString;
         expiresAt: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
@@ -284,9 +292,179 @@ export declare const approveExemptionInputSchema: z.ZodObject<{
 export declare const revokeExemptionInputSchema: z.ZodObject<{
     id: z.ZodTemplateLiteral<`txe_${string}`>;
 }, z.core.$strip>;
+/** A `tax_configurations` row. `TaxConfigurationRepository` checks inserts with it, updates with `.partial()`. */
+export declare const taxConfigurationRowSchema: z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txc_${string}`>>;
+    name: z.ZodString;
+    description: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodOptional<z.ZodEnum<{
+        active: "active";
+        inactive: "inactive";
+        pending: "pending";
+    }>>;
+    calculationMode: z.ZodOptional<z.ZodEnum<{
+        automatic: "automatic";
+        disabled: "disabled";
+        manual: "manual";
+    }>>;
+    businessType: z.ZodOptional<z.ZodEnum<{
+        digital_goods: "digital_goods";
+        mixed: "mixed";
+        physical_goods: "physical_goods";
+        saas: "saas";
+        services: "services";
+    }>>;
+    defaultTaxCode: z.ZodOptional<z.ZodString>;
+    provider: z.ZodOptional<z.ZodString>;
+    providerSettings: z.ZodOptional<z.ZodUnknown>;
+    businessDetails: z.ZodOptional<z.ZodUnknown>;
+    taxRules: z.ZodOptional<z.ZodUnknown>;
+    features: z.ZodOptional<z.ZodUnknown>;
+    createdBy: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    updatedBy: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+    updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>;
+/** A `tax_jurisdictions` row. `TaxJurisdictionRepository` checks inserts with it, updates with `.partial()`. */
+export declare const taxJurisdictionRowSchema: z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txj_${string}`>>;
+    name: z.ZodString;
+    type: z.ZodOptional<z.ZodEnum<{
+        city: "city";
+        country: "country";
+        county: "county";
+        district: "district";
+        province: "province";
+        state: "state";
+    }>>;
+    code: z.ZodString;
+    countryCode: z.ZodString;
+    stateCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    standardRate: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    reducedRates: z.ZodOptional<z.ZodUnknown>;
+    filingFrequency: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    effectiveFrom: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+    effectiveTo: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+    createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+    updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>;
+/** A `tax_exemptions` row. `TaxExemptionRepository` checks inserts with it, updates and approvals with `.partial()`. */
+export declare const taxExemptionRowSchema: z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txe_${string}`>>;
+    type: z.ZodOptional<z.ZodEnum<{
+        customer: "customer";
+        jurisdiction: "jurisdiction";
+        product: "product";
+        threshold: "threshold";
+    }>>;
+    status: z.ZodOptional<z.ZodEnum<{
+        active: "active";
+        expired: "expired";
+        pending_review: "pending_review";
+        revoked: "revoked";
+    }>>;
+    customerId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    productCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    exemptionCode: z.ZodString;
+    reason: z.ZodString;
+    certificateNumber: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    validFrom: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
+    validTo: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+    documents: z.ZodOptional<z.ZodUnknown>;
+    createdBy: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    approvedBy: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    approvedAt: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+    createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+    updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>;
+/** A `tax_audit_entries` row. `TaxAuditRepository.record` checks every entry with it. */
+export declare const taxAuditRowSchema: z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txa_${string}`>>;
+    action: z.ZodEnum<{
+        apply: "apply";
+        calculate: "calculate";
+        exempt: "exempt";
+        refund: "refund";
+        report: "report";
+    }>;
+    entity: z.ZodEnum<{
+        customer: "customer";
+        exemption: "exemption";
+        payment: "payment";
+        subscription: "subscription";
+    }>;
+    entityId: z.ZodString;
+    details: z.ZodUnknown;
+    occurredAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>;
+/** A `tax_records` row. `TaxRecordRepository.recordMany` checks every row with it, and `createTaxTransaction` before it asks the provider. */
+export declare const taxRecordRowSchema: z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txr_${string}`>>;
+    type: z.ZodEnum<{
+        refund: "refund";
+        sale: "sale";
+    }>;
+    reference: z.ZodString;
+    jurisdiction: z.ZodString;
+    rate: z.ZodString;
+    taxAmountMinor: z.ZodNumber;
+    currency: z.ZodString;
+    taxCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    customerId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    paymentId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    subscriptionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    providerTransactionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    occurredAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>;
+/** The batch `TaxRecordRepository.recordMany` and `createTaxTransaction` write: at most `MAX_BATCH_ITEMS` (1,000) rows. */
+export declare const taxRecordRowsSchema: z.ZodArray<z.ZodObject<{
+    id: z.ZodOptional<z.ZodTemplateLiteral<`txr_${string}`>>;
+    type: z.ZodEnum<{
+        refund: "refund";
+        sale: "sale";
+    }>;
+    reference: z.ZodString;
+    jurisdiction: z.ZodString;
+    rate: z.ZodString;
+    taxAmountMinor: z.ZodNumber;
+    currency: z.ZodString;
+    taxCode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    customerId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    paymentId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    subscriptionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    providerTransactionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    occurredAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+}, z.core.$strip>>;
+/** The text of a line item that goes to the tax provider. */
+export declare const taxLineTextSchema: z.ZodObject<{
+    description: z.ZodString;
+    reference: z.ZodString;
+    taxCode: z.ZodOptional<z.ZodString>;
+    planId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/** A customer's address and tax ids as the tax provider takes them. */
+export declare const taxCustomerDetailsSchema: z.ZodObject<{
+    address: z.ZodOptional<z.ZodObject<{
+        line1: z.ZodOptional<z.ZodString>;
+        line2: z.ZodOptional<z.ZodString>;
+        city: z.ZodOptional<z.ZodString>;
+        state: z.ZodOptional<z.ZodString>;
+        postalCode: z.ZodOptional<z.ZodString>;
+        country: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
+    taxIds: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        type: z.ZodString;
+        value: z.ZodString;
+    }, z.core.$strip>>>;
+}, z.core.$strip>;
+/** At most `MAX_BATCH_ITEMS` (1,000) line items; every line item is in the sale's currency. */
 export declare const taxCalculationInputSchema: z.ZodObject<{
     customerId: z.ZodString;
     lineItems: z.ZodArray<z.ZodObject<{
+        description: z.ZodString;
+        reference: z.ZodString;
+        taxCode: z.ZodOptional<z.ZodString>;
+        planId: z.ZodOptional<z.ZodString>;
         amount: z.ZodPipe<z.ZodObject<{
             amount: z.ZodString;
             currency: z.ZodString;
@@ -294,10 +472,6 @@ export declare const taxCalculationInputSchema: z.ZodObject<{
             amount: string;
             currency: string;
         }>>;
-        description: z.ZodString;
-        reference: z.ZodString;
-        taxCode: z.ZodOptional<z.ZodString>;
-        planId: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     currency: z.ZodString;
     customerDetails: z.ZodOptional<z.ZodObject<{
@@ -325,11 +499,13 @@ export declare const calculateSubscriptionTaxInputSchema: z.ZodObject<{
         currency: string;
     }>>;
     planInterval: z.ZodEnum<{
+        daily: "daily";
         monthly: "monthly";
+        weekly: "weekly";
         yearly: "yearly";
     }>;
     taxCode: z.ZodOptional<z.ZodString>;
-    customerDetails: z.ZodOptional<z.ZodOptional<z.ZodObject<{
+    customerDetails: z.ZodOptional<z.ZodObject<{
         address: z.ZodOptional<z.ZodObject<{
             line1: z.ZodOptional<z.ZodString>;
             line2: z.ZodOptional<z.ZodString>;
@@ -342,7 +518,7 @@ export declare const calculateSubscriptionTaxInputSchema: z.ZodObject<{
             type: z.ZodString;
             value: z.ZodString;
         }, z.core.$strip>>>;
-    }, z.core.$strip>>>;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const taxIdValidationSchema: z.ZodObject<{
     type: z.ZodString;

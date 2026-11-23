@@ -27,9 +27,9 @@ export const IdempotencyConflict = defineFailure('payments.idempotency_conflict'
     remediation: 'Use a new idempotency key for a different request, or resend the first request unchanged.',
 });
 /**
- * A customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no
+ * A user, customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no
  * provider id (`missing: 'provider_id'`, such as a plan without a Stripe price). Returned before any
- * provider request is made.
+ * provider request is made, and before any row that would point at the missing one is written.
  *
  * @fix Check the id, or create the row with the provider first.
  * @verify bun run test -- src/core/providers
@@ -37,7 +37,7 @@ export const IdempotencyConflict = defineFailure('payments.idempotency_conflict'
 export const ReferenceNotFound = defineFailure('payments.reference_not_found', {
     status: 404,
     data: z.object({
-        kind: z.enum(['customer', 'plan', 'payment', 'subscription']),
+        kind: z.enum(['user', 'customer', 'plan', 'payment', 'subscription']),
         id: z.string(),
         missing: z.enum(['row', 'provider_id']),
     }),

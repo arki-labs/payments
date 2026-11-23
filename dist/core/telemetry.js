@@ -1,10 +1,12 @@
 import { metrics, SpanStatusCode, trace } from '@opentelemetry/api';
-import { isFailure } from '@arki/failure';
+import { isFailure, isFault } from '@arki/failure';
 const INSTRUMENTATION = '@arki/payments';
 /**
  * Runs one payments operation inside a `payments.<operation>` span and counts it in
  * `payments.operations` by `operation` and `outcome` (`success`, `failure` for a returned
- * `@arki/failure` value, `error` for a throw). A returned failure also sets `payments.failure_code`.
+ * `@arki/failure` value, `error` for a throw). A returned failure also sets `failure.code`. Its span status
+ * is error only when it is a fault (`isFault`, status 500 or higher, such as a provider outage); a 4xx
+ * such as a declined card is an answer, not a fault, so its status stays unset. A throw sets error.
  */
 export async function observePayments(operation, attributes, execute) {
     const span = trace.getTracer(INSTRUMENTATION).startSpan(`payments.${operation}`, { attributes });
@@ -15,7 +17,9 @@ export async function observePayments(operation, attributes, execute) {
         const settled = result;
         if (isFailure(settled)) {
             outcome = 'failure';
-            span.setAttribute('payments.failure_code', settled.code);
+            span.setAttribute('failure.code', settled.code);
+            if (isFault(settled))
+                span.setStatus({ code: SpanStatusCode.ERROR });
         }
         return result;
     }

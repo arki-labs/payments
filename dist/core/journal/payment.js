@@ -23,40 +23,44 @@ import { fromDate } from '@arki/date';
 import { isFailure, orThrow } from '@arki/failure';
 import { CommandConflict, CommandInvalid, CommandNotFound } from '@arki/journal';
 import { Money } from '@arki/money';
+import { pgJsonRecordSchema } from '../pg-values.js';
+import { ReferenceNotFound } from '../providers/provider-error.js';
 import { fromStoredNumber, moneyJsonSchema, nonNegativeMoneySchema, toMinorColumn } from '../money.js';
 import { createPaymentId, customerIdSchema, paymentIdSchema, paymentMethodTypeValues, subscriptionIdSchema, } from '../primitives.js';
-import { storedReal } from './support.js';
+import { eventTextSchema, eventVarcharSchema, lockReferences, storedReal } from './support.js';
 const paymentMethodSchema = z.enum(paymentMethodTypeValues);
-const metadataSchema = z.record(z.string(), z.unknown());
+const metadataSchema = pgJsonRecordSchema;
+/** The id a command reads its payment stream by: one a text column and the event's jsonb can hold. */
+const paymentRefSchema = paymentIdSchema.refine(id => eventTextSchema.safeParse(id).success, 'An id cannot contain the NUL character (U+0000) or a lone surrogate');
 export const initiatePaymentInputSchema = z.object({
     /** Left out: the command makes a new id */
-    paymentId: paymentIdSchema.optional(),
+    paymentId: paymentRefSchema.optional(),
     subscriptionId: subscriptionIdSchema.nullable().optional(),
     userId: userIdSchema,
     customerId: customerIdSchema,
-    providerPaymentId: z.string().min(1).max(255),
+    providerPaymentId: eventVarcharSchema(255).min(1),
     amount: nonNegativeMoneySchema,
     paymentMethod: paymentMethodSchema.default('card'),
-    description: z.string().nullable().optional(),
+    description: eventTextSchema.nullable().optional(),
     metadata: metadataSchema.nullable().optional(),
 });
 export const completePaymentInputSchema = z.object({
-    paymentId: paymentIdSchema,
-    receiptUrl: z.string().nullable().optional(),
+    paymentId: paymentRefSchema,
+    receiptUrl: eventTextSchema.nullable().optional(),
 });
-export const failPaymentInputSchema = z.object({ paymentId: paymentIdSchema, failureReason: z.string() });
-export const cancelPaymentInputSchema = z.object({ paymentId: paymentIdSchema });
-export const markPaymentRequiresActionInputSchema = z.object({ paymentId: paymentIdSchema });
+export const failPaymentInputSchema = z.object({ paymentId: paymentRefSchema, failureReason: eventTextSchema });
+export const cancelPaymentInputSchema = z.object({ paymentId: paymentRefSchema });
+export const markPaymentRequiresActionInputSchema = z.object({ paymentId: paymentRefSchema });
 /** `refundedAmount` is the total refunded so far, not this refund alone: a resent report writes nothing. */
 export const recordPaymentRefundInputSchema = z.object({
-    paymentId: paymentIdSchema,
+    paymentId: paymentRefSchema,
     refundedAmount: nonNegativeMoneySchema,
 });
 export const recordPaymentDisputeInputSchema = z.object({
-    paymentId: paymentIdSchema,
-    disputeId: z.string().min(1).max(255),
-    status: z.string().min(1).max(64),
-    reason: z.string().nullable().optional(),
+    paymentId: paymentRefSchema,
+    disputeId: eventVarcharSchema(255).min(1),
+    status: eventVarcharSchema(64).min(1),
+    reason: eventTextSchema.nullable().optional(),
 });
 const paymentStart = {
     subscriptionId: subscriptionIdSchema.nullable(),
@@ -79,6 +83,10 @@ const paymentDisputeRecordedSchema = z.object({
     status: z.string(),
     reason: z.string().nullable(),
 });
+/** The row a new payment points at does not exist. */
+function notFound(kind, id) {
+    return ReferenceNotFound({ kind, id, missing: 'row' });
+}
 function requirePayment(row, paymentId) {
     if (!row) {
         return CommandNotFound({ detail: `Payment ${paymentId} not found` });
@@ -150,10 +158,25 @@ export function createPaymentJournal(j, payments) {
         disputeStatus: e.data.status,
         updatedAt: fromDate(e.recordedAt),
     }));
-    const initiatePayment = j.command('initiatePayment', initiatePaymentInputSchema, { writes: [PaymentInitiatedV2] }, (input, { write }) => {
+    /**
+     * The user, customer and subscription the payment points at are looked up and locked first: one
+     * with no row returns `ReferenceNotFound` (kind `user`, `customer` or `subscription`) and nothing is written.
+     */
+    const initiatePayment = j.command('initiatePayment', initiatePaymentInputSchema, { writes: [PaymentInitiatedV2] }, async (input, { tx, write }) => {
         const paymentId = input.paymentId ?? createPaymentId();
         if (isFailure(paymentId))
             return paymentId;
+        const missing = await lockReferences(tx, payments, [
+            { column: payments.userId, value: input.userId, missing: () => notFound('user', input.userId) },
+            { column: payments.customerId, value: input.customerId, missing: () => notFound('customer', input.customerId) },
+            {
+                column: payments.subscriptionId,
+                value: input.subscriptionId,
+                missing: () => notFound('subscription', String(input.subscriptionId)),
+            },
+        ]);
+        if (missing)
+            return missing;
         return write(payment, paymentId, row => {
             if (row) {
                 return CommandConflict({ detail: `Payment ${paymentId} already exists with status ${row.status}` });

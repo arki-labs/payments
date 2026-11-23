@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
 import type { SchemaInput } from '@arki/schema';
-import type { CoreWrites } from '../journal.js';
+import { z } from '@arki/contracts';
 import type { RefundWorkflow } from '../../refunds/workflow.js';
+import type { CoreWrites } from '../journal.js';
 import type { PaymentRepository } from '../repository.js';
 import type { PaymentProviderType, WebhookEventType, WebhookId } from '../types.js';
 import type { WebhookSecurityService } from './webhook-security.js';
@@ -27,39 +28,35 @@ export type WebhookEventData = {
     data: Record<string, unknown>;
     webhookId: WebhookId;
 };
-export type WebhookHandlerConfig = {
-    /** Attempts after which an unprocessed event is given up on, and the provider told to stop resending. */
-    maxRetries: number;
-    retryDelayMs: number;
-    /**
-     * Answer before the event is processed. Off by default: the provider's
-     * resends are the retry mechanism, and they only happen when the answer
-     * says the event failed. An early answer turns every processing failure
-     * into a lost event.
-     */
-    enableAsync: boolean;
-    enableEventEmitter: boolean;
-    /**
-     * How long an attempt may run before another delivery may take the event
-     * over. An attempt older than this with no recorded error is treated as
-     * crashed.
-     */
-    processingLeaseMs: number;
-    /** Skip the source-address check. For routes with no real client address; the signature check still runs. */
-    skipIpValidation: boolean;
-};
+/** The handler's settings, checked when it is built. */
+declare const webhookHandlerConfigSchema: z.ZodObject<{
+    maxRetries: z.ZodNumber;
+    retryDelayMs: z.ZodNumber;
+    enableAsync: z.ZodBoolean;
+    enableEventEmitter: z.ZodBoolean;
+    processingLeaseMs: z.ZodNumber;
+    skipIpValidation: z.ZodBoolean;
+}, z.core.$strip>;
+export type WebhookHandlerConfig = z.output<typeof webhookHandlerConfigSchema>;
 export declare class WebhookHandler extends EventEmitter {
     private readonly paymentRepository;
     private readonly webhookSecurity;
-    /** Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`. */
     private readonly writes;
     private readonly refunds?;
     private readonly config;
     /** Handlers the app registered. One replaces the built-in handling of its event type. */
     private readonly customHandlers;
-    constructor(paymentRepository: WebhookEventStore, webhookSecurity: WebhookValidator, 
-    /** Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`. */
-    writes: WebhookWrites, config?: Partial<WebhookHandlerConfig>, refunds?: WebhookRefunds | undefined);
+    private constructor();
+    /**
+     * Builds the handler. Returns `payments.configuration_invalid` (and builds nothing) for a count or
+     * duration outside its range (see `WebhookHandlerConfig`): a bad setting fails here, not on the first delivery.
+     *
+     * @param writes Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`.
+     */
+    static create(paymentRepository: WebhookEventStore, webhookSecurity: WebhookValidator, writes: WebhookWrites, config?: Partial<WebhookHandlerConfig>, refunds?: WebhookRefunds): import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | WebhookHandler;
     /**
      * Validate, claim and process one delivery, in a `payments.webhook.process` span.
      *
@@ -81,7 +78,11 @@ export declare class WebhookHandler extends EventEmitter {
         detail: string;
     }> | import("@arki/failure").Failure<"journal.not_found", {
         detail: string;
-    }> | import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.webhook_claim_conflict", {
+    }> | import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
+        id: string;
+        missing: "provider_id" | "row";
+    }> | import("@arki/failure").Failure<"payments.webhook_claim_conflict", {
         providerEventId: string;
         retryable: true;
     }> | import("@arki/failure").Failure<"payments.webhook_event_not_found", {
@@ -92,6 +93,7 @@ export declare class WebhookHandler extends EventEmitter {
     }> | import("@arki/failure").Failure<"payments.webhook_payload_invalid", {
         retryable: false;
     }> | import("@arki/failure").Failure<"payments.webhook_rejected", {
+        check: "replay" | "signature" | "source_ip" | "timestamp";
         reason: string;
         retryable: false;
     }> | import("@arki/failure").Failure<"payments.webhook_retries_exhausted", {
@@ -102,7 +104,9 @@ export declare class WebhookHandler extends EventEmitter {
         kind: "payment" | "subscription";
         providerId: string;
         retryable: true;
-    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
+    }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
+        issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
+    }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {
         status: "ignored";
         webhookId?: undefined;
     } | {
@@ -120,8 +124,74 @@ export declare class WebhookHandler extends EventEmitter {
      * Re-run failed or crashed events without waiting for a resend. Optional:
      * provider resends already do this. Uses the same takeover as a resend, so
      * it never runs an event whose attempt is still inside its lease.
+     *
+     * Reads only events with attempts left (fewer than `maxRetries`), oldest first, so events given
+     * up on never crowd out newer ones. A run whose attempt was the last one emits `webhook:failed`
+     * once, next to `webhook:processing_error`; the row keeps the error that attempt recorded.
+     *
+     * Returns one report per event read, in that order:
+     *
+     * - `processed`: the event ran and is marked processed.
+     * - `skipped`: another taker holds the event (its attempt is still inside its lease); nothing ran.
+     * - `refused`: the event's handler or a journal write returned a failure, in `failure`. It is
+     *   recorded on the row, and the event stays unprocessed for the next resend or retry.
+     * - `thrown`: the run threw (a fault), in `error`; recorded on the row the same way.
+     *
+     * One broken event never stops the others. A fault that stops the whole run (the event read or a
+     * takeover throws: the database is down) emits `webhook:retry_error` and is thrown.
      */
-    retryFailedWebhooks(): Promise<void>;
+    retryFailedWebhooks(): Promise<({
+        webhookId: `wh${string}`;
+        status: 'refused';
+        failure: import("@arki/failure").Failure<"payments.counter_exhausted", {
+            counter: "attempts" | "communicationsSent" | "customersReached" | "executions" | "paymentsRecovered" | "retryCount";
+            id: string;
+        }>;
+    } | {
+        webhookId: `wh${string}`;
+        status: 'skipped';
+        failure?: undefined;
+    } | {
+        webhookId: `wh${string}`;
+        status: 'refused';
+        failure: import("@arki/failure").Failure<"contracts.random_source_unavailable", undefined> | import("@arki/failure").Failure<"db.transaction_cancelled", undefined> | import("@arki/failure").Failure<"db.transaction_commit_uncertain", undefined> | import("@arki/failure").Failure<"db.transaction_conflict", {
+            attempts: number;
+            sqlState: "40001" | "40P01";
+        }> | import("@arki/failure").Failure<"db.transaction_defect", undefined> | import("@arki/failure").Failure<"db.transaction_rejected", {
+            sqlState: string;
+        }> | import("@arki/failure").Failure<"db.transaction_unavailable", undefined> | import("@arki/failure").Failure<"failure.unexpected_defect", undefined> | import("@arki/failure").Failure<"journal.conflict", {
+            detail: string;
+        }> | import("@arki/failure").Failure<"journal.invalid", {
+            detail: string;
+        }> | import("@arki/failure").Failure<"journal.not_found", {
+            detail: string;
+        }> | import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.out_of_range", undefined> | import("@arki/failure").Failure<"money.provider_amount", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.reference_not_found", {
+            kind: "customer" | "payment" | "plan" | "subscription" | "user";
+            id: string;
+            missing: "provider_id" | "row";
+        }> | import("@arki/failure").Failure<"payments.webhook_event_not_found", {
+            webhookId: string;
+        }> | import("@arki/failure").Failure<"payments.webhook_payload_invalid", {
+            retryable: false;
+        }> | import("@arki/failure").Failure<"payments.webhook_target_not_found", {
+            kind: "payment" | "subscription";
+            providerId: string;
+            retryable: true;
+        }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.validator_defect", undefined>;
+        error?: undefined;
+    } | {
+        failure?: undefined;
+        webhookId: `wh${string}`;
+        status: 'processed';
+        error?: undefined;
+    } | {
+        failure?: undefined;
+        webhookId: `wh${string}`;
+        status: 'thrown';
+        error: unknown;
+    })[]>;
+    /** Run one event `retryFailedWebhooks` took over, and report it (see there). */
+    private runRetried;
     private processEventAsync;
     /** The moment before which an attempt with no recorded error counts as crashed. */
     private leaseCutoff;
@@ -189,5 +259,9 @@ export declare class WebhookHandler extends EventEmitter {
         supportedEventTypes: WebhookEventType[];
     };
 }
-export declare function createWebhookHandler(paymentRepository: WebhookEventStore, webhookSecurity: WebhookValidator, writes: WebhookWrites, config?: Partial<WebhookHandlerConfig>, refunds?: WebhookRefunds): WebhookHandler;
+/** Builds a `WebhookHandler`: the same as `WebhookHandler.create`, which returns `payments.configuration_invalid` for a bad setting. */
+export declare function createWebhookHandler(paymentRepository: WebhookEventStore, webhookSecurity: WebhookValidator, writes: WebhookWrites, config?: Partial<WebhookHandlerConfig>, refunds?: WebhookRefunds): import("@arki/failure").Failure<"payments.configuration_invalid", {
+    setting: string;
+    problem: string;
+}> | WebhookHandler;
 //# sourceMappingURL=webhook-handler.d.ts.map

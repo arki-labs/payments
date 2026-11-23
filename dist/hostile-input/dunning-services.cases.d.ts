@@ -1,0 +1,31 @@
+import type { PGlite } from '@electric-sql/pglite';
+import type { Server } from 'node:http';
+import type { InAppNotificationStore } from '../dunning/services/communication-service.js';
+import type { AppDb } from '../test-support.js';
+import { createDunningCampaignRepository, createDunningCommunicationRepository, createDunningExecutionRepository, createDunningTemplateRepository } from '../dunning/repository.js';
+import { DunningCampaignService } from '../dunning/services/campaign-service.js';
+import { CommunicationOrchestrationService, EmailProvider, InAppProvider, SMSProvider, WebhookProvider } from '../dunning/services/communication-service.js';
+import { DunningIntegrationService } from '../dunning/services/integration-service.js';
+import { CustomerSegmentationService } from '../dunning/services/segmentation-service.js';
+type Ctx = {
+    db: AppDb;
+    client: PGlite;
+    server: Server;
+    origin: string;
+    store: InAppNotificationStore;
+    email: EmailProvider;
+    sms: SMSProvider;
+    inApp: InAppProvider;
+    webhook: WebhookProvider;
+    communications: CommunicationOrchestrationService;
+    campaigns: DunningCampaignService;
+    segments: CustomerSegmentationService;
+    integration: DunningIntegrationService;
+    executions: ReturnType<typeof createDunningExecutionRepository>;
+    communicationRows: ReturnType<typeof createDunningCommunicationRepository>;
+    templates: ReturnType<typeof createDunningTemplateRepository>;
+    campaignRows: ReturnType<typeof createDunningCampaignRepository>;
+};
+export declare const dunningServicesArea: import("./engine.js").HostileArea<Ctx>;
+export {};
+//# sourceMappingURL=dunning-services.cases.d.ts.map

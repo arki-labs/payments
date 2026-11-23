@@ -1,4 +1,5 @@
 import type { Instant } from '@arki/date';
+import { z } from '@arki/contracts';
 import type { PaymentRepository } from '../repository.js';
 import type { PaymentProviderType, WebhookEventType, WebhookId } from '../types.js';
 export type WebhookMetrics = {
@@ -52,30 +53,42 @@ export type WebhookAlert = {
     resolved?: boolean;
     resolvedAt?: Instant;
 };
+/** When the service raises an alert, and how many alerts it keeps. */
+declare const alertThresholdsSchema: z.ZodObject<{
+    errorRate: z.ZodNumber;
+    slowProcessing: z.ZodNumber;
+    maxAlerts: z.ZodNumber;
+}, z.core.$strip>;
+type WebhookAlertThresholds = z.output<typeof alertThresholdsSchema>;
 export declare class WebhookAnalyticsService {
     private readonly paymentRepository;
     private readonly alertThresholds;
     private alerts;
     private processingTimes;
-    constructor(paymentRepository: PaymentRepository, alertThresholds?: {
-        errorRate: number;
-        slowProcessing: number;
-        maxAlerts: number;
-    });
+    private constructor();
     /**
-     * Get comprehensive webhook metrics
+     * Builds the service. Returns `payments.configuration_invalid` for thresholds that are not finite
+     * numbers of 0 or more, or a `maxAlerts` that is not a whole number from 1 to 100,000.
+     */
+    static create(paymentRepository: PaymentRepository, alertThresholds?: WebhookAlertThresholds): import("@arki/failure").Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | WebhookAnalyticsService;
+    /**
+     * Get comprehensive webhook metrics. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     getWebhookMetrics(startDate?: Instant, endDate?: Instant): Promise<WebhookMetrics>;
     /**
-     * Assess webhook system health
+     * Assess webhook system health. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     getWebhookHealth(startDate?: Instant): Promise<WebhookHealth>;
     /**
-     * Get webhook performance metrics
+     * Get webhook performance metrics. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     getWebhookPerformance(startDate?: Instant, endDate?: Instant): Promise<WebhookPerformance>;
     /**
-     * Record processing time for real-time monitoring
+     * Record processing time for real-time monitoring. `processingTime` is a finite number of
+     * milliseconds, 0 or more (a precondition: anything else throws an invariant failure, and nothing is recorded).
      */
     recordProcessingTime(processingTime: number): void;
     /**
@@ -95,7 +108,7 @@ export declare class WebhookAnalyticsService {
      */
     getAllAlerts(): WebhookAlert[];
     /**
-     * Generate webhook monitoring report
+     * Generate webhook monitoring report. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     generateMonitoringReport(startDate?: Instant, endDate?: Instant): Promise<{
         period: {
@@ -111,9 +124,7 @@ export declare class WebhookAnalyticsService {
         };
         recommendations: string[];
     }>;
-    /**
-     * Helper method to get webhook events in date range
-     */
+    /** The newest 1000 webhook events, processed or not, created in the range (each end optional, both included). */
     private getWebhookEventsInRange;
     /**
      * Categorize error messages into types
@@ -140,9 +151,10 @@ export declare class WebhookAnalyticsService {
      */
     private generatePerformanceRecommendations;
 }
-export declare function createWebhookAnalyticsService(paymentRepository: PaymentRepository, alertThresholds?: {
-    errorRate: number;
-    slowProcessing: number;
-    maxAlerts: number;
-}): WebhookAnalyticsService;
+/** Builds a `WebhookAnalyticsService`: the same as `WebhookAnalyticsService.create`, which returns `payments.configuration_invalid` for bad thresholds. */
+export declare function createWebhookAnalyticsService(paymentRepository: PaymentRepository, alertThresholds?: WebhookAlertThresholds): import("@arki/failure").Failure<"payments.configuration_invalid", {
+    setting: string;
+    problem: string;
+}> | WebhookAnalyticsService;
+export {};
 //# sourceMappingURL=webhook-analytics-service.d.ts.map

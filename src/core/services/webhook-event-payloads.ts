@@ -19,17 +19,25 @@ import { isFailure } from '@arki/failure';
 import { parse } from '@arki/schema';
 
 import type { SubscriptionStatus } from '../types.js';
+import { pgVarcharSchema } from '../pg-values.js';
 import { subscriptionStatusValues } from '../primitives.js';
 
-/** Unix seconds `fromUnix` accepts (±8.64e12, the Temporal range); a larger number would make it throw. */
-const unixSeconds = z.number().int().min(-8_640_000_000_000).max(8_640_000_000_000);
+/** A Stripe object id as the `provider_*_id` columns hold it: 1 to 255 characters, no U+0000. */
+const stripeIdSchema = pgVarcharSchema(255).min(1);
+
+/**
+ * Unix seconds an `instant` column can store: 0001-01-01T00:00:00Z to the last second of 9999 UTC
+ * (the range of `isPgInstant` in core/pg-values.ts). Postgres refuses an earlier or later time with
+ * SQLSTATE 22008 or 22009, and `fromUnix` throws past the Temporal range, so the parser refuses both.
+ */
+const unixSeconds = z.number().int().min(-62_135_596_800).max(253_402_300_799);
 
 const subscriptionItem = z.object({ current_period_start: unixSeconds, current_period_end: unixSeconds });
 
 const stripeSubscriptionEvent = z.object({
   data: z.object({
     object: z.object({
-      id: z.string().min(1),
+      id: stripeIdSchema,
       status: z.enum(subscriptionStatusValues),
       cancel_at_period_end: z.boolean(),
       canceled_at: unixSeconds.nullable(),
@@ -44,7 +52,7 @@ const stripeSubscriptionEvent = z.object({
 const stripePaymentIntentEvent = z.object({
   data: z.object({
     object: z.object({
-      id: z.string().min(1),
+      id: stripeIdSchema,
       last_payment_error: z.object({ message: z.string().optional(), code: z.string().optional() }).nullish(),
     }),
   }),
@@ -53,8 +61,8 @@ const stripePaymentIntentEvent = z.object({
 const stripeChargeEvent = z.object({
   data: z.object({
     object: z.object({
-      id: z.string().min(1),
-      payment_intent: z.string().min(1).nullish(),
+      id: stripeIdSchema,
+      payment_intent: stripeIdSchema.nullish(),
       amount_refunded: z.number().int().min(0),
       currency: z.string().length(3),
       /** Only on API versions that still list refunds on the charge. */
@@ -62,7 +70,7 @@ const stripeChargeEvent = z.object({
         .object({
           data: z.array(
             z.object({
-              id: z.string().min(1),
+              id: stripeIdSchema,
               status: z.string().nullish(),
               metadata: z.record(z.string(), z.string()).nullish(),
             }),
@@ -76,7 +84,7 @@ const stripeChargeEvent = z.object({
 const stripeRefundEvent = z.object({
   data: z.object({
     object: z.object({
-      id: z.string().min(1),
+      id: stripeIdSchema,
       status: z.string().nullish(),
       metadata: z.record(z.string(), z.string()).nullish(),
     }),
@@ -86,8 +94,8 @@ const stripeRefundEvent = z.object({
 const stripeDisputeEvent = z.object({
   data: z.object({
     object: z.object({
-      id: z.string().min(1),
-      payment_intent: z.string().min(1).nullish(),
+      id: stripeIdSchema,
+      payment_intent: stripeIdSchema.nullish(),
       status: z.string().min(1),
       reason: z.string().nullish(),
     }),

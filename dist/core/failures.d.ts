@@ -1,4 +1,3 @@
-import { UnexpectedFailure } from '@arki/failure';
 /**
  * The subscription's status does not allow the change: an update or a pause needs `active`, a
  * resume needs `paused`, a reactivation needs `canceled` or `past_due`, and a canceled
@@ -118,6 +117,51 @@ export declare const WebhookEventNotFound: import("@arki/failure").FailureDefini
     webhookId: string;
 }>>;
 /**
+ * The retry service has no strategy with this name, so `updateRetryStrategy` changed nothing.
+ *
+ * @fix Check the name against `getRetryStrategies()`, or add the strategy first with `addRetryStrategy`.
+ * @verify bun run test -- src/core/services/payment-retry-service.test.ts
+ */
+export declare const RetryStrategyNotFound: import("@arki/failure").FailureDefinition<"payments.retry_strategy_not_found", import("@standard-schema/spec").StandardSchemaV1<{
+    name: string;
+}, {
+    name: string;
+}>>;
+/**
+ * A plan with this id is already stored, so `createPlan` wrote nothing.
+ *
+ * @fix Update the stored plan (`updatePlan`), or leave `id` out so a new one is made.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export declare const PlanAlreadyExists: import("@arki/failure").FailureDefinition<"payments.plan_already_exists", import("@standard-schema/spec").StandardSchemaV1<{
+    planId: string;
+}, {
+    planId: string;
+}>>;
+/**
+ * The customer cannot be deleted: a row that may not go with it (a refund of one of its payments,
+ * or an app row) still points at it or at one of its payments. Nothing was deleted.
+ *
+ * @fix Keep the customer, or remove what points at it first.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export declare const CustomerInUse: import("@arki/failure").FailureDefinition<"payments.customer_in_use", import("@standard-schema/spec").StandardSchemaV1<{
+    customerId: string;
+}, {
+    customerId: string;
+}>>;
+/**
+ * Another webhook event already holds this provider event id (or this webhook id). Nothing was written.
+ *
+ * @fix Read the stored event (`findWebhookEventByProviderEventId`); a delivery handler claims events with `claimWebhookEvent`.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export declare const WebhookEventExists: import("@arki/failure").FailureDefinition<"payments.webhook_event_exists", import("@standard-schema/spec").StandardSchemaV1<{
+    providerEventId: string;
+}, {
+    providerEventId: string;
+}>>;
+/**
  * A notification was not delivered: the mail transport returned a failure (the `cause`), the Slack
  * webhook answered with a non-2xx `status`, or the request failed or timed out (the `cause`).
  *
@@ -135,8 +179,8 @@ export declare const NotificationFailed: import("@arki/failure").FailureDefiniti
 }>>;
 /**
  * The host app's setup of a payments service cannot work: a capability a configured step needs was
- * not passed, or a setting is empty or malformed. Thrown when the service is built (at boot), never
- * returned later as a silent no-op.
+ * not passed, or a setting is empty or malformed. Returned when the service is built (at boot) by its
+ * `create` or factory function, never thrown, and never deferred to a later call as a silent no-op.
  *
  * @fix Pass the capability or setting that `setting` names when the app builds the service.
  * @verify bun run test -- src/core/services/dunning-service.test.ts src/dunning/communication-service.test.ts
@@ -149,11 +193,20 @@ export declare const PaymentsConfigurationInvalid: import("@arki/failure").Failu
     problem: string;
 }>>;
 /**
- * The thrown form of `payments.configuration_invalid`, for a setting the app passed when it built a
- * service. Boot checks throw this; nothing at runtime does.
+ * A counter column already holds 2^31 - 1 (`INT4_MAX`), the most an `integer` column can, or would pass
+ * it with what the call adds, so it cannot go up. Nothing was written. `counter` names the column
+ * (`retryCount` of a dunning execution, `attempts` of a webhook event, or `paymentsRecovered`,
+ * `executions`, `customersReached` or `communicationsSent` of a campaign's analytics row) and `id` the
+ * row. The update checks the column itself, so a full counter is never raised by a race between a read and a write.
+ *
+ * @fix Stop retrying the row: a counter this high was set by hand, since a correct caller stops long before it.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts src/core/repository.customers.test.ts
  */
-export declare function misconfigured(setting: string, problem: string): UnexpectedFailure<import("@arki/failure").Failure<"payments.configuration_invalid", {
-    setting: string;
-    problem: string;
+export declare const CounterExhausted: import("@arki/failure").FailureDefinition<"payments.counter_exhausted", import("@standard-schema/spec").StandardSchemaV1<{
+    counter: "attempts" | "communicationsSent" | "customersReached" | "executions" | "paymentsRecovered" | "retryCount";
+    id: string;
+}, {
+    counter: "attempts" | "communicationsSent" | "customersReached" | "executions" | "paymentsRecovered" | "retryCount";
+    id: string;
 }>>;
 //# sourceMappingURL=failures.d.ts.map

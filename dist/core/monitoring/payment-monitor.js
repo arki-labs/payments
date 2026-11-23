@@ -1,9 +1,14 @@
 import { now, sub } from '@arki/date';
+import { invariant } from '@arki/failure';
 import { getLogger } from '@arki/log';
 import { observePayments } from '../telemetry.js';
 const logger = getLogger('arki:payments:monitor');
 /** Metrics older than this are dropped from memory. */
 const METRIC_RETENTION_MS = 60 * 60 * 1000;
+/** The precondition of a measured duration: a finite number of milliseconds, 0 or more. */
+function assertDuration(value, name) {
+    invariant(Number.isFinite(value) && value >= 0, () => `[@arki/payments] ${name} must be a finite number of milliseconds, 0 or more`);
+}
 /** How many past hours the payment volume of the last hour is compared with. */
 const VOLUME_HISTORY_HOURS = 24;
 /**
@@ -45,47 +50,70 @@ export class PaymentMonitoringService {
             window: 24 * 60 * 60 * 1000, // Daily window
         });
     }
+    /*
+     * The record methods keep every metric in memory, so the rates and alerts work while KV is down.
+     * Each resolves with nothing when every KV write went through, or with the first KV failure
+     * (`kv.unavailable`, `kv.cancelled`) when a metric or an alert was not persisted.
+     */
+    /**
+     * `outcome` (`success` or `failure`) is what the success and refund rates count; `status` is the payment's own.
+     * `result.processingTime` is a finite number of milliseconds, 0 or more (a precondition: anything else
+     * throws an invariant failure before anything is recorded).
+     */
     async recordPaymentAttempt(result) {
-        // Record success/failure metrics
-        await this.recordMetric('payment_attempts_total', 1, { status: result.status });
-        await this.recordMetric('payment_processing_time', result.processingTime);
+        assertDuration(result.processingTime, 'processingTime');
+        const outcome = result.success ? 'success' : 'failure';
+        const writes = [
+            await this.recordMetric('payment_attempts_total', 1, { status: result.status, outcome }),
+            await this.recordMetric('payment_processing_time', result.processingTime),
+        ];
         if (!result.success) {
-            await this.recordMetric('payment_failures_total', 1, {
+            writes.push(await this.recordMetric('payment_failures_total', 1, {
                 reason: result.errorCode ?? 'unknown',
                 provider: result.provider ?? 'unknown',
-            });
-            // Check failure rate
-            await this.checkFailureRate();
+            }), await this.checkFailureRate());
         }
         // Record revenue metrics
         // A metric is a float gauge per currency: the one place an amount is meant to become a number
         if (result.success && result.amount) {
-            await this.recordMetric('revenue_processed', result.amount.toNumber(), {
+            writes.push(await this.recordMetric('revenue_processed', result.amount.toNumber(), {
                 currency: result.amount.currency.code,
                 provider: result.provider ?? 'unknown',
-            });
+            }));
         }
+        return writes.find(write => write !== undefined);
     }
+    /**
+     * `duration` is a finite number of milliseconds, 0 or more (a precondition: anything else throws an
+     * invariant failure before anything is recorded).
+     */
     async recordWebhookProcessing(duration, success) {
-        await this.recordMetric('webhook_processing_time', duration);
-        await this.recordMetric('webhook_attempts_total', 1, {
-            status: success ? 'success' : 'failure',
-        });
+        assertDuration(duration, 'duration');
+        const outcome = success ? 'success' : 'failure';
+        const writes = [
+            await this.recordMetric('webhook_processing_time', duration),
+            await this.recordMetric('webhook_attempts_total', 1, { status: outcome, outcome }),
+        ];
         const threshold = this.alertThresholds.get('webhook_processing_time');
         if (threshold && duration > threshold.warning) {
-            await this.checkWebhookPerformance();
+            writes.push(await this.checkWebhookPerformance());
         }
+        return writes.find(write => write !== undefined);
     }
     async recordSubscriptionEvent(event) {
-        await this.recordMetric(`subscription_${event}_total`, 1);
+        const writes = [await this.recordMetric(`subscription_${event}_total`, 1)];
         if (event === 'canceled') {
-            await this.checkChurnRate();
+            writes.push(await this.checkChurnRate());
         }
+        return writes.find(write => write !== undefined);
     }
     async recordRefund(amount, reason) {
-        await this.recordMetric('refunds_total', 1, { reason });
-        await this.recordMetric('refund_amount_total', amount.toNumber(), { currency: amount.currency.code });
-        await this.checkRefundRate();
+        const writes = [
+            await this.recordMetric('refunds_total', 1, { reason }),
+            await this.recordMetric('refund_amount_total', amount.toNumber(), { currency: amount.currency.code }),
+            await this.checkRefundRate(),
+        ];
+        return writes.find(write => write !== undefined);
     }
     async recordMetric(name, value, labels) {
         const metric = {
@@ -99,12 +127,16 @@ export class PaymentMonitoringService {
         values.push(metric);
         this.metrics.set(name, values);
         // Also store in KV for persistence. A refused write keeps the in-memory metric: the
-        // rates still work, only the persisted copy is missing, so it is a WARN and not a failure.
+        // rates still work, only the persisted copy is missing, so it is a WARN and the failure is returned.
         const key = `metrics:${name}:${Date.now()}`;
         const stored = await this.kv.set(key, metric, 3600); // TTL 1 hour
-        if (!stored) {
-            logger.warn('Metric {name} was not stored in KV; it is kept in memory only', { name });
-        }
+        if (stored === true)
+            return undefined;
+        logger.warn('Metric {name} was not stored in KV ({code}); it is kept in memory only', {
+            name,
+            code: stored === false ? 'refused' : stored.code,
+        });
+        return stored === false ? undefined : stored;
     }
     async getMetricValues(name, since) {
         const values = this.metrics.get(name) || [];
@@ -124,7 +156,7 @@ export class PaymentMonitoringService {
             const failureRate = totalFailures / totalAttempts;
             const threshold = this.alertThresholds.get('payment_failure_rate');
             if (failureRate >= threshold.critical) {
-                await this.triggerAlert('payment_failure_rate', 'critical', {
+                return this.triggerAlert('payment_failure_rate', 'critical', {
                     current: failureRate,
                     threshold: threshold.critical,
                     window: '5 minutes',
@@ -133,7 +165,7 @@ export class PaymentMonitoringService {
                 });
             }
             else if (failureRate >= threshold.warning) {
-                await this.triggerAlert('payment_failure_rate', 'warning', {
+                return this.triggerAlert('payment_failure_rate', 'warning', {
                     current: failureRate,
                     threshold: threshold.warning,
                     window: '5 minutes',
@@ -142,29 +174,31 @@ export class PaymentMonitoringService {
                 });
             }
         }
+        return undefined;
     }
     async checkWebhookPerformance() {
         const window = 60 * 1000; // 1 minute
         const cutoff = Date.now() - window;
         const processingTimes = await this.getMetricValues('webhook_processing_time', cutoff);
         if (processingTimes.length === 0)
-            return;
+            return undefined;
         const avgTime = processingTimes.reduce((sum, m) => sum + m.value, 0) / processingTimes.length;
         const threshold = this.alertThresholds.get('webhook_processing_time');
         if (avgTime >= threshold.critical) {
-            await this.triggerAlert('webhook_processing_time', 'critical', {
+            return this.triggerAlert('webhook_processing_time', 'critical', {
                 avgTime,
                 threshold: threshold.critical,
                 sampleSize: processingTimes.length,
             });
         }
         else if (avgTime >= threshold.warning) {
-            await this.triggerAlert('webhook_processing_time', 'warning', {
+            return this.triggerAlert('webhook_processing_time', 'warning', {
                 avgTime,
                 threshold: threshold.warning,
                 sampleSize: processingTimes.length,
             });
         }
+        return undefined;
     }
     async checkChurnRate() {
         const window = 24 * 60 * 60 * 1000; // 24 hours
@@ -178,7 +212,7 @@ export class PaymentMonitoringService {
             const churnRate = totalCanceled / netActive;
             const threshold = this.alertThresholds.get('subscription_churn_rate');
             if (churnRate >= threshold.critical) {
-                await this.triggerAlert('subscription_churn_rate', 'critical', {
+                return this.triggerAlert('subscription_churn_rate', 'critical', {
                     churnRate,
                     threshold: threshold.critical,
                     totalCanceled,
@@ -186,7 +220,7 @@ export class PaymentMonitoringService {
                 });
             }
             else if (churnRate >= threshold.warning) {
-                await this.triggerAlert('subscription_churn_rate', 'warning', {
+                return this.triggerAlert('subscription_churn_rate', 'warning', {
                     churnRate,
                     threshold: threshold.warning,
                     totalCanceled,
@@ -194,20 +228,21 @@ export class PaymentMonitoringService {
                 });
             }
         }
+        return undefined;
     }
     async checkRefundRate() {
         const window = 24 * 60 * 60 * 1000; // 24 hours
         const cutoff = Date.now() - window;
         const payments = await this.getMetricValues('payment_attempts_total', cutoff);
         const refunds = await this.getMetricValues('refunds_total', cutoff);
-        const successfulPayments = payments.filter(p => p.labels?.status === 'success');
+        const successfulPayments = payments.filter(p => p.labels?.outcome === 'success');
         const totalPayments = successfulPayments.reduce((sum, m) => sum + m.value, 0);
         const totalRefunds = refunds.reduce((sum, m) => sum + m.value, 0);
         if (totalPayments > 10) {
             const refundRate = totalRefunds / totalPayments;
             const threshold = this.alertThresholds.get('refund_rate');
             if (refundRate >= threshold.critical) {
-                await this.triggerAlert('refund_rate', 'critical', {
+                return this.triggerAlert('refund_rate', 'critical', {
                     refundRate,
                     threshold: threshold.critical,
                     totalRefunds,
@@ -215,7 +250,7 @@ export class PaymentMonitoringService {
                 });
             }
             else if (refundRate >= threshold.warning) {
-                await this.triggerAlert('refund_rate', 'warning', {
+                return this.triggerAlert('refund_rate', 'warning', {
                     refundRate,
                     threshold: threshold.warning,
                     totalRefunds,
@@ -223,6 +258,7 @@ export class PaymentMonitoringService {
                 });
             }
         }
+        return undefined;
     }
     async detectAnomalies() {
         const anomalies = [];
@@ -302,8 +338,12 @@ export class PaymentMonitoringService {
         };
         // Store alert. A refused write still sends and logs the alert: losing the stored copy must not hide it.
         const stored = await this.kv.set(`alert:${alert.id}`, alert, 86_400); // 24 hour TTL
-        if (!stored) {
-            logger.warn('Alert {alertId} ({metricName}) was not stored in KV', { alertId: alert.id, metricName });
+        if (stored !== true) {
+            logger.warn('Alert {alertId} ({metricName}) was not stored in KV ({code})', {
+                alertId: alert.id,
+                metricName,
+                code: stored === false ? 'refused' : stored.code,
+            });
         }
         // Send notifications based on severity
         const alertingService = this.alertingService;
@@ -318,10 +358,11 @@ export class PaymentMonitoringService {
         else {
             logger.warn(line, { severity, metricName, data });
         }
+        return stored === true || stored === false ? undefined : stored;
     }
     async calculateSuccessRate(metric, start, _end) {
         const values = await this.getMetricValues(metric, start);
-        const successful = values.filter(v => v.labels?.status === 'success');
+        const successful = values.filter(v => v.labels?.outcome === 'success');
         const total = values.length;
         return total > 0 ? successful.length / total : 0;
     }

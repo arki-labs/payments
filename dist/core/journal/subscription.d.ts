@@ -333,7 +333,11 @@ export declare function createSubscriptionJournal<Meta extends StandardSchemaV1<
             subscriptionId: z.ZodOptional<z.ZodTemplateLiteral<`sub${string}`>>;
         }, z.core.$strip>, Promise<import("@arki/failure").Failure<"journal.conflict", {
             detail: string;
-        }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure> | import("@arki/contracts").IdGenerationFailure, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionCreatedEvent], undefined>;
+        }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+            kind: "customer" | "payment" | "plan" | "subscription" | "user";
+            id: string;
+            missing: "provider_id" | "row";
+        }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionCreatedEvent], undefined>;
         syncSubscription: import("@arki/journal").Command<z.ZodObject<{
             userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
             planId: z.ZodTemplateLiteral<`plan${string}`>;
@@ -356,7 +360,11 @@ export declare function createSubscriptionJournal<Meta extends StandardSchemaV1<
             canceledAt: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
             cancelAtPeriodEnd: z.ZodOptional<z.ZodBoolean>;
             metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
-        }, z.core.$strip>, Promise<import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionCreatedEvent, SubscriptionSyncedEvent], undefined>;
+        }, z.core.$strip>, Promise<import("@arki/failure").Failure<"payments.reference_not_found", {
+            kind: "customer" | "payment" | "plan" | "subscription" | "user";
+            id: string;
+            missing: "provider_id" | "row";
+        }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionCreatedEvent, SubscriptionSyncedEvent], undefined>;
         cancelSubscription: import("@arki/journal").Command<z.ZodObject<{
             subscriptionId: z.ZodTemplateLiteral<`sub${string}`>;
             status: z.ZodDefault<z.ZodEnum<{
@@ -432,6 +440,10 @@ export declare function createSubscriptionJournal<Meta extends StandardSchemaV1<
             planId: z.ZodTemplateLiteral<`plan${string}`>;
         }, z.core.$strip>, Promise<import("@arki/failure").Failure<"journal.not_found", {
             detail: string;
+        }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+            kind: "customer" | "payment" | "plan" | "subscription" | "user";
+            id: string;
+            missing: "provider_id" | "row";
         }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionPlanChangedEvent], undefined>;
         setSubscriptionCancelAtPeriodEnd: import("@arki/journal").Command<z.ZodObject<{
             subscriptionId: z.ZodTemplateLiteral<`sub${string}`>;
@@ -443,7 +455,9 @@ export declare function createSubscriptionJournal<Meta extends StandardSchemaV1<
         }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionCancelAtPeriodEndSetEvent], undefined>;
         markSubscriptionPastDue: import("@arki/journal").Command<z.ZodObject<{
             subscriptionId: z.ZodTemplateLiteral<`sub${string}`>;
-        }, z.core.$strip>, Promise<import("@arki/failure").Failure<"journal.not_found", {
+        }, z.core.$strip>, Promise<import("@arki/failure").Failure<"journal.conflict", {
+            detail: string;
+        }> | import("@arki/failure").Failure<"journal.not_found", {
             detail: string;
         }> | import("@arki/journal").WriteResult<import("../tables.js").SubscriptionsTable, SubscriptionActivatedEvent | SubscriptionCancelAtPeriodEndSetEvent | SubscriptionCanceledEvent | SubscriptionCreatedEvent | SubscriptionPastDueEvent | SubscriptionPausedEvent | SubscriptionPlanChangedEvent | SubscriptionReactivatedEvent | SubscriptionResumedEvent | SubscriptionSyncedEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [SubscriptionPastDueEvent], undefined>;
         activateSubscription: import("@arki/journal").Command<z.ZodObject<{

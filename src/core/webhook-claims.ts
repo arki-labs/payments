@@ -10,12 +10,38 @@ import type { PgAsyncDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import type { Instant } from '@arki/date';
+import { z } from '@arki/contracts';
 import { now } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
+import { is, parse } from '@arki/schema';
 
 import type { CoreTables } from './tables.js';
-import type { FailureOf } from '@arki/failure';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import type { NewWebhookEvent, WebhookEvent, WebhookId } from './types.js';
+import { paymentProviderValues, webhookEventTypeValues } from './primitives.js';
+import { INT4_MAX, isPgInstant, pgInstantSchema, pgJsonRecordSchema, pgTextSchema, pgVarcharSchema } from './pg-values.js';
+import { CounterExhausted } from './failures.js';
 import { WebhookClaimConflict } from './services/webhook-failures.js';
+
+/**
+ * The values of a new event row that a column can refuse: the ids and text past their length or
+ * holding U+0000, U+0000 or a bigint in `data`, a count past the integer range, a time outside the
+ * years 1 to 9999. The enum columns take only their enum values.
+ */
+const claimableEventSchema = z.looseObject({
+  id: pgTextSchema.optional(),
+  provider: z.enum(paymentProviderValues),
+  eventType: z.enum(webhookEventTypeValues),
+  providerEventId: pgVarcharSchema(255).min(1),
+  data: pgJsonRecordSchema,
+  attempts: z.number().int().min(0).max(INT4_MAX).optional(),
+  errorMessage: pgTextSchema.nullish(),
+  sourceIp: pgVarcharSchema(45).nullish(),
+  processedAt: pgInstantSchema().nullish(),
+  lastAttemptAt: pgInstantSchema().nullish(),
+  createdAt: pgInstantSchema().optional(),
+  updatedAt: pgInstantSchema().optional(),
+});
 
 /** A claimed webhook event: its row, and whether this caller's insert created it. */
 export type WebhookClaim = { event: WebhookEvent; created: boolean };
@@ -32,13 +58,17 @@ export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations
  * index on `provider_event_id` and the primary key alike.
  *
  * Returns `WebhookClaimConflict` (retryable) when the insert conflicted but no
- * row holds the event's `providerEventId`.
+ * row holds the event's `providerEventId`, and `InvalidInput` (`schema.invalid_input`) before any
+ * query when a value does not fit its column (see `claimableEventSchema`).
  */
 export async function claimWebhookEvent(
   db: WebhookClaimDb,
   table: CoreTables['webhookEvents'],
   data: NewWebhookEvent,
-): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict>> {
+): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict> | SchemaFailure> {
+  const checked = parse(claimableEventSchema, data);
+  if (isFailure(checked)) return checked;
+
   const [inserted] = await db.insert(table).values(data).onConflictDoNothing().returning();
   if (inserted) {
     return { event: inserted, created: true };
@@ -71,6 +101,12 @@ export async function claimWebhookEvent(
  * the second matches nothing. `attempts` is the token rather than
  * `last_attempt_at` because two attempts can start within one clock tick (or
  * on servers whose clocks disagree), and a counter cannot repeat.
+ *
+ * Preconditions (anything else throws an invariant failure): `seenAttempts` is the whole `attempts`
+ * value read from the row, and `leaseCutoff` falls in the years 1 to 9999. An `id` no row can hold
+ * (U+0000) takes nothing over: false, with no query. A row the takeover would match whose `attempts`
+ * already holds `INT4_MAX` cannot count one more: `CounterExhausted` (`payments.counter_exhausted`),
+ * and nothing is written.
  */
 export async function reclaimWebhookEvent(
   db: WebhookClaimDb,
@@ -78,7 +114,24 @@ export async function reclaimWebhookEvent(
   id: WebhookId,
   seenAttempts: number,
   leaseCutoff: Instant,
-): Promise<boolean> {
+): Promise<boolean | FailureOf<typeof CounterExhausted>> {
+  invariant(
+    Number.isInteger(seenAttempts) && seenAttempts >= 0 && seenAttempts <= INT4_MAX,
+    '[@arki/payments] seenAttempts must be the attempts value read from the row',
+  );
+  invariant(isPgInstant(leaseCutoff), '[@arki/payments] leaseCutoff must fall in the years 1 to 9999');
+  if (!is(id, pgTextSchema)) return false;
+  const takeover = and(
+    eq(table.id, id),
+    eq(table.processed, false),
+    eq(table.attempts, seenAttempts),
+    or(isNotNull(table.errorMessage), isNull(table.lastAttemptAt), lt(table.lastAttemptAt, leaseCutoff)),
+  );
+  if (seenAttempts === INT4_MAX) {
+    // The update would match only a row whose count is full, and the column cannot hold one more
+    const [full] = await db.select({ id: table.id }).from(table).where(takeover);
+    return full ? CounterExhausted({ counter: 'attempts', id }) : false;
+  }
   const attemptAt = now();
   const won = await db
     .update(table)
@@ -88,14 +141,8 @@ export async function reclaimWebhookEvent(
       errorMessage: null,
       updatedAt: attemptAt,
     })
-    .where(
-      and(
-        eq(table.id, id),
-        eq(table.processed, false),
-        eq(table.attempts, seenAttempts),
-        or(isNotNull(table.errorMessage), isNull(table.lastAttemptAt), lt(table.lastAttemptAt, leaseCutoff)),
-      ),
-    )
+    // `attempts = seenAttempts`, below INT4_MAX, guards the increment in the update itself
+    .where(takeover)
     .returning({ id: table.id });
 
   return won.length > 0;

@@ -39,8 +39,10 @@ export declare function verifyRevenueCatAuth(authHeader: string | null, expected
  * A repeated delivery writes no event. RevenueCat sends no cancel time, so `canceledAt` is "now" on
  * every `EXPIRATION`; the command keeps the time of the first one once the row is canceled.
  *
- * A refused write is returned unchanged; the webhook route must reject it. An event not parsed by
- * the schema can carry a time `fromMillis` refuses (a fraction, or past year 9999), which throws.
+ * A refused write is returned unchanged; the webhook route must reject it. `purchased_at_ms` and
+ * `expiration_at_ms` are whole epoch milliseconds up to year 9999, as `revenueCatWebhookSchema` reads
+ * them: an event built by hand with another time (a fraction, NaN, past year 9999) is a bug in the caller,
+ * and throws `FailureError` (`invariant`) before anything is written.
  * Returns `{ handled: false }` for event types that aren't a subscription-state change.
  */
 export declare function projectRevenueCatEvent(params: {
@@ -59,6 +61,10 @@ export declare function projectRevenueCatEvent(params: {
     sqlState: string;
 }> | import("@arki/failure").Failure<"db.transaction_unavailable", undefined> | import("@arki/failure").Failure<"failure.unexpected_defect", undefined> | import("@arki/failure").Failure<"journal.conflict", {
     detail: string;
+}> | import("@arki/failure").Failure<"payments.reference_not_found", {
+    kind: "customer" | "payment" | "plan" | "subscription" | "user";
+    id: string;
+    missing: "provider_id" | "row";
 }> | import("@arki/failure").Failure<"schema.async_required", undefined> | import("@arki/failure").Failure<"schema.invalid_input", {
     issues: readonly import("@standard-schema/spec").StandardSchemaV1.Issue[];
 }> | import("@arki/failure").Failure<"schema.validator_defect", undefined> | {

@@ -19,7 +19,10 @@ export declare const refundStatusSchema: z.ZodEnum<{
     processing: "processing";
     rejected: "rejected";
 }>;
-/** Why a refund was turned down, as the customer reads it. A blank reason says nothing, so it is refused. */
+/**
+ * Why a refund was turned down, as the customer reads it. A blank reason says nothing, so it is refused. It is
+ * kept in the `RefundRejected` event, whose jsonb data refuses U+0000 and a lone surrogate, so both are refused too.
+ */
 export declare const refundRejectionReasonSchema: z.ZodString;
 export { refundReasonValues, refundStatusValues } from './primitives.js';
 //# sourceMappingURL=contracts.d.ts.map

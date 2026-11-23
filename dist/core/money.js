@@ -16,11 +16,17 @@
  * `@arki/money` reads only upper-case ISO codes, so every reader upper-cases.
  */
 import { z } from '@arki/contracts';
-import { Money, money } from '@arki/money';
+import { invariant } from '@arki/failure';
+import { Currency, Money, money } from '@arki/money';
 import { anyMoneySchema } from '@arki/money/zod';
 /**
  * `Money` as the whole minor units an amount column holds. Exact: an amount
  * the schemas accepted has no digits below the currency's minor unit.
+ *
+ * Precondition: `amount` passed one of the amount schemas below (or `@arki/money`
+ * built it from minor units). Anything else is a caller bug and throws:
+ * `RoundingNecessaryError` for digits below the minor unit (`1.001 EUR`), and
+ * `NumericRangeError` past 2^53 - 1 minor units.
  */
 export function toMinorColumn(amount) {
     return amount.toMinorNumber();
@@ -28,8 +34,17 @@ export function toMinorColumn(amount) {
 /**
  * An amount column read back as `Money`. Also takes the text Postgres sends
  * for `SUM(bigint)`.
+ *
+ * A builder over stored values, so it throws an invariant failure (callers pass a row this package
+ * wrote through its insert schemas, which allow only these) when `units` is not a safe whole number
+ * (a fraction, `NaN`, past 2^53 - 1, or text that is not whole minor units) or `currency` is a code
+ * outside ISO 4217 (any case).
  */
 export function fromMinorColumn(units, currency) {
+    invariant(typeof units === 'number'
+        ? Number.isSafeInteger(units)
+        : /^-?\d{1,16}$/.test(units) && Number.isSafeInteger(Number(units)), '[@arki/payments] units must be a safe whole number of minor units');
+    invariant(Currency.isKnown(currency.toUpperCase()), '[@arki/payments] currency must be an ISO 4217 code');
     return Money.fromMinor(units, currency.toUpperCase());
 }
 /**
@@ -40,15 +55,29 @@ export function fromMinorColumn(units, currency) {
  * is rounded to the currency's decimals. Half-even: a float sits on either side
  * of the written amount, never on purpose at a half, so the mode only decides
  * true ties without a bias. The column migration rounds the same way.
+ *
+ * A builder for stored values, so it throws an invariant failure for a number that is not finite
+ * or past 2^53 minor units, and for a code outside ISO 4217. Its callers
+ * are journal folds over events this package wrote, which cannot return a failure: a throw there
+ * means a corrupt event log.
  */
 export function fromStoredNumber(value, currency) {
+    const code = currency.toUpperCase();
+    invariant(Currency.isKnown(code), '[@arki/payments] currency must be an ISO 4217 code');
+    invariant(Number.isFinite(value) && Math.abs(value) * 10 ** Currency.of(code).scale < Number.MAX_SAFE_INTEGER, '[@arki/payments] value must be a finite amount within 2^53 minor units');
     return money(value, currency.toUpperCase(), { rounding: 'halfEven' });
 }
-/** A plan's price as `Money`. */
+/**
+ * A plan's price as `Money`. Precondition: a plan row as stored (whole `priceMinor`, an ISO 4217
+ * `currency`); anything else throws an invariant failure as `fromMinorColumn` does.
+ */
 export function planPrice(plan) {
     return fromMinorColumn(plan.priceMinor, plan.currency);
 }
-/** A payment's amount as `Money`. */
+/**
+ * A payment's amount as `Money`. Precondition: a payment row as stored (whole `amountMinor`, an ISO
+ * 4217 `currency`); anything else throws an invariant failure as `fromMinorColumn` does.
+ */
 export function paymentAmount(payment) {
     return fromMinorColumn(payment.amountMinor, payment.currency);
 }
@@ -72,6 +101,14 @@ export const positiveMoneySchema = anyMoneySchema()
 export const priceSchema = anyMoneySchema()
     .refine(amount => !amount.isNegative(), 'Price must not be negative')
     .refine(fitsStripe, fitsStripeMessage);
-/** An amount already charged, as a command stores it: zero or more, with no upper cap. */
-export const nonNegativeMoneySchema = anyMoneySchema().refine(amount => !amount.isNegative(), 'Amount must not be negative');
+/** The most minor units an amount column holds exactly: 2^53 - 1, what `toMinorColumn` can return. */
+const MAX_COLUMN_MINOR_UNITS = BigInt(Number.MAX_SAFE_INTEGER);
+/**
+ * An amount already charged, as a command stores it: zero or more, and at most 2^53 - 1 minor units
+ * (what `toMinorColumn` and the bigint column hold exactly). No Stripe cap: a provider may report
+ * amounts past it.
+ */
+export const nonNegativeMoneySchema = anyMoneySchema()
+    .refine(amount => !amount.isNegative(), 'Amount must not be negative')
+    .refine(amount => amount.toMinorBigInt() <= MAX_COLUMN_MINOR_UNITS, 'Amount is larger than 9,007,199,254,740,991 minor units');
 //# sourceMappingURL=money.js.map

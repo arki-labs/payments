@@ -7,7 +7,11 @@
  * total over rows is a `MoneyBag`: it keeps each currency apart and never adds
  * two of them.
  */
+import { z } from '@arki/contracts';
+import { isFailure } from '@arki/failure';
 import { MoneyBag } from '@arki/money/bag';
+import { currencyCodeSchema } from '@arki/money/zod';
+import { parse } from '@arki/schema';
 import { fromMinorColumn } from '../core/money.js';
 /**
  * Counters with no payment behind them (customers reached, messages sent) have
@@ -19,8 +23,32 @@ export const DEFAULT_ANALYTICS_CURRENCY = 'USD';
 export function analyticsRowId(campaignId, day, currency) {
     return `${campaignId}-${day}-${currency.toUpperCase()}`;
 }
-/** Sums `(currency, minor units)` pairs into one bag, a balance per currency. */
+/** One analytics row's money: an ISO 4217 code in any case, and whole minor units (a safe integer, or the digits of one). */
+const minorRowSchema = z.object({
+    currency: z
+        .string()
+        .transform(code => code.toUpperCase())
+        .pipe(currencyCodeSchema),
+    units: z.union([
+        z.number().int(),
+        z
+            .string()
+            .regex(/^-?\d{1,16}$/)
+            .refine(digits => Math.abs(Number(digits)) <= Number.MAX_SAFE_INTEGER, 'Units must be a safe integer'),
+    ]),
+});
+/**
+ * Sums `(currency, minor units)` pairs into one bag, a balance per currency. It folds row by row
+ * instead of spreading the rows into one call, so any number of rows fits (a spread past about
+ * 150,000 arguments throws `RangeError`); the rows are a stored result set, not a caller batch, so
+ * they have no `MAX_BATCH_ITEMS` cap. A row whose currency is not an ISO 4217 code, or whose units are
+ * not a safe whole number (a fraction, `NaN`, past 2^53 - 1, text that is not digits), returns
+ * `schema.invalid_input` and sums nothing.
+ */
 export function sumMinorByCurrency(rows) {
-    return MoneyBag.of(...rows.map(row => fromMinorColumn(row.units, row.currency)));
+    const checked = parse(z.array(minorRowSchema), rows);
+    if (isFailure(checked))
+        return checked;
+    return rows.reduce((bag, row) => bag.plus(fromMinorColumn(row.units, row.currency)), MoneyBag.of());
 }
 //# sourceMappingURL=analytics-money.js.map

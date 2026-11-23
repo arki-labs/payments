@@ -14,6 +14,11 @@ import type { RefundId, RefundReason, RefundStatus } from './primitives.js';
 import type { RefundsTables } from './tables.js';
 import type { Refund } from './types.js';
 import { fromMinorColumn, toMinorColumn } from '../core/money.js';
+import { isPgInstant, pgTextSchema } from '../core/pg-values.js';
+import { refundReasonValues, refundStatusValues } from './primitives.js';
+import { invariant } from '@arki/failure';
+import { is } from '@arki/schema';
+import { z } from '@arki/contracts';
 
 /**
  * Structural database type for the refunds repository. Only uses
@@ -25,6 +30,24 @@ import { fromMinorColumn, toMinorColumn } from '../core/money.js';
 export function refundAmountOf(refund: Pick<Refund, 'refundAmountMinor' | 'currency'>): Money {
   return fromMinorColumn(refund.refundAmountMinor, refund.currency ?? 'USD');
 }
+
+/**
+ * False when a text holds U+0000. No stored row can hold one, so a read for it finds nothing, and
+ * Postgres would refuse it as a parameter (SQLSTATE 22021). Typed ids count: `rfnd${string}` can hold one.
+ */
+function findable(...texts: (string | undefined)[]): boolean {
+  return texts.every(text => text === undefined || is(text, pgTextSchema));
+}
+
+/** Whether an amount column holds `amount` exactly: no digits below the minor unit, at most 2^53 - 1 minor units either way. */
+function fitsAmountColumn(amount: Money): boolean {
+  const whole = amount.toScale(amount.currency.scale, 'halfEven');
+  return whole.eq(amount) && whole.abs().toMinorBigInt() <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
+/** The refund statuses and reasons a row can hold: another text matches no row, and Postgres refuses it as an enum (SQLSTATE 22P02). */
+const refundStatusSchema = z.enum(refundStatusValues);
+const refundReasonSchema = z.enum(refundReasonValues);
 
 export type RefundsDatabase =
   | NodePgDatabase<AnyRelations>
@@ -40,7 +63,9 @@ export class RefundRepository {
     this.refunds = tables.refunds;
   }
 
+  /** Null too for an id no row can hold (U+0000), without a query. */
   async findById(refundId: RefundId): Promise<Refund | null> {
+    if (!findable(refundId)) return null;
     const [refund] = await this.db
       .select()
       .from(this.refunds)
@@ -50,7 +75,9 @@ export class RefundRepository {
   }
 
   /** The refund the provider knows by `providerRefundId`: the link between a webhook and our row. */
+  /** No row holds U+0000, so an id with one finds nothing (Postgres would refuse the parameter). */
   async findByProviderRefundId(providerRefundId: string): Promise<Refund | null> {
+    if (!findable(providerRefundId)) return null;
     const [refund] = await this.db
       .select()
       .from(this.refunds)
@@ -59,7 +86,9 @@ export class RefundRepository {
     return refund ?? null;
   }
 
+  /** Empty too for an id no row can hold (U+0000), without a query. */
   async findByPaymentId(paymentId: PaymentId): Promise<Refund[]> {
+    if (!findable(paymentId)) return [];
     return this.db
       .select()
       .from(this.refunds)
@@ -67,7 +96,9 @@ export class RefundRepository {
       .orderBy(desc(this.refunds.createdAt));
   }
 
+  /** Empty too for a text that is not a refund status, without a query. */
   async findByStatus(status: RefundStatus): Promise<Refund[]> {
+    if (!is(status, refundStatusSchema)) return [];
     return this.db
       .select()
       .from(this.refunds)
@@ -79,7 +110,9 @@ export class RefundRepository {
     return this.findByStatus('pending');
   }
 
+  /** Empty too for an id no row can hold (U+0000), without a query. */
   async findByUser(userId: UserId): Promise<Refund[]> {
+    if (!findable(userId)) return [];
     return this.db
       .select()
       .from(this.refunds)
@@ -87,8 +120,13 @@ export class RefundRepository {
       .orderBy(desc(this.refunds.createdAt));
   }
 
-  /** Completed refunds of a payment, in the payment's currency. */
+  /**
+   * Completed refunds of a payment, in the payment's currency. A `paymentId` or `currency` no row can
+   * hold (U+0000) has no refunds: zero, without a query. `currency` must be ISO 4217: another code
+   * throws `UnknownCurrencyError` (the `@arki/money` builder), as for the zero.
+   */
   async getTotalRefundedAmount(paymentId: PaymentId, currency: string): Promise<Money> {
+    if (!findable(paymentId, currency)) return fromMinorColumn('0', currency);
     const result = await this.db
       .select({
         // A `bigint` sum is `numeric`: Postgres sends it as text, exact
@@ -106,6 +144,10 @@ export class RefundRepository {
     return fromMinorColumn(result[0]?.total ?? '0', currency);
   }
 
+  /**
+   * Refunds created in the range (both bounds optional): their count, one total per currency, and
+   * counts by status and reason. The bounds fall in the years 1 to 9999, or it throws `FailureError` (`invariant`).
+   */
   async getRefundMetrics(
     startDate?: Instant,
     endDate?: Instant,
@@ -116,6 +158,11 @@ export class RefundRepository {
     byStatus: Record<string, number>;
     byReason: Record<string, number>;
   }> {
+    // Postgres compares an `instant` only in the years 1 to 9999: another typed time is a bug in the caller
+    invariant(
+      [startDate, endDate].every(time => time === undefined || isPgInstant(time)),
+      'getRefundMetrics needs times in the years 1 to 9999 (UTC)',
+    );
     const conditions = [];
     if (startDate) {
       conditions.push(gte(this.refunds.createdAt, startDate));
@@ -135,7 +182,8 @@ export class RefundRepository {
     const byReason: Record<string, number> = {};
     const metrics = {
       totalCount: allRefunds.length,
-      totalAmount: MoneyBag.empty().plus(...allRefunds.map(refund => refundAmountOf(refund))),
+      // Folded one by one: spreading every refund as arguments overflows the call stack on Node past ~100k refunds
+      totalAmount: allRefunds.reduce((bag, refund) => bag.plus(refundAmountOf(refund)), MoneyBag.empty()),
       byStatus,
       byReason,
     };
@@ -170,6 +218,12 @@ export class RefundRepository {
     return totalTime / completedRefunds.length;
   }
 
+  /**
+   * The refunds that match every filter given, newest first. `startDate` and `endDate` fall in the years
+   * 1 to 9999, and `minAmount` and `maxAmount` are whole minor units of their currency, at most 2^53 - 1 of
+   * them, as the amount column holds; anything else throws `FailureError` (`invariant`) before a query.
+   * A `userId` no row can hold (U+0000), or a `status` or `reason` that is not a refund status or reason, matches none.
+   */
   async searchRefunds(filters: {
     status?: RefundStatus;
     reason?: RefundReason;
@@ -180,6 +234,18 @@ export class RefundRepository {
     minAmount?: Money;
     maxAmount?: Money;
   }): Promise<Refund[]> {
+    invariant(
+      [filters.startDate, filters.endDate].every(time => time === undefined || isPgInstant(time)),
+      'searchRefunds needs times in the years 1 to 9999 (UTC)',
+    );
+    // A bound the column cannot hold made `toMinorColumn` throw a raw RoundingNecessaryError or NumericRangeError
+    invariant(
+      [filters.minAmount, filters.maxAmount].every(amount => amount === undefined || fitsAmountColumn(amount)),
+      'searchRefunds needs amount bounds in whole minor units, at most 2^53 - 1 of them',
+    );
+    if (!findable(filters.userId)) return [];
+    if (filters.status !== undefined && !is(filters.status, refundStatusSchema)) return [];
+    if (filters.reason !== undefined && !is(filters.reason, refundReasonSchema)) return [];
     const conditions = [];
 
     if (filters.status) {

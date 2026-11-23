@@ -16,6 +16,50 @@ export declare const DunningCampaignNotFound: import("@arki/failure").FailureDef
     campaignId: string;
 }>>;
 /**
+ * No dunning step (template) has this id. Nothing was written.
+ *
+ * @fix Check the step id; read the campaign to list its steps.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts
+ */
+export declare const DunningTemplateNotFound: import("@arki/failure").FailureDefinition<"payments.dunning_template_not_found", import("@standard-schema/spec").StandardSchemaV1<{
+    templateId: string;
+}, {
+    templateId: string;
+}>>;
+/**
+ * No dunning execution has this id. Nothing was written.
+ *
+ * @fix Check the execution id; list the campaign's executions to find it.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts
+ */
+export declare const DunningExecutionNotFound: import("@arki/failure").FailureDefinition<"payments.dunning_execution_not_found", import("@standard-schema/spec").StandardSchemaV1<{
+    executionId: string;
+}, {
+    executionId: string;
+}>>;
+/**
+ * The customer already has a risk profile, so `CustomerRiskProfileRepository.create` wrote nothing.
+ *
+ * @fix Use `upsert` to replace the stored profile, or `update` to change it.
+ * @verify bun run test -- src/dunning/customer-risk-profile.test.ts
+ */
+export declare const CustomerRiskProfileExists: import("@arki/failure").FailureDefinition<"payments.customer_risk_profile_exists", import("@standard-schema/spec").StandardSchemaV1<{
+    customerId: string;
+}, {
+    customerId: string;
+}>>;
+/**
+ * A delivery callback names a provider message id that no dunning communication has. Nothing was written.
+ *
+ * @fix Check that the callback comes from the provider that sent the message; a message sent before its id was stored has none.
+ * @verify bun run test -- src/dunning/communication-service.test.ts
+ */
+export declare const DunningCommunicationNotFound: import("@arki/failure").FailureDefinition<"payments.dunning_communication_not_found", import("@standard-schema/spec").StandardSchemaV1<{
+    providerMessageId: string;
+}, {
+    providerMessageId: string;
+}>>;
+/**
  * The campaign exists but is not active, so it cannot run. Nothing was written.
  *
  * @fix Set the campaign status to `active` first.
@@ -51,10 +95,11 @@ export declare const CustomerSegmentNotFound: import("@arki/failure").FailureDef
     segmentId: string;
 }>>;
 /**
- * A campaign update removes a step that already sent a communication. The sent message keeps its
- * step (its history points at it), so the update was refused and nothing changed.
+ * A campaign update removes a step that already sent a communication, or `deleteCampaign` deletes
+ * a campaign with such a step. The sent message keeps its step (its history points at it), so the
+ * update or delete was refused and nothing changed.
  *
- * @fix Keep the step in `templates` (change its content or delay instead), or deactivate the campaign and create a new one.
+ * @fix Keep the step in `templates` (change its content or delay instead), or deactivate (archive) the campaign instead of deleting it.
  * @verify bun run test -- src/dunning/campaign-service.test.ts
  */
 export declare const DunningTemplateInUse: import("@arki/failure").FailureDefinition<"payments.dunning_template_in_use", import("@standard-schema/spec").StandardSchemaV1<{
@@ -143,12 +188,11 @@ export declare const NotificationWebhookHostNotAllowed: import("@arki/failure").
  * valid address for the channel (a webhook URL that is not http or https) is a `SchemaFailure`.
  */
 export type NotificationProviderFailure = FailureOf<typeof NotificationProviderRejected> | FailureOf<typeof NotificationProviderTimeout> | FailureOf<typeof NotificationProviderResponseInvalid> | FailureOf<typeof NotificationWebhookHostNotAllowed> | SchemaFailure;
-/** One item a scheduled tick could not handle: its id, the failure code (`null` for a thrown error) and the message. */
-export type DunningTickFault = {
-    id: string;
-    code: string | null;
-    message: string;
-};
+/**
+ * One item a scheduled tick could not handle, made by `tickFault`: `refused` with the `failure` the
+ * package returned, or `thrown` with the `error` (a fault).
+ */
+export type DunningTickFault = ReturnType<typeof tickFault>;
 /**
  * What one scheduled tick did: how many items it handled, and each item it could not handle. A tick
  * logs every fault too; the report is what the scheduler sees. A fault that stops the whole tick
@@ -158,6 +202,16 @@ export type DunningTickReport = {
     processed: number;
     failed: DunningTickFault[];
 };
-/** The tick fault for one item: a returned failure keeps its code, a thrown error has none. */
-export declare function tickFault(id: string, fault: unknown): DunningTickFault;
+/** The tick fault for one item: a returned failure is `refused` and keeps the failure, anything else is `thrown` and keeps the error. */
+export declare function tickFault(id: string, fault: unknown): {
+    id: string;
+    status: 'refused';
+    failure: import("@arki/failure").Failure<string, unknown>;
+    error?: undefined;
+} | {
+    failure?: undefined;
+    id: string;
+    status: 'thrown';
+    error: unknown;
+};
 //# sourceMappingURL=failures.d.ts.map

@@ -1,22 +1,24 @@
 import { EventEmitter } from 'node:events';
 
+import type { SchemaInput } from '@arki/schema';
 import { z } from '@arki/contracts';
 import { now, sub } from '@arki/date';
 import { InvalidInput, isFailure } from '@arki/failure';
 import { getLogger } from '@arki/log';
 import { fromStripeAmount } from '@arki/money/stripe';
-import type { SchemaInput } from '@arki/schema';
 import { parse } from '@arki/schema';
 
+import type { RefundWorkflow } from '../../refunds/workflow.js';
 import type { WebhookProcessingResult } from '../contracts.js';
 import type { CoreWrites } from '../journal.js';
-import type { RefundWorkflow } from '../../refunds/workflow.js';
 import type { PaymentRepository } from '../repository.js';
 import type { PaymentProviderType, PaymentStatus, WebhookEventType, WebhookId } from '../types.js';
 import type { StripeChargeRefund } from './webhook-event-payloads.js';
 import type { WebhookSecurityService } from './webhook-security.js';
 import { refundIdSchema } from '../../refunds/primitives.js';
 import { REFUND_SETTLED_STATUSES, refundRunId } from '../../refunds/workflow.js';
+import { PaymentsConfigurationInvalid } from '../failures.js';
+import { INT4_MAX, pgJsonRecordSchema, pgVarcharSchema } from '../pg-values.js';
 import { createWebhookId, webhookEventTypeValues } from '../primitives.js';
 import { observePayments } from '../telemetry.js';
 import {
@@ -29,7 +31,6 @@ import {
 import {
   WebhookInProgress,
   WebhookPayloadInvalid,
-  WebhookRejected,
   WebhookRetriesExhausted,
   WebhookTargetNotFound,
 } from './webhook-failures.js';
@@ -91,8 +92,11 @@ const paymentMovesFrom: Record<PaymentOutcome, readonly PaymentStatus[]> = {
   requires_action: ['pending', 'processing'],
 };
 
-/** The two fields of a provider event the claim needs. */
-const eventEnvelopeSchema = z.object({ id: z.string().min(1), type: z.string().min(1) });
+/** The two fields of a provider event the claim needs. The id is stored in a `varchar(255)` column. */
+const eventEnvelopeSchema = z.object({ id: pgVarcharSchema(255).min(1), type: z.string().min(1) });
+
+/** A source address the `source_ip` column holds (45 characters, the longest IPv6 text). */
+const storedSourceIpSchema = pgVarcharSchema(45);
 
 export type WebhookEventData = {
   type: WebhookEventType;
@@ -101,27 +105,34 @@ export type WebhookEventData = {
   webhookId: WebhookId;
 };
 
-export type WebhookHandlerConfig = {
-  /** Attempts after which an unprocessed event is given up on, and the provider told to stop resending. */
-  maxRetries: number;
-  retryDelayMs: number;
+/** One year in milliseconds: the longest lease and retry delay the handler takes. */
+const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+
+/** The handler's settings, checked when it is built. */
+const webhookHandlerConfigSchema = z.object({
+  /** Attempts after which an unprocessed event is given up on, and the provider told to stop resending. A whole number from 1 up. */
+  maxRetries: z.number().int().min(1).max(INT4_MAX),
+  /** Whole milliseconds, 0 to one year. */
+  retryDelayMs: z.number().int().min(0).max(YEAR_MS),
   /**
    * Answer before the event is processed. Off by default: the provider's
    * resends are the retry mechanism, and they only happen when the answer
    * says the event failed. An early answer turns every processing failure
    * into a lost event.
    */
-  enableAsync: boolean;
-  enableEventEmitter: boolean;
+  enableAsync: z.boolean(),
+  enableEventEmitter: z.boolean(),
   /**
    * How long an attempt may run before another delivery may take the event
    * over. An attempt older than this with no recorded error is treated as
-   * crashed.
+   * crashed. Whole milliseconds, 0 to one year.
    */
-  processingLeaseMs: number;
+  processingLeaseMs: z.number().int().min(0).max(YEAR_MS),
   /** Skip the source-address check. For routes with no real client address; the signature check still runs. */
-  skipIpValidation: boolean;
-};
+  skipIpValidation: z.boolean(),
+});
+
+export type WebhookHandlerConfig = z.output<typeof webhookHandlerConfigSchema>;
 
 // eslint-disable-next-line unicorn/prefer-event-target -- public API: apps subscribe with `.on('payment:refunded', ...)`; Node's EventEmitter is what they listen on
 export class WebhookHandler extends EventEmitter {
@@ -129,16 +140,31 @@ export class WebhookHandler extends EventEmitter {
   /** Handlers the app registered. One replaces the built-in handling of its event type. */
   private readonly customHandlers = new Map<WebhookEventType, (data: WebhookEventData) => Promise<void>>();
 
-  constructor(
+  private constructor(
     private readonly paymentRepository: WebhookEventStore,
     private readonly webhookSecurity: WebhookValidator,
-    /** Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`. */
     private readonly writes: WebhookWrites,
-    config: Partial<WebhookHandlerConfig> = {},
+    config: WebhookHandlerConfig,
     private readonly refunds?: WebhookRefunds,
   ) {
     super();
-    this.config = {
+    this.config = config;
+  }
+
+  /**
+   * Builds the handler. Returns `payments.configuration_invalid` (and builds nothing) for a count or
+   * duration outside its range (see `WebhookHandlerConfig`): a bad setting fails here, not on the first delivery.
+   *
+   * @param writes Every change of a `payments` or `subscriptions` row goes through the journal: `paymentsJournal.writes(run)`.
+   */
+  static create(
+    paymentRepository: WebhookEventStore,
+    webhookSecurity: WebhookValidator,
+    writes: WebhookWrites,
+    config: Partial<WebhookHandlerConfig> = {},
+    refunds?: WebhookRefunds,
+  ) {
+    const merged = {
       maxRetries: 3,
       retryDelayMs: 1000,
       enableAsync: false,
@@ -147,6 +173,16 @@ export class WebhookHandler extends EventEmitter {
       skipIpValidation: false,
       ...config,
     };
+    const checked = webhookHandlerConfigSchema.safeParse(merged);
+    if (!checked.success) {
+      return PaymentsConfigurationInvalid({
+        setting: 'webhookHandler',
+        problem: checked.error.issues
+          .map(issue => `${issue.path.join('.') || '(config)'}: ${issue.message}`)
+          .join('; '),
+      });
+    }
+    return new WebhookHandler(paymentRepository, webhookSecurity, writes, checked.data, refunds);
   }
 
   /**
@@ -191,9 +227,7 @@ export class WebhookHandler extends EventEmitter {
       { skipIpValidation: this.config.skipIpValidation },
     );
 
-    if (!validation.isValid) {
-      return WebhookRejected({ reason: validation.error ?? 'Webhook validation failed', retryable: false });
-    }
+    if (isFailure(validation)) return validation;
 
     // 2. Read the event's id and type
     const envelope = this.readEnvelope(payload);
@@ -213,7 +247,12 @@ export class WebhookHandler extends EventEmitter {
     const webhookIdResult = createWebhookId();
     if (isFailure(webhookIdResult)) return webhookIdResult;
 
-    const data = validation.data ?? {};
+    // The body is stored as jsonb, which cannot hold U+0000: such a body is final, a resend carries it again
+    const data = validation.data;
+    const storable = parse(pgJsonRecordSchema, data);
+    if (isFailure(storable)) return WebhookPayloadInvalid({ retryable: false }, { cause: storable });
+    // An address the column cannot hold (possible with `skipIpValidation`) is not kept
+    const storedIp = storedSourceIpSchema.safeParse(sourceIp);
     const claim = await this.paymentRepository.claimWebhookEvent({
       id: webhookIdResult,
       provider,
@@ -223,7 +262,7 @@ export class WebhookHandler extends EventEmitter {
       processed: false,
       attempts: 1,
       lastAttemptAt: now(),
-      sourceIp,
+      sourceIp: storedIp.success ? storedIp.data : null,
       createdAt: now(),
       updatedAt: now(),
     });
@@ -245,6 +284,10 @@ export class WebhookHandler extends EventEmitter {
       // A resend of an event that failed or whose attempt crashed takes it
       // over; a resend of one still inside its lease asks to be resent later.
       const reclaimed = await this.paymentRepository.reclaimWebhookEvent(webhookId, event.attempts, this.leaseCutoff());
+      // A full count cannot get here (`attempts` is below `maxRetries`, at most INT4_MAX); it would mean no attempts are left
+      if (isFailure(reclaimed)) {
+        return WebhookRetriesExhausted({ webhookId, attempts: event.attempts, retryable: false });
+      }
       if (!reclaimed) {
         logger.debug('Webhook {webhookId} is being processed; asking for a resend', { webhookId });
         return WebhookInProgress({ webhookId, retryable: true });
@@ -267,60 +310,81 @@ export class WebhookHandler extends EventEmitter {
    * Re-run failed or crashed events without waiting for a resend. Optional:
    * provider resends already do this. Uses the same takeover as a resend, so
    * it never runs an event whose attempt is still inside its lease.
+   *
+   * Reads only events with attempts left (fewer than `maxRetries`), oldest first, so events given
+   * up on never crowd out newer ones. A run whose attempt was the last one emits `webhook:failed`
+   * once, next to `webhook:processing_error`; the row keeps the error that attempt recorded.
+   *
+   * Returns one report per event read, in that order:
+   *
+   * - `processed`: the event ran and is marked processed.
+   * - `skipped`: another taker holds the event (its attempt is still inside its lease); nothing ran.
+   * - `refused`: the event's handler or a journal write returned a failure, in `failure`. It is
+   *   recorded on the row, and the event stays unprocessed for the next resend or retry.
+   * - `thrown`: the run threw (a fault), in `error`; recorded on the row the same way.
+   *
+   * One broken event never stops the others. A fault that stops the whole run (the event read or a
+   * takeover throws: the database is down) emits `webhook:retry_error` and is thrown.
    */
-  async retryFailedWebhooks(): Promise<void> {
+  async retryFailedWebhooks() {
     try {
-      const unprocessedEvents = await this.paymentRepository.findUnprocessedWebhookEvents();
+      const unprocessedEvents = await this.paymentRepository.findUnprocessedWebhookEvents(100, this.config.maxRetries);
 
+      const reports = [];
       for (const event of unprocessedEvents) {
-        if (event.attempts < this.config.maxRetries) {
-          const reclaimed = await this.paymentRepository.reclaimWebhookEvent(
-            event.id,
-            event.attempts,
-            this.leaseCutoff(),
-          );
-          if (!reclaimed) {
-            continue;
-          }
-          try {
-            const outcome = await this.runClaimed(event.id, event.eventType, event.provider, event.data);
-            if (isFailure(outcome)) {
-              this.emit('webhook:processing_error', {
-                webhookId: event.id,
-                eventType: event.eventType,
-                provider: event.provider,
-                error: outcome.code,
-              });
-            }
-          } catch (error) {
-            this.emit('webhook:processing_error', {
-              webhookId: event.id,
-              eventType: event.eventType,
-              provider: event.provider,
-              error: error instanceof Error ? error.message : 'Unknown error',
-            });
-          }
-        } else {
-          // Mark as failed after max retries
-          const marked = await this.paymentRepository.updateWebhookEvent(event.id, {
-            errorMessage: 'Max retry attempts exceeded',
-          });
-          if (isFailure(marked)) {
-            continue;
-          }
-
-          this.emit('webhook:failed', {
-            webhookId: event.id,
-            eventType: event.eventType,
-            provider: event.provider,
-            error: 'Max retry attempts exceeded',
-          });
+        const webhookId = event.id;
+        const reclaimed = await this.paymentRepository.reclaimWebhookEvent(
+          webhookId,
+          event.attempts,
+          this.leaseCutoff(),
+        );
+        // Never here: every event read has fewer than `maxRetries` attempts, so the count is not full
+        if (isFailure(reclaimed)) {
+          reports.push({ webhookId, status: 'refused' as const, failure: reclaimed });
+          continue;
         }
+        if (!reclaimed) {
+          reports.push({ webhookId, status: 'skipped' as const });
+          continue;
+        }
+
+        const ran = await this.runRetried(webhookId, event.eventType, event.provider, event.data);
+        reports.push(ran);
+        if (ran.status === 'processed') continue;
+
+        const error =
+          ran.status === 'refused'
+            ? ran.failure.code
+            : ran.error instanceof Error
+              ? ran.error.message
+              : 'Unknown error';
+        const report = { webhookId, eventType: event.eventType, provider: event.provider, error };
+        this.emit('webhook:processing_error', report);
+        // The takeover counted this attempt: `event.attempts + 1` have now failed
+        if (event.attempts + 1 >= this.config.maxRetries) this.emit('webhook:failed', report);
       }
+      return reports;
     } catch (error) {
       this.emit('webhook:retry_error', {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
+      throw error;
+    }
+  }
+
+  /** Run one event `retryFailedWebhooks` took over, and report it (see there). */
+  private async runRetried(
+    webhookId: WebhookId,
+    eventType: WebhookEventType,
+    provider: PaymentProviderType,
+    data: Record<string, unknown>,
+  ) {
+    try {
+      const outcome = await this.runClaimed(webhookId, eventType, provider, data);
+      if (isFailure(outcome)) return { webhookId, status: 'refused' as const, failure: outcome };
+      return { webhookId, status: 'processed' as const };
+    } catch (error) {
+      return { webhookId, status: 'thrown' as const, error };
     }
   }
 
@@ -403,7 +467,10 @@ export class WebhookHandler extends EventEmitter {
    * meanwhile has nothing to take over: that is logged, and the attempt's own outcome still stands.
    */
   private async recordError(webhookId: WebhookId, errorMessage: string): Promise<void> {
-    const recorded = await this.paymentRepository.updateWebhookEvent(webhookId, { errorMessage });
+    // A message can quote payload text; the column cannot hold U+0000, so it becomes U+FFFD
+    const recorded = await this.paymentRepository.updateWebhookEvent(webhookId, {
+      errorMessage: errorMessage.replaceAll('\u0000', '\uFFFD'),
+    });
     if (isFailure(recorded)) {
       logger.warn('Webhook {webhookId} has no row to record its error on: {code}', { webhookId, code: recorded.code });
     }
@@ -702,6 +769,7 @@ export class WebhookHandler extends EventEmitter {
   }
 }
 
+/** Builds a `WebhookHandler`: the same as `WebhookHandler.create`, which returns `payments.configuration_invalid` for a bad setting. */
 export function createWebhookHandler(
   paymentRepository: WebhookEventStore,
   webhookSecurity: WebhookValidator,
@@ -709,5 +777,5 @@ export function createWebhookHandler(
   config?: Partial<WebhookHandlerConfig>,
   refunds?: WebhookRefunds,
 ) {
-  return new WebhookHandler(paymentRepository, webhookSecurity, writes, config, refunds);
+  return WebhookHandler.create(paymentRepository, webhookSecurity, writes, config, refunds);
 }

@@ -4,19 +4,46 @@
  * Used by the payment, subscription and refund entities and their commands.
  * Plain TypeScript only: this file runs on Node, Bun, Deno, browsers and Hermes.
  */
-import { instant } from '@arki/date';
+import { eq, sql } from 'drizzle-orm';
+import { getTableConfig } from 'drizzle-orm/pg-core';
+import { z } from '@arki/contracts';
+import { instantSchema } from '@arki/date/zod';
 import { invariant, isFailure } from '@arki/failure';
 import { is, recordSchema } from '@arki/schema';
+import { holdsLoneSurrogate, MAX_BATCH_ITEMS, pgTextSchema } from '../pg-values.js';
+/**
+ * Text a journal event carries. Event data is stored in a jsonb column, which refuses U+0000
+ * (SQLSTATE 22P05) and a lone surrogate such as `'\ud800'` (22P02); a `text` column refuses only
+ * U+0000. A command input schema builds its text fields and stream ids from this, so such a value is
+ * `schema.invalid_input` before any write.
+ */
+export const eventTextSchema = pgTextSchema.refine(text => !holdsLoneSurrogate(text), 'Text cannot contain a lone surrogate (such as U+D800 alone)');
+/** Event text with at most `max` characters, for a value that also fills a `varchar(max)` column. */
+export function eventVarcharSchema(max) {
+    return eventTextSchema.max(max);
+}
 /** Event data is stored as JSON, so a time travels as an ISO string. */
 export function toIso(value) {
     return value.toString();
 }
-/** Reducers build the `Instant` an `instant` column stores. */
+/**
+ * The `Instant` an `instant` column stores, from a time in event data. Reducers call it on fields the
+ * event schema already checked (`z.iso.datetime()`), so the precondition is: `iso` is an ISO 8601
+ * timestamp with `Z` or an offset. Anything else is a caller bug and throws an invariant failure
+ * (`ARKI_FAILURE_E008`), never a raw `RangeError`.
+ */
 export function toInstant(iso) {
-    return instant(iso);
+    const parsed = instantSchema().safeParse(iso);
+    invariant(parsed.success, () => `toInstant: ${JSON.stringify(iso)} is not an ISO 8601 timestamp with Z or an offset`);
+    return parsed.data;
 }
+/**
+ * `toInstant` for a nullable field: `null` stays `null`. Same precondition: a string is an ISO 8601
+ * timestamp with `Z` or an offset, as the subscription event schemas guarantee; anything else throws
+ * an invariant failure (`ARKI_FAILURE_E008`).
+ */
 export function toNullableInstant(iso) {
-    return iso === null ? null : instant(iso);
+    return iso === null ? null : toInstant(iso);
 }
 /**
  * The number a `real` column gives back for `value`.
@@ -37,6 +64,8 @@ export function storedReal(value) {
     }
     return stored;
 }
+/** Any array, as `sameJson` compares one item by item (A-39: a schema, not a hand-written guard). */
+const jsonArraySchema = z.array(z.unknown());
 /**
  * Deep equality for JSON values. Key order does not matter: a `jsonb` column
  * returns object keys in its own order. A key holding `undefined` equals a
@@ -46,7 +75,7 @@ export function sameJson(left, right) {
     if (Object.is(left, right)) {
         return true;
     }
-    if (Array.isArray(left) && Array.isArray(right)) {
+    if (is(left, jsonArraySchema) && is(right, jsonArraySchema)) {
         return left.length === right.length && left.every((item, index) => sameJson(item, right[index]));
     }
     if (is(left, recordSchema) && is(right, recordSchema)) {
@@ -64,5 +93,38 @@ export async function writtenRow(result, what) {
     const { version, ...rest } = row;
     void version;
     return rest;
+}
+/**
+ * Looks up the row each reference points at, in the table the column's foreign key names, and locks
+ * it (`FOR KEY SHARE`) until the transaction ends, so the write that follows cannot meet a missing or
+ * just-deleted row (a raw Postgres 23503). Returns the first `missing()` for a value no row holds, or
+ * `undefined` when every row is there. A value Postgres cannot store (U+0000) is held by no row, so it
+ * returns its `missing()` without a query (the lookup would fail with a raw 22021); so does a value with a
+ * lone surrogate, which no row holds as given (the driver writes U+FFFD in its place). A `null` or
+ * `undefined` value names nothing to check. Run it in the transaction that writes.
+ *
+ * Precondition: at most `MAX_BATCH_ITEMS` (1,000) references; more breaks an `invariant`
+ * (`ARKI_FAILURE_E008`) before any query. Callers pass a fixed handful (one per foreign key they write).
+ */
+export async function lockReferences(db, table, references) {
+    invariant(references.length <= MAX_BATCH_ITEMS, () => `[@arki/payments] lockReferences takes at most ${MAX_BATCH_ITEMS} references`);
+    const keys = getTableConfig(table).foreignKeys.map(key => key.reference());
+    for (const { column, value, missing } of references) {
+        if (value === null || value === undefined)
+            continue;
+        if (!is(value, eventTextSchema))
+            return missing();
+        const key = keys.find(candidate => candidate.columns[0] === column);
+        const target = key?.foreignColumns[0];
+        invariant(key && target, () => `[@arki/payments] ${column.name} has no foreign key to look the row up by`);
+        const [found] = await db
+            .select({ found: sql `1` })
+            .from(key.foreignTable)
+            .where(eq(target, value))
+            .for('key share');
+        if (!found)
+            return missing();
+    }
+    return undefined;
 }
 //# sourceMappingURL=support.js.map

@@ -9,8 +9,9 @@ import type { AnyRelations } from 'drizzle-orm';
 import type { PgAsyncDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import type { Instant } from '@arki/date';
 import type { CoreTables } from './tables.js';
-import type { FailureOf } from '@arki/failure';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import type { NewWebhookEvent, WebhookEvent, WebhookId } from './types.js';
+import { CounterExhausted } from './failures.js';
 import { WebhookClaimConflict } from './services/webhook-failures.js';
 /** A claimed webhook event: its row, and whether this caller's insert created it. */
 export type WebhookClaim = {
@@ -28,9 +29,10 @@ export type WebhookClaimDb = Pick<PgAsyncDatabase<PgQueryResultHKT, AnyRelations
  * index on `provider_event_id` and the primary key alike.
  *
  * Returns `WebhookClaimConflict` (retryable) when the insert conflicted but no
- * row holds the event's `providerEventId`.
+ * row holds the event's `providerEventId`, and `InvalidInput` (`schema.invalid_input`) before any
+ * query when a value does not fit its column (see `claimableEventSchema`).
  */
-export declare function claimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], data: NewWebhookEvent): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict>>;
+export declare function claimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], data: NewWebhookEvent): Promise<WebhookClaim | FailureOf<typeof WebhookClaimConflict> | SchemaFailure>;
 /**
  * Take over an unprocessed event for one more attempt. True only for the one
  * caller whose update matched.
@@ -44,6 +46,12 @@ export declare function claimWebhookEvent(db: WebhookClaimDb, table: CoreTables[
  * the second matches nothing. `attempts` is the token rather than
  * `last_attempt_at` because two attempts can start within one clock tick (or
  * on servers whose clocks disagree), and a counter cannot repeat.
+ *
+ * Preconditions (anything else throws an invariant failure): `seenAttempts` is the whole `attempts`
+ * value read from the row, and `leaseCutoff` falls in the years 1 to 9999. An `id` no row can hold
+ * (U+0000) takes nothing over: false, with no query. A row the takeover would match whose `attempts`
+ * already holds `INT4_MAX` cannot count one more: `CounterExhausted` (`payments.counter_exhausted`),
+ * and nothing is written.
  */
-export declare function reclaimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], id: WebhookId, seenAttempts: number, leaseCutoff: Instant): Promise<boolean>;
+export declare function reclaimWebhookEvent(db: WebhookClaimDb, table: CoreTables['webhookEvents'], id: WebhookId, seenAttempts: number, leaseCutoff: Instant): Promise<boolean | FailureOf<typeof CounterExhausted>>;
 //# sourceMappingURL=webhook-claims.d.ts.map

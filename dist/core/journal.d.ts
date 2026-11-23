@@ -17,6 +17,7 @@
  * (`CommandNotFound`, `CommandConflict`, `CommandInvalid`): nothing is written.
  */
 import type { CommandInvalid, CommandNotFound, CommandRunner, JournalDefinitions, RootDb, TransactionSource } from '@arki/journal';
+import type { FailureOf } from '@arki/failure';
 import type { SchemaOutput, StandardSchemaV1 } from '@arki/schema';
 import type { CancelPaymentInput, CompletePaymentInput, FailPaymentInput, InitiatePaymentInput, MarkPaymentRequiresActionInput, RecordPaymentDisputeInput, RecordPaymentRefundInput } from './journal/payment.js';
 import type { ActivateSubscriptionInput, CancelSubscriptionInput, ChangeSubscriptionPlanInput, CreateSubscriptionInput, MarkSubscriptionPastDueInput, PauseSubscriptionInput, ReactivateSubscriptionInput, ResumeSubscriptionInput, SetSubscriptionCancelAtPeriodEndInput, SyncSubscriptionInput } from './journal/subscription.js';
@@ -25,6 +26,9 @@ import type { Payment, Subscription } from './types.js';
 import type { PaymentJournal } from './journal/payment.js';
 import type { SubscriptionJournal } from './journal/subscription.js';
 import type { JournalWriteFailure } from './journal/support.js';
+import type { ReferenceNotFound } from './providers/provider-error.js';
+/** A row the write points at (user, customer, plan or subscription) does not exist. */
+type MissingReference = FailureOf<typeof ReferenceNotFound>;
 export { cancelPaymentInputSchema, completePaymentInputSchema, failPaymentInputSchema, initiatePaymentInputSchema, markPaymentRequiresActionInputSchema, recordPaymentDisputeInputSchema, recordPaymentRefundInputSchema, } from './journal/payment.js';
 export { activateSubscriptionInputSchema, cancelSubscriptionInputSchema, changeSubscriptionPlanInputSchema, createSubscriptionInputSchema, markSubscriptionPastDueInputSchema, pauseSubscriptionInputSchema, reactivateSubscriptionInputSchema, resumeSubscriptionInputSchema, setSubscriptionCancelAtPeriodEndInputSchema, syncSubscriptionInputSchema, } from './journal/subscription.js';
 export type { CancelPaymentInput, CompletePaymentInput, FailPaymentInput, InitiatePaymentInput, MarkPaymentRequiresActionInput, RecordPaymentDisputeInput, RecordPaymentRefundInput, } from './journal/payment.js';
@@ -35,7 +39,8 @@ export type { ActivateSubscriptionInput, CancelSubscriptionInput, CreateSubscrip
  * failure the command returned when a rule said no (nothing was written).
  */
 export type CoreWrites = {
-    initiatePayment: (input: InitiatePaymentInput) => Promise<Payment | JournalWriteFailure>;
+    /** `ReferenceNotFound` when the user, customer or subscription has no row. */
+    initiatePayment: (input: InitiatePaymentInput) => Promise<Payment | JournalWriteFailure | MissingReference>;
     completePayment: (input: CompletePaymentInput) => Promise<Payment | JournalWriteFailure | CommandNotFound>;
     failPayment: (input: FailPaymentInput) => Promise<Payment | JournalWriteFailure | CommandNotFound>;
     cancelPayment: (input: CancelPaymentInput) => Promise<Payment | JournalWriteFailure | CommandNotFound>;
@@ -45,15 +50,19 @@ export type CoreWrites = {
     recordPaymentRefund: (input: RecordPaymentRefundInput) => Promise<Payment | JournalWriteFailure | CommandNotFound | CommandInvalid>;
     /** The same dispute and status again writes nothing. */
     recordPaymentDispute: (input: RecordPaymentDisputeInput) => Promise<Payment | JournalWriteFailure | CommandNotFound>;
-    createSubscription: (input: CreateSubscriptionInput) => Promise<Subscription | JournalWriteFailure>;
-    /** Create or update by provider subscription id. An unchanged delivery writes no event. */
-    syncSubscription: (input: SyncSubscriptionInput) => Promise<Subscription | JournalWriteFailure>;
+    /** `ReferenceNotFound` when the user, plan or customer has no row; `CommandConflict` when the provider id is stored. */
+    createSubscription: (input: CreateSubscriptionInput) => Promise<Subscription | JournalWriteFailure | MissingReference>;
+    /**
+     * Create or update by provider subscription id. An unchanged delivery writes no event.
+     * `ReferenceNotFound` when the user, plan or customer has no row.
+     */
+    syncSubscription: (input: SyncSubscriptionInput) => Promise<Subscription | JournalWriteFailure | MissingReference>;
     cancelSubscription: (input: CancelSubscriptionInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
     reactivateSubscription: (input: ReactivateSubscriptionInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
     pauseSubscription: (input: PauseSubscriptionInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
     resumeSubscription: (input: ResumeSubscriptionInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
-    /** The same provider plan again writes nothing. */
-    changeSubscriptionPlan: (input: ChangeSubscriptionPlanInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
+    /** The same provider plan again writes nothing. `ReferenceNotFound` when the plan has no row. */
+    changeSubscriptionPlan: (input: ChangeSubscriptionPlanInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound | MissingReference>;
     /** Set or clear ends at period end without changing the status. */
     setSubscriptionCancelAtPeriodEnd: (input: SetSubscriptionCancelAtPeriodEndInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;
     markSubscriptionPastDue: (input: MarkSubscriptionPastDueInput) => Promise<Subscription | JournalWriteFailure | CommandNotFound>;

@@ -30,8 +30,8 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
     }, z.core.$strip>;
     planInsertSchema: z.ZodObject<{
         id: z.ZodOptional<z.ZodTemplateLiteral<`plan${string}`>>;
-        name: z.ZodCoercedString<unknown>;
-        description: z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>;
+        name: z.ZodString;
+        description: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         tier: z.ZodOptional<z.ZodEnum<{
             basic: "basic";
             enterprise: "enterprise";
@@ -39,24 +39,24 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
             pro: "pro";
         }>>;
         priceMinor: z.ZodNumber;
-        currency: z.ZodString;
+        currency: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodString>>;
         interval: z.ZodOptional<z.ZodEnum<{
             daily: "daily";
             monthly: "monthly";
             weekly: "weekly";
             yearly: "yearly";
         }>>;
-        intervalCount: z.ZodNumber;
-        features: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        intervalCount: z.ZodOptional<z.ZodNumber>;
+        features: z.ZodOptional<z.ZodArray<z.ZodString>>;
         isActive: z.ZodOptional<z.ZodCoercedBoolean<unknown>>;
-        trialPeriodDays: z.ZodOptional<z.ZodNumber>;
-        metadata: z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>;
+        trialPeriodDays: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
         createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     }, z.core.$strip>;
     planUpdateSchema: z.ZodObject<{
-        name: z.ZodOptional<z.ZodCoercedString<unknown>>;
-        description: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>>;
+        name: z.ZodOptional<z.ZodString>;
+        description: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
         tier: z.ZodOptional<z.ZodOptional<z.ZodEnum<{
             basic: "basic";
             enterprise: "enterprise";
@@ -64,18 +64,18 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
             pro: "pro";
         }>>>;
         priceMinor: z.ZodOptional<z.ZodNumber>;
-        currency: z.ZodOptional<z.ZodString>;
+        currency: z.ZodOptional<z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodString>>>;
         interval: z.ZodOptional<z.ZodOptional<z.ZodEnum<{
             daily: "daily";
             monthly: "monthly";
             weekly: "weekly";
             yearly: "yearly";
         }>>>;
-        intervalCount: z.ZodOptional<z.ZodNumber>;
-        features: z.ZodOptional<z.ZodDefault<z.ZodArray<z.ZodString>>>;
+        intervalCount: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        features: z.ZodOptional<z.ZodOptional<z.ZodArray<z.ZodString>>>;
         isActive: z.ZodOptional<z.ZodOptional<z.ZodCoercedBoolean<unknown>>>;
-        trialPeriodDays: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
-        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>>;
+        trialPeriodDays: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodNumber>>>;
+        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>>;
         createdAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         updatedAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
     }, z.core.$strip>;
@@ -94,22 +94,22 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
     customerInsertSchema: z.ZodObject<{
         id: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
         userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
-        providerCustomerId: z.ZodCoercedString<unknown>;
+        providerCustomerId: z.ZodString;
         provider: z.ZodOptional<z.ZodCoercedString<unknown>>;
         email: z.ZodEmail;
-        name: z.ZodOptional<z.ZodString>;
-        defaultPaymentMethodId: z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>;
-        metadata: z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>;
+        name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        defaultPaymentMethodId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
         createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     }, z.core.$strip>;
     customerUpdateSchema: z.ZodObject<{
-        providerCustomerId: z.ZodOptional<z.ZodCoercedString<unknown>>;
+        providerCustomerId: z.ZodOptional<z.ZodString>;
         provider: z.ZodOptional<z.ZodOptional<z.ZodCoercedString<unknown>>>;
         email: z.ZodOptional<z.ZodEmail>;
-        name: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        defaultPaymentMethodId: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>>;
-        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>>;
+        name: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        defaultPaymentMethodId: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>>;
         createdAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         updatedAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
     }, z.core.$strip>;
@@ -144,7 +144,7 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
         planId: z.ZodTemplateLiteral<`plan${string}`>;
         customerId: z.ZodTemplateLiteral<`cust${string}`>;
-        providerSubscriptionId: z.ZodCoercedString<unknown>;
+        providerSubscriptionId: z.ZodString;
         status: z.ZodOptional<z.ZodEnum<{
             active: "active";
             canceled: "canceled";
@@ -157,18 +157,18 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         }>>;
         currentPeriodStart: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
         currentPeriodEnd: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
-        trialStart: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
-        trialEnd: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
-        canceledAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
+        trialStart: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+        trialEnd: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+        canceledAt: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         cancelAtPeriodEnd: z.ZodOptional<z.ZodCoercedBoolean<unknown>>;
-        metadata: z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>;
+        metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
         createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     }, z.core.$strip>;
     subscriptionUpdateSchema: z.ZodObject<{
         planId: z.ZodOptional<z.ZodTemplateLiteral<`plan${string}`>>;
         customerId: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
-        providerSubscriptionId: z.ZodOptional<z.ZodCoercedString<unknown>>;
+        providerSubscriptionId: z.ZodOptional<z.ZodString>;
         status: z.ZodOptional<z.ZodOptional<z.ZodEnum<{
             active: "active";
             canceled: "canceled";
@@ -181,11 +181,11 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         }>>>;
         currentPeriodStart: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         currentPeriodEnd: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
-        trialStart: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
-        trialEnd: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
-        canceledAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
+        trialStart: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>>;
+        trialEnd: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>>;
+        canceledAt: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>>;
         cancelAtPeriodEnd: z.ZodOptional<z.ZodOptional<z.ZodCoercedBoolean<unknown>>>;
-        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>>;
+        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>>;
         createdAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         updatedAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
     }, z.core.$strip>;
@@ -228,9 +228,9 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         subscriptionId: z.ZodOptional<z.ZodNullable<z.ZodTemplateLiteral<`sub${string}`>>>;
         userId: z.ZodCustom<`usr_${string}`, `usr_${string}`>;
         customerId: z.ZodTemplateLiteral<`cust${string}`>;
-        providerPaymentId: z.ZodCoercedString<unknown>;
+        providerPaymentId: z.ZodString;
         amountMinor: z.ZodNumber;
-        currency: z.ZodString;
+        currency: z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodString>>;
         status: z.ZodOptional<z.ZodEnum<{
             canceled: "canceled";
             failed: "failed";
@@ -246,23 +246,23 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
             google_pay: "google_pay";
             paypal: "paypal";
         }>>;
-        description: z.ZodOptional<z.ZodString>;
-        failureReason: z.ZodOptional<z.ZodString>;
-        receiptUrl: z.ZodOptional<z.ZodURL>;
+        description: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        failureReason: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        receiptUrl: z.ZodOptional<z.ZodNullable<z.ZodPipe<z.ZodURL, z.ZodString>>>;
         refunded: z.ZodOptional<z.ZodCoercedBoolean<unknown>>;
-        refundedAmountMinor: z.ZodDefault<z.ZodNumber>;
-        disputeId: z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>;
-        disputeStatus: z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>;
-        metadata: z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>;
+        refundedAmountMinor: z.ZodOptional<z.ZodNumber>;
+        disputeId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        disputeStatus: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
         createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
     }, z.core.$strip>;
     paymentUpdateSchema: z.ZodObject<{
         subscriptionId: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodTemplateLiteral<`sub${string}`>>>>;
         customerId: z.ZodOptional<z.ZodTemplateLiteral<`cust${string}`>>;
-        providerPaymentId: z.ZodOptional<z.ZodCoercedString<unknown>>;
+        providerPaymentId: z.ZodOptional<z.ZodString>;
         amountMinor: z.ZodOptional<z.ZodNumber>;
-        currency: z.ZodOptional<z.ZodString>;
+        currency: z.ZodOptional<z.ZodOptional<z.ZodPipe<z.ZodString, z.ZodString>>>;
         status: z.ZodOptional<z.ZodOptional<z.ZodEnum<{
             canceled: "canceled";
             failed: "failed";
@@ -278,14 +278,14 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
             google_pay: "google_pay";
             paypal: "paypal";
         }>>>;
-        description: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        failureReason: z.ZodOptional<z.ZodOptional<z.ZodString>>;
-        receiptUrl: z.ZodOptional<z.ZodOptional<z.ZodURL>>;
+        description: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        failureReason: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        receiptUrl: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodPipe<z.ZodURL, z.ZodString>>>>;
         refunded: z.ZodOptional<z.ZodOptional<z.ZodCoercedBoolean<unknown>>>;
-        refundedAmountMinor: z.ZodOptional<z.ZodDefault<z.ZodNumber>>;
-        disputeId: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>>;
-        disputeStatus: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodCoercedString<unknown>>>>;
-        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("drizzle-orm").Json, unknown, z.core.$ZodTypeInternals<import("drizzle-orm").Json, unknown>>>>>;
+        refundedAmountMinor: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
+        disputeId: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        disputeStatus: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
+        metadata: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>>;
         createdAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         updatedAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
     }, z.core.$strip>;
@@ -312,9 +312,9 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         data: z.ZodRecord<z.ZodString, z.ZodUnknown>;
         processed: z.ZodOptional<z.ZodCoercedBoolean<unknown>>;
         processedAt: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
-        attempts: z.ZodDefault<z.ZodNumber>;
+        attempts: z.ZodOptional<z.ZodNumber>;
         lastAttemptAt: z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
-        errorMessage: z.ZodOptional<z.ZodString>;
+        errorMessage: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         sourceIp: z.ZodOptional<z.ZodString>;
         createdAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
         updatedAt: z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>;
@@ -326,9 +326,9 @@ declare function buildCoreDerivedSchemas({ plans, customers, subscriptions, paym
         data: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
         processed: z.ZodOptional<z.ZodOptional<z.ZodCoercedBoolean<unknown>>>;
         processedAt: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>>;
-        attempts: z.ZodOptional<z.ZodDefault<z.ZodNumber>>;
+        attempts: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
         lastAttemptAt: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>>;
-        errorMessage: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+        errorMessage: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
         sourceIp: z.ZodOptional<z.ZodOptional<z.ZodString>>;
         createdAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;
         updatedAt: z.ZodOptional<z.ZodOptional<z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>>>;

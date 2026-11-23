@@ -1,6 +1,7 @@
 import { userIdSchema } from './user-id.js';
 import { z } from '@arki/contracts';
 import { instantSchema } from '@arki/date/zod';
+import { INT4_MAX, MAX_BATCH_ITEMS, holdsLoneSurrogate, pgInstantSchema, pgJsonRecordSchema, pgTextSchema, pgVarcharSchema } from './pg-values.js';
 import { refundIdSchema } from '../refunds/primitives.js';
 import { moneyJsonSchema, positiveMoneySchema, priceSchema } from './money.js';
 import { billingIntervalValues, customerIdSchema, paymentIdSchema, paymentMethodTypeValues, paymentProviderValues, paymentStatusValues, planIdSchema, planTierValues, subscriptionIdSchema, subscriptionStatusValues, webhookEventTypeValues, webhookIdSchema, } from './primitives.js';
@@ -14,26 +15,31 @@ export const paymentMethodTypeSchema = z.enum(paymentMethodTypeValues);
 export const webhookEventTypeSchema = z.enum(webhookEventTypeValues);
 // API input schemas
 export const createPlanInputSchema = z.object({
-    name: z.string().min(1).max(255),
-    description: z.string().max(1000).optional(),
+    name: pgVarcharSchema(255).min(1),
+    description: pgTextSchema.max(1000).optional(),
     tier: planTierSchema,
     /** A free plan costs zero */
     price: priceSchema,
     interval: billingIntervalSchema,
-    intervalCount: z.number().positive().max(365).default(1),
-    features: z.array(z.string()).default([]),
-    trialPeriodDays: z.number().positive().max(365).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    intervalCount: z.number().int().positive().max(365).default(1),
+    /** Stored in a jsonb column: no U+0000 and no lone surrogate in a feature */
+    features: z
+        .array(pgTextSchema)
+        .max(MAX_BATCH_ITEMS)
+        .refine(features => !holdsLoneSurrogate(features), 'A feature cannot contain a lone surrogate (such as U+D800 alone)')
+        .default([]),
+    trialPeriodDays: z.number().int().positive().max(365).optional(),
+    metadata: pgJsonRecordSchema.optional(),
 });
 export const updatePlanInputSchema = createPlanInputSchema.partial().omit({ tier: true });
 export const createCustomerInputSchema = z.object({
     userId: userIdSchema,
-    email: z.email(),
-    name: z.string().min(1).max(255).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    email: z.email().max(255),
+    name: pgVarcharSchema(255).min(1).optional(),
+    metadata: pgJsonRecordSchema.optional(),
 });
 export const updateCustomerInputSchema = createCustomerInputSchema.partial().omit({ userId: true }).extend({
-    defaultPaymentMethodId: z.string().optional(),
+    defaultPaymentMethodId: pgVarcharSchema(255).optional(),
 });
 const customerDetailsSchema = z
     .object({
@@ -52,6 +58,7 @@ const customerDetailsSchema = z
         type: z.string(),
         value: z.string(),
     }))
+        .max(MAX_BATCH_ITEMS)
         .optional(),
 })
     .optional();
@@ -59,15 +66,15 @@ export const createSubscriptionInputSchema = z.object({
     userId: userIdSchema,
     planId: planIdSchema,
     paymentMethodId: z.string().optional(),
-    trialPeriodDays: z.number().positive().max(365).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    trialPeriodDays: z.number().int().positive().max(365).optional(),
+    metadata: pgJsonRecordSchema.optional(),
     customerDetails: customerDetailsSchema,
 });
 export const updateSubscriptionInputSchema = z
     .object({
     planId: planIdSchema.optional(),
     paymentMethodId: z.string().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    metadata: pgJsonRecordSchema.optional(),
     cancelAtPeriodEnd: z.boolean().optional(),
 })
     .refine(data => data.planId !== undefined || data.cancelAtPeriodEnd !== undefined, {
@@ -83,13 +90,13 @@ export const createPaymentInputSchema = z.object({
     userId: userIdSchema,
     amount: positiveMoneySchema,
     paymentMethodId: z.string().min(1),
-    description: z.string().max(500).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    description: pgTextSchema.max(500).optional(),
+    metadata: pgJsonRecordSchema.optional(),
 });
 export const refundPaymentInputSchema = z.object({
     amount: positiveMoneySchema.optional(),
     reason: z.string().max(500).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
+    metadata: pgJsonRecordSchema.optional(),
 });
 export const createPaymentIntentInputSchema = z.object({
     amount: positiveMoneySchema,
@@ -107,8 +114,9 @@ export const webhookInputSchema = z.object({
 });
 // Query parameter schemas
 export const paginationSchema = z.object({
-    limit: z.number().min(1).max(100).default(20),
-    offset: z.number().min(0).default(0),
+    /** Whole numbers: Postgres refuses a fraction in LIMIT or OFFSET (SQLSTATE 22P02). */
+    limit: z.number().int().min(1).max(100).default(20),
+    offset: z.number().int().min(0).max(INT4_MAX).default(0),
 });
 export const subscriptionQuerySchema = paginationSchema.extend({
     status: subscriptionStatusSchema.optional(),
@@ -120,8 +128,8 @@ export const paymentQuerySchema = paginationSchema.extend({
     subscriptionId: subscriptionIdSchema.optional(),
     customerId: customerIdSchema.optional(),
     userId: userIdSchema.optional(),
-    startDate: instantSchema().optional(),
-    endDate: instantSchema().optional(),
+    startDate: pgInstantSchema().optional(),
+    endDate: pgInstantSchema().optional(),
 });
 export const planQuerySchema = paginationSchema.extend({
     tier: planTierSchema.optional(),
@@ -136,16 +144,17 @@ export const webhookEventQuerySchema = paginationSchema.extend({
     provider: paymentProviderSchema.optional(),
     eventType: webhookEventTypeSchema.optional(),
     processed: z.boolean().optional(),
-    startDate: instantSchema().optional(),
-    endDate: instantSchema().optional(),
+    startDate: pgInstantSchema().optional(),
+    endDate: pgInstantSchema().optional(),
 });
 // Analytics schemas
 export const analyticsQuerySchema = z.object({
-    startDate: instantSchema().optional(),
-    endDate: instantSchema().optional(),
+    startDate: pgInstantSchema().optional(),
+    endDate: pgInstantSchema().optional(),
     groupBy: z.enum(['day', 'week', 'month', 'year']).optional().default('month'),
     metrics: z
         .array(z.enum(['revenue', 'subscriptions', 'churn', 'mrr', 'arr']))
+        .max(MAX_BATCH_ITEMS)
         .optional()
         .default(['revenue', 'subscriptions']),
 });
@@ -211,7 +220,7 @@ export const healthCheckSchema = z.object({
     details: z.string().optional(),
 });
 export const subscriptionAccessSchema = z.object({
-    requiredTiers: z.array(planTierSchema).optional().default([]),
+    requiredTiers: z.array(planTierSchema).max(MAX_BATCH_ITEMS).optional().default([]),
 });
 // ============================================
 // Router API Input Schemas (wrapper shapes)
@@ -246,6 +255,7 @@ export const subscriptionPreviewTaxInputSchema = z.object({
             type: z.string(),
             value: z.string(),
         }))
+            .max(MAX_BATCH_ITEMS)
             .optional(),
     }),
 });
@@ -288,7 +298,7 @@ export const requestRefundInputSchema = z.object({
     internalNotes: z.string().optional(),
 });
 export const listRefundsInputSchema = z.object({
-    limit: z.number().min(1).max(100).default(50),
+    limit: z.number().int().min(1).max(100).default(50),
     status: z.enum(['pending', 'approved', 'processing', 'completed', 'failed', 'rejected', 'canceled']).optional(),
 });
 export const getRefundInputSchema = z.object({
@@ -301,18 +311,18 @@ export const approveRefundInputSchema = z.object({
 export const rejectRefundInputSchema = z.object({
     refundId: refundIdSchema,
     rejectedBy: userIdSchema.optional(),
-    reason: z.string(),
+    reason: pgTextSchema,
 });
 // Analytics router
 export const getAnalyticsMetricsInputSchema = z.object({
-    startDate: instantSchema().optional(),
-    endDate: instantSchema().optional(),
+    startDate: pgInstantSchema().optional(),
+    endDate: pgInstantSchema().optional(),
 });
 // Proration router
 export const prorationPreviewInputSchema = z.object({
     subscriptionId: subscriptionIdSchema,
     newPlanId: planIdSchema,
-    changeDate: instantSchema().optional(),
+    changeDate: pgInstantSchema().optional(),
     prorationMode: z.enum(['immediate', 'next_cycle']).default('immediate'),
 });
 //# sourceMappingURL=contracts.js.map

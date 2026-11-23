@@ -1,12 +1,15 @@
 import { fromDate, isAfter, isBefore, now, toDate, toMillis } from '@arki/date';
 import { isFailure } from '@arki/failure';
-import { getLogger } from '@arki/log';
 import { max, Money } from '@arki/money';
 import { formatMoney } from '@arki/money/format';
+import { z } from '@arki/contracts';
+import { parse } from '@arki/schema';
 import { EffectiveDateOutsidePeriod, PlanCurrencyMismatch, PlanInactive } from '../failures.js';
 import { planPrice } from '../money.js';
+import { MAX_BATCH_ITEMS } from '../pg-values.js';
 import { ReferenceNotFound } from '../providers/provider-error.js';
-const logger = getLogger('arki:payments:proration');
+/** The plan ids of one `previewMultiplePlanChanges` call: at most `MAX_BATCH_ITEMS`. */
+const planIdBatchSchema = z.array(z.string()).max(MAX_BATCH_ITEMS);
 /** A change charged and credited for the time left, starting now. */
 const DEFAULT_PRORATION = { prorationBehavior: 'create_prorations' };
 export class ProrationService {
@@ -71,25 +74,29 @@ export class ProrationService {
         return preview;
     }
     /**
-     * A preview per plan. A plan whose preview is refused (inactive, another currency, unknown) is
-     * left out and logged at WARN with its failure code.
+     * A preview per plan, for comparing plans. At most `MAX_BATCH_ITEMS` (1,000) plan ids: more
+     * returns `schema.invalid_input` before anything is read. `ReferenceNotFound` (kind `subscription`)
+     * when no subscription has this id. Otherwise `previews` holds each plan that can be previewed, by plan id,
+     * and `refused` each plan that cannot, with the failure `previewSubscriptionChange` returned for it
+     * (inactive, another currency, unknown), in the order asked.
      */
     async previewMultiplePlanChanges(subscriptionId, planIds, options = DEFAULT_PRORATION) {
+        const checked = parse(planIdBatchSchema, planIds);
+        if (isFailure(checked))
+            return checked;
+        const subscription = await this.paymentRepository.findSubscriptionById(subscriptionId);
+        if (!subscription)
+            return ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
         const previews = {};
+        const refused = [];
         for (const planId of planIds) {
             const preview = await this.previewSubscriptionChange(subscriptionId, planId, options);
-            if (isFailure(preview)) {
-                logger.warn('No preview of plan {planId} for subscription {subscriptionId}: {code}', {
-                    planId,
-                    subscriptionId,
-                    code: preview.code,
-                    failure: preview,
-                });
-                continue;
-            }
-            previews[planId] = preview;
+            if (isFailure(preview))
+                refused.push({ planId, failure: preview });
+            else
+                previews[planId] = preview;
         }
-        return previews;
+        return { previews, refused };
     }
     /** Whether to change now or at the next billing cycle, or a failure of `calculateProration`. */
     async getOptimalChangeTimings(subscriptionId, newPlanId) {

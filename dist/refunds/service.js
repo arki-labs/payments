@@ -3,23 +3,20 @@ import { toMillis } from '@arki/date';
 import { TransactionDefect, TransactionRejected } from '@arki/db/errors';
 import { isFailure } from '@arki/failure';
 import { isJournalError } from '@arki/journal';
-import { getLogger } from '@arki/log';
 import { sum } from '@arki/money';
 import { currencyCodeSchema } from '@arki/money/zod';
 import { parse } from '@arki/schema';
-import { misconfigured } from '../core/failures.js';
+import { PaymentsConfigurationInvalid } from '../core/failures.js';
 import { nonNegativeMoneySchema, paymentAmount } from '../core/money.js';
 import { refundRejectionReasonSchema } from './contracts.js';
 import { DuplicatePendingRefund, RefundAmountExceeded, RefundCurrencyMismatch, RefundInvalidState, RefundNotFound, RefundWindowExceeded, TransactionNotFound, } from './failures.js';
 import { createRefundRepository, refundAmountOf } from './repository.js';
 import { pendingRefundIndexName } from './tables.js';
-/** Logs ids only, never refund data. */
-const logger = getLogger('arki:payments');
 /**
  * The largest refund approved without a person, per currency: `{ USD: '10.00', JPY: '1500' }`.
  * Each amount is exact text in its own currency, so 10 USD and 1500 JPY are both "small".
  * A currency missing here has no small-refund rule: its refunds wait for a person.
- * Parsed once when the service is built; a bad code or amount throws there, not on a refund.
+ * Parsed once when the service is built; a bad code or amount is returned there as `payments.configuration_invalid`, not on a refund.
  */
 export const refundAutoApproveLimitsSchema = z.record(currencyCodeSchema, z.string()).transform((limits, ctx) => {
     const parsed = new Map();
@@ -34,6 +31,8 @@ export const refundAutoApproveLimitsSchema = z.record(currencyCodeSchema, z.stri
     }
     return parsed;
 });
+/** The refund window: whole milliseconds, 0 or more. Checked once when the service is built. */
+const refundWindowMsSchema = z.int().min(0);
 /** About ten dollars' worth where it is set; other currencies wait for a person. */
 export const DEFAULT_REFUND_AUTO_APPROVE_LIMITS = {
     USD: '10.00',
@@ -77,25 +76,39 @@ export class RefundService {
     refundRepository;
     writes;
     paymentRepository;
-    notificationService;
     refundWindow;
     systemUserId;
     autoApproveLimits;
-    constructor(refundRepository, writes, paymentRepository, config, 
-    /** Sends the customer's rejection mail only. The approvers' mail is an effect: `createRefundEffects`. */
-    notificationService) {
+    constructor(refundRepository, writes, paymentRepository, systemUserId, refundWindow, autoApproveLimits) {
         this.refundRepository = refundRepository;
         this.writes = writes;
         this.paymentRepository = paymentRepository;
-        this.notificationService = notificationService;
-        this.refundWindow = config.refundWindowMs ?? 90 * 24 * 60 * 60 * 1000;
-        this.systemUserId = config.systemUserId;
-        // A bad limit is a configuration fault: `payments.configuration_invalid` when the service is built
+        this.systemUserId = systemUserId;
+        this.refundWindow = refundWindow;
+        this.autoApproveLimits = autoApproveLimits;
+    }
+    /**
+     * Build the service. A bad setting is returned as `PaymentsConfigurationInvalid`
+     * (`payments.configuration_invalid`): a `refundWindowMs` that is not a whole number of 0 or more
+     * (a NaN window compared false and turned the window off), or an `autoApproveLimits` with a bad
+     * currency code or amount.
+     */
+    static create(refundRepository, writes, paymentRepository, config) {
+        const window = refundWindowMsSchema.safeParse(config.refundWindowMs ?? 90 * 24 * 60 * 60 * 1000);
+        if (!window.success) {
+            return PaymentsConfigurationInvalid({
+                setting: 'refunds.refundWindowMs',
+                problem: `must be a whole number of milliseconds, 0 or more; got ${String(config.refundWindowMs)}`,
+            });
+        }
         const limits = refundAutoApproveLimitsSchema.safeParse(config.autoApproveLimits ?? DEFAULT_REFUND_AUTO_APPROVE_LIMITS);
         if (!limits.success) {
-            throw misconfigured('refunds.autoApproveLimits', limits.error.issues.map(issue => `${issue.path.join('.') || '(limits)'}: ${issue.message}`).join('; '));
+            return PaymentsConfigurationInvalid({
+                setting: 'refunds.autoApproveLimits',
+                problem: limits.error.issues.map(issue => `${issue.path.join('.') || '(limits)'}: ${issue.message}`).join('; '),
+            });
         }
-        this.autoApproveLimits = limits.data;
+        return new RefundService(refundRepository, writes, paymentRepository, config.systemUserId, window.data, limits.data);
     }
     async requestRefund(data) {
         const refused = await this.validateRefundEligibility(data.paymentId, data.amount);
@@ -148,11 +161,7 @@ export class RefundService {
             rejectedBy: data.rejectedBy,
             rejectionReason: reason,
         });
-        if (isFailure(rejectedRefund))
-            return rejectedRefund;
-        if (this.notificationService) {
-            await this.notifyCustomer(rejectedRefund, 'rejected');
-        }
+        // The customer hears from the `refund-rejection-notice` effect (`createRefundEffects`), after the commit
         return rejectedRefund;
     }
     /** A refund that can still be approved or rejected. A missing one and one past `pending` are different failures. */
@@ -210,28 +219,6 @@ export class RefundService {
         const limit = this.autoApproveLimits.get(amount.currency.code);
         return limit !== undefined && amount.lte(limit);
     }
-    async notifyCustomer(refund, event) {
-        if (this.notificationService?.sendRefundStatusUpdate) {
-            try {
-                const sent = await this.notificationService.sendRefundStatusUpdate(refund, event);
-                if (isFailure(sent)) {
-                    logger.warn('Refund {event} mail for {refundId} was not sent: {code}', {
-                        refundId: refund.id,
-                        event,
-                        code: sent.code,
-                        failure: sent,
-                    });
-                }
-            }
-            catch (error) {
-                logger.error('Refund {event} mail for {refundId} was not sent: {error}', {
-                    refundId: refund.id,
-                    event,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
-        }
-    }
     // Analytics methods
     async getRefundMetrics(startDate, endDate) {
         return this.refundRepository.getRefundMetrics(startDate, endDate);
@@ -243,7 +230,8 @@ export class RefundService {
         return this.refundRepository.searchRefunds(filters);
     }
 }
-export function createRefundService(db, tables, writes, paymentRepository, config, notificationService) {
-    return new RefundService(createRefundRepository(db, tables), writes, paymentRepository, config, notificationService);
+/** A `RefundService` over the refunds table, or the `PaymentsConfigurationInvalid` of `RefundService.create`. */
+export function createRefundService(db, tables, writes, paymentRepository, config) {
+    return RefundService.create(createRefundRepository(db, tables), writes, paymentRepository, config);
 }
 //# sourceMappingURL=service.js.map

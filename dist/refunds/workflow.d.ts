@@ -13,8 +13,10 @@
  * 4. `record`: completes or fails the row from what Stripe says. A refund still on its way throws, so the step's
  *    backoff asks Stripe again later. A refund Stripe fails after the row is `completed` stays completed: the run
  *    ends `completed` with `lateFailure`, the error is logged, and support is alerted.
- * 5. `notify`: tells the customer the refund is completed, or support that it failed. The mailer takes no key, so a
- *    crash after the send and before the checkpoint sends the mail a second time.
+ * 5. `notify`: tells the customer the refund is completed, or support that it failed. The refund is done either
+ *    way, so a mail that did not go out is not retried: its failure code is the run's `notificationFailure`, for an
+ *    operator screen to show and act on. The mailer takes no key, so a crash after the send and before the
+ *    checkpoint sends the mail a second time.
  *
  * Stripe's answers a caller must handle (`ReferenceNotFound`, `IdempotencyConflict`) are returned, so the step dies at
  * once: the run waits, stuck, for an operator (`journal.workflows.retryStep` or `resolveStep`). A throw is retried
@@ -42,6 +44,7 @@ export declare function createRefundWorkflow<Meta extends StandardSchemaV1<unkno
     providerRefundId: string;
     outcome: "completed" | "failed";
     lateFailure?: string | undefined;
+    notificationFailure?: string | undefined;
 }, {
     readonly "stripe.refund.settled": z.ZodObject<{
         providerRefundId: z.ZodString;
@@ -60,6 +63,7 @@ export declare function createRefundWorkflow<Meta extends StandardSchemaV1<unkno
     providerRefundId: string;
     outcome: "completed" | "failed";
     lateFailure?: string | undefined;
+    notificationFailure?: string | undefined;
 }, {
     readonly begin?: {
         paymentId: `pay${string}`;
@@ -92,6 +96,7 @@ export declare function createRefundWorkflow<Meta extends StandardSchemaV1<unkno
     providerRefundId: string;
     outcome: "completed" | "failed";
     lateFailure?: string | undefined;
+    notificationFailure?: string | undefined;
 }, {
     readonly begin?: {
         paymentId: `pay${string}`;

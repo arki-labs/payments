@@ -10,7 +10,9 @@ import type { Attributes } from '@opentelemetry/api';
 /**
  * Runs one payments operation inside a `payments.<operation>` span and counts it in
  * `payments.operations` by `operation` and `outcome` (`success`, `failure` for a returned
- * `@arki/failure` value, `error` for a throw). A returned failure also sets `payments.failure_code`.
+ * `@arki/failure` value, `error` for a throw). A returned failure also sets `failure.code`. Its span status
+ * is error only when it is a fault (`isFault`, status 500 or higher, such as a provider outage); a 4xx
+ * such as a declined card is an answer, not a fault, so its status stays unset. A throw sets error.
  */
 export declare function observePayments<T>(operation: string, attributes: Attributes, execute: () => Promise<T>): Promise<T>;
 //# sourceMappingURL=telemetry.d.ts.map

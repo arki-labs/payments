@@ -1,6 +1,6 @@
 import { idColumns } from '@arki/db/id';
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, check, integer, jsonb, real, text, varchar } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, integer, jsonb, real, text, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 import { instant } from '@arki/db/temporal';
 import { customerIdFactory, paymentIdFactory, subscriptionIdFactory } from '../core/primitives.js';
 import { communicationChannelValues, communicationStatusValues, customerRiskProfileIdFactory, customerSegmentIdFactory, customerSegmentTypeValues, dunningCampaignIdFactory, dunningCampaignStatusValues, dunningCampaignTypeValues, dunningCommunicationIdFactory, dunningExecutionIdFactory, dunningTemplateIdFactory, executionStatusValues, riskCategoryValues, } from './primitives.js';
@@ -138,7 +138,10 @@ function buildDunningTables({ schema, customerIdRef, paymentIdRef, subscriptionI
         metadata: jsonb('metadata').$type(),
         createdAt: instant('created_at').notNull().default(sql `now()`),
         updatedAt: instant('updated_at').notNull().default(sql `now()`),
-    });
+    }, (table) => [
+        // One profile per customer: `upsert` replaces it in one statement, so concurrent first writes cannot make two
+        uniqueIndex('customer_risk_profiles_customer_id_idx').on(table.customerId),
+    ]);
     const dunningCampaignAnalytics = schema.table('dunning_campaign_analytics', {
         id: varchar('id', { length: 255 }).primaryKey(),
         campaignId: idColumns(dunningCampaignIdFactory).foreignKey('campaign_id', () => dunningCampaigns.id, { onDelete: 'cascade' }),

@@ -5,7 +5,7 @@
  * from `./providers/provider-error.js`.
  */
 import { z } from '@arki/contracts';
-import { defineFailure, UnexpectedFailure } from '@arki/failure';
+import { defineFailure } from '@arki/failure';
 /** What a caller asked a subscription to do, in `SubscriptionInvalidState`. */
 const subscriptionActionSchema = z.enum([
     'update',
@@ -131,6 +131,55 @@ export const WebhookEventNotFound = /* @__PURE__ */ defineFailure('payments.webh
     message: 'Webhook event {webhookId} not found',
     remediation: 'Check the webhook event id.',
 });
+/**
+ * The retry service has no strategy with this name, so `updateRetryStrategy` changed nothing.
+ *
+ * @fix Check the name against `getRetryStrategies()`, or add the strategy first with `addRetryStrategy`.
+ * @verify bun run test -- src/core/services/payment-retry-service.test.ts
+ */
+export const RetryStrategyNotFound = /* @__PURE__ */ defineFailure('payments.retry_strategy_not_found', {
+    status: 404,
+    data: z.object({ name: z.string() }),
+    message: 'Retry strategy {name} not found',
+    remediation: 'Check the name against the retry service strategies, or add the strategy first.',
+});
+/**
+ * A plan with this id is already stored, so `createPlan` wrote nothing.
+ *
+ * @fix Update the stored plan (`updatePlan`), or leave `id` out so a new one is made.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export const PlanAlreadyExists = /* @__PURE__ */ defineFailure('payments.plan_already_exists', {
+    status: 409,
+    data: z.object({ planId: z.string() }),
+    message: 'Plan {planId} already exists',
+    remediation: 'Update the stored plan, or leave the id out so a new one is made.',
+});
+/**
+ * The customer cannot be deleted: a row that may not go with it (a refund of one of its payments,
+ * or an app row) still points at it or at one of its payments. Nothing was deleted.
+ *
+ * @fix Keep the customer, or remove what points at it first.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export const CustomerInUse = /* @__PURE__ */ defineFailure('payments.customer_in_use', {
+    status: 409,
+    data: z.object({ customerId: z.string() }),
+    message: 'Customer {customerId} cannot be deleted: other rows still point at it or at its payments',
+    remediation: 'Keep the customer, or remove what points at it first.',
+});
+/**
+ * Another webhook event already holds this provider event id (or this webhook id). Nothing was written.
+ *
+ * @fix Read the stored event (`findWebhookEventByProviderEventId`); a delivery handler claims events with `claimWebhookEvent`.
+ * @verify bun run test -- src/core/repository.customers.test.ts
+ */
+export const WebhookEventExists = /* @__PURE__ */ defineFailure('payments.webhook_event_exists', {
+    status: 409,
+    data: z.object({ providerEventId: z.string() }),
+    message: 'A webhook event already holds provider event {providerEventId}',
+    remediation: 'Read the stored event; claim deliveries with claimWebhookEvent.',
+});
 /** Which notification did not go out, in `NotificationFailed`. */
 const notificationKindSchema = z.enum(['refund_approval_request', 'refund_status_update', 'refund_failure_alert']);
 /**
@@ -154,8 +203,8 @@ export const NotificationFailed = /* @__PURE__ */ defineFailure('payments.notifi
 });
 /**
  * The host app's setup of a payments service cannot work: a capability a configured step needs was
- * not passed, or a setting is empty or malformed. Thrown when the service is built (at boot), never
- * returned later as a silent no-op.
+ * not passed, or a setting is empty or malformed. Returned when the service is built (at boot) by its
+ * `create` or factory function, never thrown, and never deferred to a later call as a silent no-op.
  *
  * @fix Pass the capability or setting that `setting` names when the app builds the service.
  * @verify bun run test -- src/core/services/dunning-service.test.ts src/dunning/communication-service.test.ts
@@ -166,11 +215,29 @@ export const PaymentsConfigurationInvalid = /* @__PURE__ */ defineFailure('payme
     message: 'Payments setting {setting} is invalid: {problem}',
     remediation: 'Pass the capability or setting it names when the app builds the service.',
 });
+/** Which counter column is full, in `CounterExhausted`. */
+const counterSchema = z.enum([
+    'retryCount',
+    'attempts',
+    'paymentsRecovered',
+    'executions',
+    'customersReached',
+    'communicationsSent',
+]);
 /**
- * The thrown form of `payments.configuration_invalid`, for a setting the app passed when it built a
- * service. Boot checks throw this; nothing at runtime does.
+ * A counter column already holds 2^31 - 1 (`INT4_MAX`), the most an `integer` column can, or would pass
+ * it with what the call adds, so it cannot go up. Nothing was written. `counter` names the column
+ * (`retryCount` of a dunning execution, `attempts` of a webhook event, or `paymentsRecovered`,
+ * `executions`, `customersReached` or `communicationsSent` of a campaign's analytics row) and `id` the
+ * row. The update checks the column itself, so a full counter is never raised by a race between a read and a write.
+ *
+ * @fix Stop retrying the row: a counter this high was set by hand, since a correct caller stops long before it.
+ * @verify bun run test -- src/dunning/campaign-service.test.ts src/core/repository.customers.test.ts
  */
-export function misconfigured(setting, problem) {
-    return new UnexpectedFailure(PaymentsConfigurationInvalid({ setting, problem }));
-}
+export const CounterExhausted = /* @__PURE__ */ defineFailure('payments.counter_exhausted', {
+    status: 409,
+    data: z.object({ counter: counterSchema, id: z.string() }),
+    message: 'The {counter} counter of {id} is full and cannot go up',
+    remediation: 'Stop retrying the row; a correct caller stops long before the counter is full.',
+});
 //# sourceMappingURL=failures.js.map

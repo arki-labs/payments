@@ -36,7 +36,7 @@ Naming pattern you will see everywhere:
 - Core: `paymentProviderValues`, `subscriptionStatusValues`, `paymentStatusValues`, `billingIntervalValues`, `planTierValues`, `paymentMethodTypeValues`, `webhookEventTypeValues` and the matching `paymentProviderSchema`, `subscriptionStatusSchema`, `paymentStatusSchema`, `billingIntervalSchema`, `planTierSchema`, `paymentMethodTypeSchema`, `webhookEventTypeSchema`.
 - Refunds: `refundReasonValues`, `refundStatusValues`, `refundReasonSchema`, `refundStatusSchema`. `REFUND_SETTLED_STATUSES` is the subset of Stripe refund statuses that are final. `pending` and `requires_action` are not in it.
 - Dunning: `dunningCampaignTypeValues`, `dunningCampaignStatusValues`, `communicationChannelValues`, `communicationStatusValues`, `executionStatusValues`, `customerSegmentTypeValues`, `riskCategoryValues`, with `dunningCampaignTypeSchema`, `dunningCampaignStatusSchema`, `communicationChannelSchema`, `communicationStatusSchema`, `executionStatusSchema`, `customerSegmentTypeSchema`, `riskCategorySchema`.
-- Tax: `taxConfigStatusValues`, `taxCalculationModeValues`, `taxBusinessTypeValues`, `jurisdictionTypeValues`, `exemptionTypeValues`, `exemptionStatusValues`, `taxRecordTypeValues`, with `taxConfigStatusSchema`, `taxCalculationModeSchema`, `taxBusinessTypeSchema`, `jurisdictionTypeSchema`, `exemptionTypeSchema`, `exemptionStatusSchema`.
+- Tax: `taxConfigStatusValues`, `taxCalculationModeValues`, `taxBusinessTypeValues`, `jurisdictionTypeValues`, `exemptionTypeValues`, `exemptionStatusValues`, `taxRecordTypeValues`, `taxPlanIntervalValues` (the plan intervals `calculateSubscriptionTaxInputSchema` takes: monthly, yearly, weekly, daily), `taxAuditActionValues` and `taxAuditEntityValues` (the action and the entity of an audit entry), with `taxConfigStatusSchema`, `taxCalculationModeSchema`, `taxBusinessTypeSchema`, `jurisdictionTypeSchema`, `exemptionTypeSchema`, `exemptionStatusSchema`.
 - Dunning shapes: `campaignTriggerSchema` (when a campaign starts), `campaignSettingsSchema` (its retry and timing settings), `communicationTemplateSchema` (one message template), `segmentCriteriaSchema` (the rules of a customer segment), `riskScoreSchema` (a score with its category), `dunningCampaignTemplateInputSchema` and `dunningCampaignTemplatesSchema` (ready-made campaign templates you can offer).
 
 ## Money
@@ -50,7 +50,7 @@ Amounts are `Money`. Columns hold whole minor units.
 - `fromStoredNumber`: reads an old major-unit float from a journal event written before the minor-unit columns, rounded half-even to the currency's decimals. You need it when you replay old events.
 - `paymentAmount`, `planPrice`: a payment row's or plan row's amount as `Money`.
 - `refundAmountOf`: a refund row's amount as `Money`. The currency defaults to USD, as the column does.
-- `sumMinorByCurrency`: sums `(currency, minor units)` pairs into one balance per currency. Use it for analytics so currencies never mix.
+- `sumMinorByCurrency`: sums `(currency, minor units)` pairs into one balance per currency, or returns `schema.invalid_input` for a row with an unknown currency or units that are not a safe whole number. Use it for analytics so currencies never mix.
 - `DEFAULT_ANALYTICS_CURRENCY`: `'USD'`. Counters with no payment behind them (customers reached, messages sent) go to this currency row with zero money.
 - `analyticsRowId`: the row id of one campaign, one day (`YYYY-MM-DD`) and one currency.
 
@@ -71,33 +71,34 @@ These are the inputs of the journal commands behind the services. A command retu
 - Subscriptions: `syncSubscriptionInputSchema` (one whole provider snapshot, so a webhook is one event), `activateSubscriptionInputSchema`, `pauseSubscriptionInputSchema`, `resumeSubscriptionInputSchema`, `reactivateSubscriptionInputSchema`, `changeSubscriptionPlanInputSchema`, `setSubscriptionCancelAtPeriodEndInputSchema`, `markSubscriptionPastDueInputSchema`.
 - Refunds: `processRefundInputSchema`, `completeRefundInputSchema`, `failRefundInputSchema`.
 - Journal types: `CoreJournal` (what `createCoreJournal` returns), `PaymentJournal` and `SubscriptionJournal` (its two halves), `CoreWrites` and `RefundWrites` (the write functions the services call), and `JournalWriteFailure` (what any write can return besides the row and its own refusal). Each event has a name too: `PaymentInitiatedEvent`, `PaymentInitiatedV2Event`, `PaymentCompletedEvent`, `PaymentFailedEvent`, `PaymentCanceledEvent`, `PaymentRequiresActionEvent`, `PaymentRefundRecordedEvent`, `PaymentDisputeRecordedEvent`, `SubscriptionCreatedEvent`, `SubscriptionSyncedEvent`, `SubscriptionActivatedEvent`, `SubscriptionCanceledEvent`, `SubscriptionReactivatedEvent`, `SubscriptionPausedEvent`, `SubscriptionResumedEvent`, `SubscriptionPlanChangedEvent`, `SubscriptionCancelAtPeriodEndSetEvent`, `SubscriptionPastDueEvent`, `RefundRequestedEvent`, `RefundRequestedV2Event`, `RefundApprovedEvent`, `RefundRejectedEvent`, `RefundProcessedEvent`, `RefundCompletedEvent`, `RefundFailedEvent`.
-- Reducer helpers from `core/journal/support`: `toIso` (a time as ISO text for event data), `toInstant` and `toNullableInstant` (the `Instant` a reducer builds from it), `sameJson` (deep JSON equality, key order ignored, so you can skip a write that changes nothing), `storedReal` (the number a `real` column gives back; a reducer must return this value or the journal rejects the write with `VALUE_MISMATCH`), `writtenRow` (the row a command returned, or the failure it returned, with the storage-only `version` removed).
+- Reducer helpers from `core/journal/support`: `toIso` (a time as ISO text for event data), `toInstant` and `toNullableInstant` (the `Instant` a reducer builds from it), `sameJson` (deep JSON equality, key order ignored, so you can skip a write that changes nothing), `storedReal` (the number a `real` column gives back; a reducer must return this value or the journal rejects the write with `VALUE_MISMATCH`), `writtenRow` (the row a command returned, or the failure it returned, with the storage-only `version` removed), `eventTextSchema` (text an event can carry: event data is stored as jsonb, which refuses U+0000 and a lone surrogate) and `eventVarcharSchema(max)` (the same, at most `max` characters, for a value that also fills a `varchar(max)` column).
 
 ## Refunds
 
-- `createRefundService`: the refund service. It requests, approves and rejects refunds, and reads metrics and searches. A refund after 90 days or over the refundable amount returns a failure and writes nothing.
+- `createRefundService`: the refund service. It requests, approves and rejects refunds, and reads metrics and searches. A refund after 90 days or over the refundable amount returns a failure and writes nothing. It returns `payments.configuration_invalid` for a bad `refundWindowMs` or `autoApproveLimits`; `RefundService` has a private constructor, use `RefundService.create`.
 - `refundAutoApproveLimitsSchema`: parses the per-currency amounts (currency code to amount text) under which a refund is approved without a person. A currency missing from it waits for a person. A bad code or amount throws when the service is built.
 - `DEFAULT_REFUND_AUTO_APPROVE_LIMITS`: about ten dollars where set. Other currencies wait for a person.
 - `createRefundWorkflow`: the durable workflow that sends an approved refund to Stripe and records the outcome. It retries while the refund is pending, from one minute doubling to six hours, about eight days in all.
 - `refundRunId`: the id of a refund's workflow run. The approval starts the run and the Stripe webhook signals it.
 - `createRefundEffects`: the after-commit effects of refunds. Today it sends the approval-request notification through a `NotificationService` that you supply.
+- `refundMailRetry`: the retry both mail effects use: the journal default (8 tries, 1 s doubling up to 5 minutes), for a throw and for a returned `payments.notification_failed`. Any other returned failure is final.
 - `pendingRefundIndexName`: the name of the unique index that allows one pending refund per payment. Use it to recognise `DuplicatePendingRefund` in your own error handling.
 
 ## Subscriptions, retries and proration (core services)
 
 - `createSubscriptionManager`: create, update, pause, resume, reactivate and cancel subscriptions against the provider, preview a change, sync with the provider, handle trials ending and past-due subscriptions, and check access. A plan change that went through returns a `SubscriptionChange`.
-- `createPaymentRetryService`: schedules and runs retries of failed payments by named strategies, and reports retry analytics. You can add or change strategies.
-- `createDunningService` (core): rule-based handling of failed payments. A rule has a trigger (`payment_failed`, `invoice_payment_failed` or `subscription_past_due`), a delay in days and an action (email, retry, pause, cancel or webhook). Email and webhook steps go out through the app's `DunningSenders` (`sendEmail`, `sendWebhook`); an enabled rule whose sender is missing throws `payments.configuration_invalid` when the service is built. Do not mix it up with the campaign-based dunning in `@arki/payments/dunning`.
+- `PaymentRetryService` and `createPaymentRetryService`: build with `PaymentRetryService.create(...)` or the function (the service or `payments.configuration_invalid`). Schedules and runs retries of failed payments by named strategies, and reports retry analytics. `processRetries()` returns one report per due attempt, in run order: `succeeded`, `failed` (a declined card in `failure`, or the provider's answer in `payment`), `cancelled`, `refused` (the provider's or the journal's failure in `failure`) or `thrown` (`error`). `addRetryStrategy` and `updateRetryStrategy` return nothing or `payments.configuration_invalid`.
+- `DunningService` and `createDunningService` (core): rule-based handling of failed payments. A rule has a trigger (`payment_failed`, `invoice_payment_failed` or `subscription_past_due`), a delay in days and an action (email, retry, pause, cancel or webhook). Email and webhook steps go out through the app's `DunningSenders` (`sendEmail`, `sendWebhook`); an enabled rule whose sender is missing returns `payments.configuration_invalid` from `DunningService.create` (and from `createDunningService` and `updateConfiguration`). Do not mix it up with the campaign-based dunning in `@arki/payments/dunning`.
 - `ProrationService` and `createProrationService`: previews the charge or credit of a plan change.
 - `PaymentMonitoringService` and `createPaymentMonitoringService`: you record payment attempts, webhook runs, subscription events and refunds. It reads stored counts through a `PaymentRepository` (active subscriptions, payment volume), detects anomalies, reports system health and sends alerts.
 
 ## Webhooks and provider helpers
 
-- `WebhookHandler` and `createWebhookHandler`: receives a provider webhook, checks it, claims it once, and processes it. It emits events and holds a processing lease for crashed attempts.
-- `WebhookSecurityService` and `createWebhookSecurityService`: verifies signature, timestamp window, replay and source address. The older `core/security/webhook-security` path re-exports the same implementation.
+- `WebhookHandler` and `createWebhookHandler`: build with `WebhookHandler.create(...)` or the function; both return the handler or `payments.configuration_invalid`. Receives a provider webhook, checks it, claims it once, and processes it. It emits events and holds a processing lease for crashed attempts. `retryFailedWebhooks()` re-runs failed events and returns one report per event read: `processed`, `skipped`, `refused` (`failure`) or `thrown` (`error`).
+- `WebhookSecurityService` and `createWebhookSecurityService`: build with `WebhookSecurityService.create(config)` or the function (the service or `payments.configuration_invalid`). Verifies signature, timestamp window, replay and source address. `validateWebhook` returns the checked delivery (`{ provider, eventType, data }`) or `WebhookRejected`, whose `check` names the refusing check (`source_ip`, `timestamp`, `replay`, `signature`). `WEBHOOK_CHECKS` lists those checks in the order they run. `allowedIps` takes IPv4/IPv6 addresses and CIDR ranges; a malformed entry throws `payments.configuration_invalid` when the service is built. The older `core/security/webhook-security` path re-exports the same implementation.
 - `claimWebhookEvent`: inserts the event, or returns the existing row. Only the caller whose insert won gets `created: true`, so exactly one delivery processes a new event. The result is a `WebhookClaim`.
-- `reclaimWebhookEvent`: takes over an unprocessed event for one more attempt after a failure or a crash. Only one caller wins, because `attempts` is the token.
-- `WebhookAnalyticsService` and `createWebhookAnalyticsService`: counts, success rates and alerts over webhook events.
+- `reclaimWebhookEvent`: takes over an unprocessed event for one more attempt after a failure or a crash. Only one caller wins, because `attempts` is the token. An event whose `attempts` already holds 2^31 - 1 returns `payments.counter_exhausted` and is not written.
+- `WebhookAnalyticsService` and `createWebhookAnalyticsService`: build with `.create(...)` or the function (the service or `payments.configuration_invalid`). Counts, success rates and alerts over webhook events.
 - `mapStripeEventType`: our internal event name for a Stripe event type, or `null` when we do not model it.
 - `parseStripeSubscription`, `parseStripePaymentIntent`, `parseStripeCharge`, `parseStripeRefund`, `parseStripeDispute`: read a Stripe webhook object into the fields we use, checked by a schema.
 - `mapStripeError`: a Stripe SDK error as a `PaymentProviderError`, to throw. Other errors pass through.
@@ -117,10 +118,11 @@ These are the inputs of the journal commands behind the services. A command retu
 
 - `DunningCampaignService` and `createDunningCampaignService`: campaign CRUD, templates and execution. A campaign read with its steps is a `DunningCampaignWithSteps`.
 - `CustomerSegmentationService` and `createCustomerSegmentationService`: segments, customer classification and risk scoring.
-- `DunningIntegrationService` and `createDunningIntegrationService`: connects campaigns, segments and communications into one flow.
-- `CommunicationOrchestrationService` and `createCommunicationOrchestrationService`: sends messages through the channels you configure. Apps pass the channel config in, so the package never reads `env`.
-- Channel providers: `EmailProvider` (Resend), `SMSProvider` (Twilio), `InAppProvider` (stored through the app's `InAppNotificationStore`), `WebhookProvider` (only hosts on the operator's `allowedHosts`; an empty list fails at boot; the reply body is never read or kept). Provider bodies are read up to 64 KiB. The scheduled ticks return a `DunningTickReport` listing each item that failed.
+- `DunningIntegrationService` (`DunningIntegrationService.create`) and `createDunningIntegrationService` (both return the service or `payments.configuration_invalid`): connects campaigns, segments and communications into one flow.
+- `CommunicationOrchestrationService` and `createCommunicationOrchestrationService` (returns the service or `payments.configuration_invalid`): sends messages through the channels you configure. Apps pass the channel config in, so the package never reads `env`.
+- Channel providers (built with `EmailProvider.create`, `SMSProvider.create`, `WebhookProvider.create`, each returning the provider or `payments.configuration_invalid`): `EmailProvider` (Resend), `SMSProvider` (Twilio), `InAppProvider` (stored through the app's `InAppNotificationStore`), `WebhookProvider` (only hosts on the operator's `allowedHosts`; an empty list fails at boot; the reply body is never read or kept). An `apiBaseUrl` or webhook URL on a port the Fetch standard blocks (such as 6000) is refused on every runtime, at boot or per send. Provider bodies are read up to 64 KiB. The scheduled ticks return a `DunningTickReport` listing each item that failed, as `refused` with the returned `failure` or `thrown` with the `error`.
 - `readCustomerRiskProfile`: gives a `customer_risk_profiles` row the types its columns claim. Postgres returns the jsonb dates as ISO text, so every read passes through here.
+- `dunningActorSchema`: the user a dunning write is attributed to (`created_by`, `updated_by`): a `usr_` id Postgres can store.
 - `valueList`: builds `(a, b, c)` with one bound parameter per value, for `column IN ${valueList(...)}`. An empty list matches nothing.
 - Campaign and segment procedure inputs: `createDunningCampaignInputSchema`, `updateDunningCampaignInputSchema`, `getCampaignInputSchema`, `updateCampaignWrapperInputSchema`, `deleteCampaignInputSchema`, `updateCampaignStatusInputSchema`, `executeCampaignInputSchema`, `bulkExecuteCampaignInputSchema`, `campaignAnalyticsInputSchema`, `getCampaignAnalyticsInputSchema`, `createDunningTemplateInputSchema`, `updateDunningTemplateInputSchema`, `createCustomerSegmentInputSchema`, `updateCustomerSegmentInputSchema`, `getSegmentInputSchema`, `updateSegmentWrapperInputSchema`, `deleteSegmentInputSchema`, `getSegmentCustomersInputSchema`, `updateSegmentCustomerCountInputSchema`.
 - Risk profile inputs: `customerRiskProfileInputSchema`, `getRiskProfileByCustomerInputSchema`, `updateRiskProfileForCustomerInputSchema`, `getRiskProfilesByCategoryInputSchema`.
@@ -129,8 +131,8 @@ These are the inputs of the journal commands behind the services. A command retu
 
 ## Notifications
 
-- `createNotificationService`: builds an email, Slack or multi-channel notification service from a config.
-- `EmailNotificationService`, `SlackNotificationService`, `MultiChannelNotificationService`: the three implementations. The multi-channel one sends through several channels at once.
+- `createNotificationService`: builds an email, Slack or multi-channel notification service from a config, or returns `payments.configuration_invalid`.
+- `EmailNotificationService`, `SlackNotificationService`, `MultiChannelNotificationService`: the three implementations. Email and Slack are built with `.create(config)` (the service or `payments.configuration_invalid`; a Slack `webhookUrl` with credentials or on a port the Fetch standard blocks is refused). The multi-channel one sends through several channels at once.
 
 ## Failures
 
@@ -154,20 +156,20 @@ From `@arki/payments/core/failures` (subscriptions, proration, retries, the repo
 
 From `@arki/payments/core/services/webhook-handler` (webhook delivery). A webhook route must answer non-2xx for any of these so the provider can resend:
 
-| Failure                   | When it comes back                                                                        |
-| ------------------------- | ----------------------------------------------------------------------------------------- |
-| `WebhookRejected`         | The validator refused the delivery: bad signature, bad address, old timestamp or replay.  |
-| `WebhookPayloadInvalid`   | The event body lacks the fields the handler reads.                                        |
-| `WebhookClaimConflict`    | The claim insert conflicted, yet no row holds the event. A resend claims it again.        |
-| `WebhookInProgress`       | Another delivery of the same event is running it now.                                     |
-| `WebhookTargetNotFound`   | The event is about a payment or subscription with no local row yet. A resend may find it. |
-| `WebhookRetriesExhausted` | Every attempt failed and the handler gave up. Fix the cause, then replay by hand.         |
+| Failure                   | When it comes back                                                                                         |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `WebhookRejected`         | The validator refused the delivery; `check` says which: `signature`, `source_ip`, `timestamp` or `replay`. |
+| `WebhookPayloadInvalid`   | The event body lacks the fields the handler reads.                                                         |
+| `WebhookClaimConflict`    | The claim insert conflicted, yet no row holds the event. A resend claims it again.                         |
+| `WebhookInProgress`       | Another delivery of the same event is running it now.                                                      |
+| `WebhookTargetNotFound`   | The event is about a payment or subscription with no local row yet. A resend may find it.                  |
+| `WebhookRetriesExhausted` | Every attempt failed and the handler gave up. Fix the cause, then replay by hand.                          |
 
 From `@arki/payments/dunning`:
 
 - `DunningTemplateInUse`: a campaign update removed a step that already sent a message. Nothing changed.
 - `NotificationWebhookHostNotAllowed`: a webhook recipient URL names a host that is not in `webhook.allowedHosts`. Nothing was sent.
-- `tickFault`: turns one failure or error of a scheduled tick into the `{ id, code, message }` entry listed in `DunningTickReport.failed`.
+- `tickFault`: turns one failure or error of a scheduled tick into the entry listed in `DunningTickReport.failed`: `{ id, status: 'refused', failure }` or `{ id, status: 'thrown', error }`.
 
 ## Tax (`@arki/payments/tax`)
 
@@ -175,9 +177,12 @@ From `@arki/payments/dunning`:
 - `createTaxReportingService` and `TaxReportingService`: compliance reports, customer summaries and data export.
 - `jurisdictionOwnsLine`: true when a Stripe tax line is the tax of one of our jurisdictions (same country, level and state). A jurisdiction that cannot be placed matches nothing, so tax is charged rather than wrongly waived.
 - `checkTaxIdFormat`: checks a tax id against the format of its type and country. Returns `valid`, `invalid` or `unknown`.
+- Row schemas, one per tax table, checked by the matching repository: `taxConfigurationRowSchema`, `taxJurisdictionRowSchema`, `taxExemptionRowSchema` (inserts with the schema, updates with `.partial()`), `taxRecordRowSchema` and `taxAuditRowSchema` (every row). `taxRecordRowsSchema` is the batch `TaxRecordRepository.recordMany` and `createTaxTransaction` write, at most `MAX_BATCH_ITEMS` (1,000) rows.
+- Provider inputs: `taxCustomerDetailsSchema` (a customer's address and tax ids as the tax provider takes them) and `taxLineTextSchema` (the text of a line item sent to the provider).
 - Calculation and result schemas: `taxCalculationInputSchema`, `calculateSubscriptionTaxInputSchema`, `taxRateSchema`, `taxCalculationResultSchema`, `taxIdValidationSchema`.
 - JSON converters: `taxCalculationResultJson`, `customerTaxSummaryJson`, `taxComplianceReportJson` turn a result holding `Money` into the JSON that the matching schema (`taxCalculationResultSchema`, `customerTaxSummarySchema`, `taxComplianceReportSchema`) describes.
 - Configuration inputs: `createTaxConfigSchema`, `updateTaxConfigSchema`, `updateConfigurationInputSchema`, `setDefaultConfigurationInputSchema`.
 - Jurisdiction inputs: `createJurisdictionSchema`, `getJurisdictionsByCountryInputSchema`, `getJurisdictionHierarchyInputSchema`.
 - Exemption inputs: `createExemptionSchema`, `getCustomerExemptionsInputSchema`, `getExpiringExemptionsInputSchema`, `approveExemptionInputSchema`, `revokeExemptionInputSchema`.
+- Exemption row rules, checked by `TaxExemptionRepository` on every create and update: `exemptionTargetSchema` (names a customer, a product code or a jurisdiction) and `exemptionPeriodSchema` (`validTo` not before `validFrom`).
 - Reporting inputs: `getCustomerTaxSummaryInputSchema`, `getCustomerAnnualSummaryInputSchema`, `generateComplianceReportInputSchema`, `exportTaxDataInputSchema`.

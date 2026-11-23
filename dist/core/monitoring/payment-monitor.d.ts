@@ -6,6 +6,8 @@ type AlertingService = {
     sendCriticalAlert(alert: unknown): Promise<void>;
     sendWarningAlert(alert: unknown): Promise<void>;
 };
+/** A KV write that did not go through: `kv.unavailable` on an outage or timeout, `kv.cancelled`. */
+type KvWriteFailure = Exclude<Awaited<ReturnType<KV['set']>>, boolean>;
 type PaymentResult = {
     success: boolean;
     status: string;
@@ -50,10 +52,19 @@ export declare class PaymentMonitoringService {
     private alertThresholds;
     constructor(kv: KV, reads: MonitorReads, alertingService?: AlertingService | undefined);
     private initializeThresholds;
-    recordPaymentAttempt(result: PaymentResult): Promise<void>;
-    recordWebhookProcessing(duration: number, success: boolean): Promise<void>;
-    recordSubscriptionEvent(event: 'created' | 'canceled' | 'upgraded' | 'downgraded'): Promise<void>;
-    recordRefund(amount: Money, reason: string): Promise<void>;
+    /**
+     * `outcome` (`success` or `failure`) is what the success and refund rates count; `status` is the payment's own.
+     * `result.processingTime` is a finite number of milliseconds, 0 or more (a precondition: anything else
+     * throws an invariant failure before anything is recorded).
+     */
+    recordPaymentAttempt(result: PaymentResult): Promise<KvWriteFailure | undefined>;
+    /**
+     * `duration` is a finite number of milliseconds, 0 or more (a precondition: anything else throws an
+     * invariant failure before anything is recorded).
+     */
+    recordWebhookProcessing(duration: number, success: boolean): Promise<KvWriteFailure | undefined>;
+    recordSubscriptionEvent(event: 'created' | 'canceled' | 'upgraded' | 'downgraded'): Promise<KvWriteFailure | undefined>;
+    recordRefund(amount: Money, reason: string): Promise<KvWriteFailure | undefined>;
     private recordMetric;
     private getMetricValues;
     private checkFailureRate;

@@ -1,21 +1,48 @@
-import { isSameOrAfter, isSameOrBefore, now, sub, toMillis } from '@arki/date';
+import { z } from '@arki/contracts';
+import { isSameOrAfter, now, sub, toMillis } from '@arki/date';
+import { invariant } from '@arki/failure';
 import { getLogger } from '@arki/log';
+import { PaymentsConfigurationInvalid } from '../failures.js';
 const logger = getLogger('arki:payments:webhook');
+/** When the service raises an alert, and how many alerts it keeps. */
+const alertThresholdsSchema = z.object({
+    /** Percentage of failed events. */
+    errorRate: z.number().min(0),
+    /** Milliseconds one event may take before it counts as slow. */
+    slowProcessing: z.number().min(0),
+    /** Alerts kept in memory; the oldest is dropped past this. */
+    maxAlerts: z.number().int().min(1).max(100_000),
+});
+const DEFAULT_ALERT_THRESHOLDS = {
+    errorRate: 5, // Percentage
+    slowProcessing: 5000, // Milliseconds
+    maxAlerts: 100,
+};
 export class WebhookAnalyticsService {
     paymentRepository;
     alertThresholds;
     alerts = new Map();
     processingTimes = [];
-    constructor(paymentRepository, alertThresholds = {
-        errorRate: 5, // Percentage
-        slowProcessing: 5000, // Milliseconds
-        maxAlerts: 100,
-    }) {
+    constructor(paymentRepository, alertThresholds) {
         this.paymentRepository = paymentRepository;
         this.alertThresholds = alertThresholds;
     }
     /**
-     * Get comprehensive webhook metrics
+     * Builds the service. Returns `payments.configuration_invalid` for thresholds that are not finite
+     * numbers of 0 or more, or a `maxAlerts` that is not a whole number from 1 to 100,000.
+     */
+    static create(paymentRepository, alertThresholds = DEFAULT_ALERT_THRESHOLDS) {
+        const checked = alertThresholdsSchema.safeParse(alertThresholds);
+        if (!checked.success) {
+            return PaymentsConfigurationInvalid({
+                setting: 'webhookAnalytics.alertThresholds',
+                problem: checked.error.issues.map(issue => `${issue.path.join('.') || '(config)'}: ${issue.message}`).join('; '),
+            });
+        }
+        return new WebhookAnalyticsService(paymentRepository, checked.data);
+    }
+    /**
+     * Get comprehensive webhook metrics. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     async getWebhookMetrics(startDate, endDate) {
         try {
@@ -78,7 +105,7 @@ export class WebhookAnalyticsService {
         }
     }
     /**
-     * Assess webhook system health
+     * Assess webhook system health. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     async getWebhookHealth(startDate) {
         const metrics = await this.getWebhookMetrics(startDate);
@@ -146,7 +173,7 @@ export class WebhookAnalyticsService {
         };
     }
     /**
-     * Get webhook performance metrics
+     * Get webhook performance metrics. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     async getWebhookPerformance(startDate, endDate) {
         const events = await this.getWebhookEventsInRange(startDate, endDate);
@@ -188,9 +215,11 @@ export class WebhookAnalyticsService {
         };
     }
     /**
-     * Record processing time for real-time monitoring
+     * Record processing time for real-time monitoring. `processingTime` is a finite number of
+     * milliseconds, 0 or more (a precondition: anything else throws an invariant failure, and nothing is recorded).
      */
     recordProcessingTime(processingTime) {
+        invariant(Number.isFinite(processingTime) && processingTime >= 0, '[@arki/payments] processingTime must be a finite number of milliseconds, 0 or more');
         this.processingTimes.push(processingTime);
         // Keep only recent times (last 1000)
         if (this.processingTimes.length > 1000) {
@@ -256,7 +285,7 @@ export class WebhookAnalyticsService {
             .toSorted((a, b) => toMillis(b.triggeredAt) - toMillis(a.triggeredAt));
     }
     /**
-     * Generate webhook monitoring report
+     * Generate webhook monitoring report. A time given falls in the years 1 to 9999 (a precondition: anything else throws an invariant failure).
      */
     async generateMonitoringReport(startDate, endDate) {
         const actualStartDate = startDate || sub(now(), { hours: 24 }); // Last 24 hours
@@ -290,21 +319,9 @@ export class WebhookAnalyticsService {
             recommendations: [...new Set(recommendations)], // Remove duplicates
         };
     }
-    /**
-     * Helper method to get webhook events in date range
-     */
+    /** The newest 1000 webhook events, processed or not, created in the range (each end optional, both included). */
     async getWebhookEventsInRange(startDate, endDate) {
-        // This would typically call a repository method to get filtered events
-        // For now, we'll simulate with a basic approach
-        // In a real implementation, you'd add date filtering to the repository
-        const allEvents = await this.paymentRepository.findUnprocessedWebhookEvents(1000); // Get recent events
-        if (!startDate && !endDate) {
-            return allEvents;
-        }
-        return allEvents.filter(event => {
-            const eventDate = event.createdAt;
-            return (!startDate || isSameOrAfter(eventDate, startDate)) && (!endDate || isSameOrBefore(eventDate, endDate));
-        });
+        return this.paymentRepository.findWebhookEventsCreatedBetween(startDate, endDate, 1000);
     }
     /**
      * Categorize error messages into types
@@ -385,7 +402,8 @@ export class WebhookAnalyticsService {
         return recommendations;
     }
 }
+/** Builds a `WebhookAnalyticsService`: the same as `WebhookAnalyticsService.create`, which returns `payments.configuration_invalid` for bad thresholds. */
 export function createWebhookAnalyticsService(paymentRepository, alertThresholds) {
-    return new WebhookAnalyticsService(paymentRepository, alertThresholds);
+    return WebhookAnalyticsService.create(paymentRepository, alertThresholds);
 }
 //# sourceMappingURL=webhook-analytics-service.js.map

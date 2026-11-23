@@ -218,7 +218,11 @@ export declare function createPaymentJournal<Meta extends StandardSchemaV1<unkno
             metadata: z.ZodOptional<z.ZodNullable<z.ZodRecord<z.ZodString, z.ZodUnknown>>>;
         }, z.core.$strip>, Promise<import("@arki/failure").Failure<"journal.conflict", {
             detail: string;
-        }> | import("@arki/journal").WriteResult<import("../tables.js").PaymentsTable, PaymentCanceledEvent | PaymentCompletedEvent | PaymentDisputeRecordedEvent | PaymentFailedEvent | PaymentInitiatedEvent | PaymentInitiatedV2Event | PaymentRefundRecordedEvent | PaymentRequiresActionEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure> | import("@arki/contracts").IdGenerationFailure, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [PaymentInitiatedV2Event], undefined>;
+        }> | import("@arki/failure").Failure<"payments.reference_not_found", {
+            kind: "customer" | "payment" | "plan" | "subscription" | "user";
+            id: string;
+            missing: "provider_id" | "row";
+        }> | import("@arki/journal").WriteResult<import("../tables.js").PaymentsTable, PaymentCanceledEvent | PaymentCompletedEvent | PaymentDisputeRecordedEvent | PaymentFailedEvent | PaymentInitiatedEvent | PaymentInitiatedV2Event | PaymentRefundRecordedEvent | PaymentRequiresActionEvent, import("@arki/schema").SchemaOutput<Meta>, "id"> | import("@arki/contracts").IdGenerationFailure | import("@arki/failure").SchemaFailure>, import("@arki/schema").SchemaOutput<Meta>, Tx, readonly [PaymentInitiatedV2Event], undefined>;
         completePayment: import("@arki/journal").Command<z.ZodObject<{
             paymentId: z.ZodTemplateLiteral<`pay${string}`>;
             receiptUrl: z.ZodOptional<z.ZodNullable<z.ZodString>>;

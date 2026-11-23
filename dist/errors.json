@@ -12,10 +12,19 @@
     "code": "payments.configuration_invalid",
     "package": "@arki/payments",
     "kind": "failure",
-    "what": "The host app's setup of a payments service cannot work: a capability a configured step needs was not passed, or a setting is empty or malformed. Thrown when the service is built (at boot), never returned later as a silent no-op.",
+    "what": "The host app's setup of a payments service cannot work: a capability a configured step needs was not passed, or a setting is empty or malformed. Returned when the service is built (at boot) by its `create` or factory function, never thrown, and never deferred to a later call as a silent no-op.",
     "fix": "Pass the capability or setting that `setting` names when the app builds the service.",
     "verify": "bun run test -- src/core/services/dunning-service.test.ts src/dunning/communication-service.test.ts",
-    "source": "src/core/failures.ts:179"
+    "source": "src/core/failures.ts:232"
+  },
+  {
+    "code": "payments.counter_exhausted",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A counter column already holds 2^31 - 1 (`INT4_MAX`), the most an `integer` column can, or would pass it with what the call adds, so it cannot go up. Nothing was written. `counter` names the column (`retryCount` of a dunning execution, `attempts` of a webhook event, or `paymentsRecovered`, `executions`, `customersReached` or `communicationsSent` of a campaign's analytics row) and `id` the row. The update checks the column itself, so a full counter is never raised by a race between a read and a write.",
+    "fix": "Stop retrying the row: a counter this high was set by hand, since a correct caller stops long before it.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:259"
   },
   {
     "code": "payments.customer_conflict",
@@ -27,13 +36,31 @@
     "source": "src/core/failures.ts:124"
   },
   {
+    "code": "payments.customer_in_use",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The customer cannot be deleted: a row that may not go with it (a refund of one of its payments, or an app row) still points at it or at one of its payments. Nothing was deleted.",
+    "fix": "Keep the customer, or remove what points at it first.",
+    "verify": "bun run test -- src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:180"
+  },
+  {
+    "code": "payments.customer_risk_profile_exists",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The customer already has a risk profile, so `CustomerRiskProfileRepository.create` wrote nothing.",
+    "fix": "Use `upsert` to replace the stored profile, or `update` to change it.",
+    "verify": "bun run test -- src/dunning/customer-risk-profile.test.ts",
+    "source": "src/dunning/failures.ts:57"
+  },
+  {
     "code": "payments.customer_segment_not_found",
     "package": "@arki/payments",
     "kind": "failure",
     "what": "No customer segment has this id.",
     "fix": "Check the segment id; list the segments to find it.",
     "verify": "bun run test -- src/dunning/segmentation-service.test.ts",
-    "source": "src/dunning/failures.ts:57"
+    "source": "src/dunning/failures.ts:109"
   },
   {
     "code": "payments.dunning_campaign_not_active",
@@ -42,7 +69,7 @@
     "what": "The campaign exists but is not active, so it cannot run. Nothing was written.",
     "fix": "Set the campaign status to `active` first.",
     "verify": "bun run test -- src/dunning/campaign-service.test.ts",
-    "source": "src/dunning/failures.ts:31"
+    "source": "src/dunning/failures.ts:83"
   },
   {
     "code": "payments.dunning_campaign_not_found",
@@ -60,16 +87,43 @@
     "what": "The campaign is active but has no active step (template) to send. Nothing was written.",
     "fix": "Add a step to the campaign, or activate one of its steps.",
     "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:96"
+  },
+  {
+    "code": "payments.dunning_communication_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A delivery callback names a provider message id that no dunning communication has. Nothing was written.",
+    "fix": "Check that the callback comes from the provider that sent the message; a message sent before its id was stored has none.",
+    "verify": "bun run test -- src/dunning/communication-service.test.ts",
+    "source": "src/dunning/failures.ts:70"
+  },
+  {
+    "code": "payments.dunning_execution_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No dunning execution has this id. Nothing was written.",
+    "fix": "Check the execution id; list the campaign's executions to find it.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
     "source": "src/dunning/failures.ts:44"
   },
   {
     "code": "payments.dunning_template_in_use",
     "package": "@arki/payments",
     "kind": "failure",
-    "what": "A campaign update removes a step that already sent a communication. The sent message keeps its step (its history points at it), so the update was refused and nothing changed.",
-    "fix": "Keep the step in `templates` (change its content or delay instead), or deactivate the campaign and create a new one.",
+    "what": "A campaign update removes a step that already sent a communication, or `deleteCampaign` deletes a campaign with such a step. The sent message keeps its step (its history points at it), so the update or delete was refused and nothing changed.",
+    "fix": "Keep the step in `templates` (change its content or delay instead), or deactivate (archive) the campaign instead of deleting it.",
     "verify": "bun run test -- src/dunning/campaign-service.test.ts",
-    "source": "src/dunning/failures.ts:71"
+    "source": "src/dunning/failures.ts:124"
+  },
+  {
+    "code": "payments.dunning_template_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "No dunning step (template) has this id. Nothing was written.",
+    "fix": "Check the step id; read the campaign to list its steps.",
+    "verify": "bun run test -- src/dunning/campaign-service.test.ts",
+    "source": "src/dunning/failures.ts:31"
   },
   {
     "code": "payments.duplicate_pending_refund",
@@ -114,7 +168,7 @@
     "what": "A dunning step uses a channel that has no provider registered in this app. The communication was not written.",
     "fix": "Configure the channel in `createCommunicationOrchestrationService` (or `registerProvider`), or change the step's channel.",
     "verify": "bun run test -- src/dunning/communication-service.test.ts",
-    "source": "src/dunning/failures.ts:85"
+    "source": "src/dunning/failures.ts:138"
   },
   {
     "code": "payments.notification_failed",
@@ -123,7 +177,7 @@
     "what": "A notification was not delivered: the mail transport returned a failure (the `cause`), the Slack webhook answered with a non-2xx `status`, or the request failed or timed out (the `cause`).",
     "fix": "Check the transport or the Slack webhook URL and its status page, then send the notification again.",
     "verify": "bun run test -- src/core/notifications/service.test.ts",
-    "source": "src/core/failures.ts:157"
+    "source": "src/core/failures.ts:210"
   },
   {
     "code": "payments.notification_provider_rejected",
@@ -132,7 +186,7 @@
     "what": "The notification provider answered with an error status (4xx or 5xx). The message was not sent. `upstreamMessage` is the provider's own error text when its body had one.",
     "fix": "Read `upstreamStatus` and `upstreamMessage`: a 4xx is our request (recipient, sender, key); a 5xx is the provider's fault and a later retry can work.",
     "verify": "bun run test -- src/dunning/communication-service.test.ts",
-    "source": "src/dunning/failures.ts:105"
+    "source": "src/dunning/failures.ts:158"
   },
   {
     "code": "payments.notification_provider_response_invalid",
@@ -141,7 +195,7 @@
     "what": "The notification provider answered with a success status, but the body is not the shape its API documents. The message may have been sent. `cause` holds the schema failure.",
     "fix": "Check the provider's API version and its status page; read `cause` for the field that did not match.",
     "verify": "bun run test -- src/dunning/communication-service.test.ts",
-    "source": "src/dunning/failures.ts:135"
+    "source": "src/dunning/failures.ts:188"
   },
   {
     "code": "payments.notification_provider_timeout",
@@ -150,7 +204,7 @@
     "what": "The notification provider did not answer within the provider's `timeoutMs`. The message may or may not have been sent.",
     "fix": "Retry later, or raise `timeoutMs` in the provider config.",
     "verify": "bun run test -- src/dunning/communication-service.test.ts",
-    "source": "src/dunning/failures.ts:121"
+    "source": "src/dunning/failures.ts:174"
   },
   {
     "code": "payments.notification_webhook_host_not_allowed",
@@ -159,7 +213,7 @@
     "what": "A webhook recipient URL names a host that is not on the operator's `allowedHosts` list. Nothing was sent. The URL comes from customer metadata, so only hosts the operator listed may be reached.",
     "fix": "Add the host to `webhook.allowedHosts` if the operator trusts it, or correct the customer's `webhookUrl`.",
     "verify": "bun run test -- src/dunning/communication-service.test.ts",
-    "source": "src/dunning/failures.ts:152"
+    "source": "src/dunning/failures.ts:205"
   },
   {
     "code": "payments.payment_method_required",
@@ -178,6 +232,15 @@
     "fix": "Retry a one-off payment by asking the customer to pay again.",
     "verify": "bun run test -- src/core/services/payment-retry-service.test.ts",
     "source": "src/core/failures.ts:109"
+  },
+  {
+    "code": "payments.plan_already_exists",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A plan with this id is already stored, so `createPlan` wrote nothing.",
+    "fix": "Update the stored plan (`updatePlan`), or leave `id` out so a new one is made.",
+    "verify": "bun run test -- src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:166"
   },
   {
     "code": "payments.plan_currency_mismatch",
@@ -219,7 +282,7 @@
     "code": "payments.reference_not_found",
     "package": "@arki/payments",
     "kind": "failure",
-    "what": "A customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no provider id (`missing: 'provider_id'`, such as a plan without a Stripe price). Returned before any provider request is made.",
+    "what": "A user, customer, plan, payment or subscription id has no row (`missing: 'row'`), or the row has no provider id (`missing: 'provider_id'`, such as a plan without a Stripe price). Returned before any provider request is made, and before any row that would point at the missing one is written.",
     "fix": "Check the id, or create the row with the provider first.",
     "verify": "bun run test -- src/core/providers",
     "source": "src/core/providers/provider-error.ts:42"
@@ -270,13 +333,22 @@
     "source": "src/refunds/failures.ts:81"
   },
   {
+    "code": "payments.retry_strategy_not_found",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "The retry service has no strategy with this name, so `updateRetryStrategy` changed nothing.",
+    "fix": "Check the name against `getRetryStrategies()`, or add the strategy first with `addRetryStrategy`.",
+    "verify": "bun run test -- src/core/services/payment-retry-service.test.ts",
+    "source": "src/core/failures.ts:153"
+  },
+  {
     "code": "payments.stored_tax_invalid",
     "package": "@arki/payments",
     "kind": "failure",
-    "what": "A payment's stored `taxAmount` metadata cannot be added up: it is not `Money` JSON (`problem: 'not_money'`), or it is in another currency than the payment (`'other_currency'`). A wrong total must not pass, so the report stops here.",
-    "fix": "Correct the payment's `metadata.taxAmount` to `Money` JSON in the payment's currency.",
+    "what": "The tax stored for a payment cannot be added up: its `taxAmount` metadata is not `Money` JSON (`problem: 'not_money'`), or that metadata or a tax record under its id is in another currency than the payment (`'other_currency'`). A wrong total must not pass, so the report stops here.",
+    "fix": "Correct the payment's `metadata.taxAmount` to `Money` JSON in the payment's currency, or the tax records under its id (`tax_records.payment_id`) to the payment's currency.",
     "verify": "bun run test -- src/tax",
-    "source": "src/tax/failures.ts:65"
+    "source": "src/tax/failures.ts:107"
   },
   {
     "code": "payments.subscription_already_active",
@@ -324,6 +396,24 @@
     "source": "src/tax/failures.ts:28"
   },
   {
+    "code": "payments.tax_jurisdiction_in_use",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A tax jurisdiction cannot be deleted while another row points at it: a child jurisdiction (`usedBy: 'jurisdiction'`) or an exemption (`usedBy: 'exemption'`). Nothing was deleted.",
+    "fix": "Delete or move the row named by `usedById` first, or deactivate the jurisdiction (`isActive: false`).",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:61"
+  },
+  {
+    "code": "payments.tax_line_currency_mismatch",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A line item is in another currency than the sale or refund it belongs to. Nothing was read or recorded, and the provider was not called.",
+    "fix": "Price every line item in the transaction's `currency`.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:47"
+  },
+  {
     "code": "payments.tax_reference_not_found",
     "package": "@arki/payments",
     "kind": "failure",
@@ -339,7 +429,16 @@
     "what": "A tax refund names no recorded sale to reverse: `originalReference` is missing (`null` here), or no sale was recorded under it. Nothing was recorded and the provider was not called.",
     "fix": "Record the sale first, and pass its `reference` as `originalReference`.",
     "verify": "bun run test -- src/tax",
-    "source": "src/tax/failures.ts:47"
+    "source": "src/tax/failures.ts:88"
+  },
+  {
+    "code": "payments.tax_row_exists",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "A new tax row was given an `id` that another row already has. Nothing was written.",
+    "fix": "Leave `id` out, so the repository makes a new one.",
+    "verify": "bun run test -- src/tax",
+    "source": "src/tax/failures.ts:74"
   },
   {
     "code": "payments.transaction_not_found",
@@ -375,7 +474,16 @@
     "what": "The claim insert conflicted, yet no row holds the event's provider id: the new webhook id collided with another row's, or the winning row was deleted between the two queries. Nothing was processed.",
     "fix": "Nothing; a resend claims the event again with a new webhook id.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:98"
+    "source": "src/core/services/webhook-failures.ts:106"
+  },
+  {
+    "code": "payments.webhook_event_exists",
+    "package": "@arki/payments",
+    "kind": "failure",
+    "what": "Another webhook event already holds this provider event id (or this webhook id). Nothing was written.",
+    "fix": "Read the stored event (`findWebhookEventByProviderEventId`); a delivery handler claims events with `claimWebhookEvent`.",
+    "verify": "bun run test -- src/core/repository.customers.test.ts",
+    "source": "src/core/failures.ts:193"
   },
   {
     "code": "payments.webhook_event_not_found",
@@ -393,7 +501,7 @@
     "what": "Another delivery of the same event is running it now, inside its lease. This copy did not run it. Not a success: if the running attempt crashes, only a resend processes the event.",
     "fix": "Nothing; answer non-2xx so the provider resends later.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:64"
+    "source": "src/core/services/webhook-failures.ts:72"
   },
   {
     "code": "payments.webhook_payload_invalid",
@@ -402,16 +510,16 @@
     "what": "The event body does not have the fields the handler reads: no `id` or `type`, or a `data.object` that does not match the event type (a Stripe subscription with no items, a PaymentIntent with no id). `cause` holds the schema's `InvalidInput` when a schema refused it.",
     "fix": "Nothing to do per event; a resend carries the same body. Check the provider's API version if it repeats.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:36"
+    "source": "src/core/services/webhook-failures.ts:44"
   },
   {
     "code": "payments.webhook_rejected",
     "package": "@arki/payments",
     "kind": "failure",
-    "what": "The webhook validator refused the delivery: a bad or missing signature, a source address that is not allowed, a timestamp outside the window, a replayed delivery, or no webhook secret. `reason` is the validator's own text, for logs only; branch on the code. Nothing was stored.",
+    "what": "The webhook validator refused the delivery. `check` says which check: `source_ip` (the source is not an allowed address), `timestamp` (outside the window or not Unix seconds), `replay` (this process saw the same delivery) or `signature` (a bad, malformed or missing signature, no webhook secret, or a provider whose signature is not verified). `reason` is the validator's own text, for logs only; branch on the code and `check`. Nothing was stored.",
     "fix": "Check the webhook secret and the provider's signing setup. A resend of the same delivery is refused again.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:20"
+    "source": "src/core/services/webhook-failures.ts:28"
   },
   {
     "code": "payments.webhook_retries_exhausted",
@@ -420,7 +528,7 @@
     "what": "The event has been attempted `maxRetries` times and every attempt failed. The handler gives up, so the provider is told to stop resending.",
     "fix": "Read the stored `errorMessage` of the webhook event, fix its cause, then replay the event by hand.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:50"
+    "source": "src/core/services/webhook-failures.ts:58"
   },
   {
     "code": "payments.webhook_target_not_found",
@@ -429,6 +537,6 @@
     "what": "The event is about a payment or subscription with no local row for its provider id. Retryable on purpose: the provider can send the webhook before the app's own insert of that row commits, and a later resend then finds it. A subscription made outside the app keeps failing until `maxRetries` gives it up (`WebhookRetriesExhausted`); no owner is invented.",
     "fix": "Nothing for a row about to commit. For a payment or subscription made outside the app, create it locally first.",
     "verify": "bun run test -- src/core/services/webhook-handler.test.ts",
-    "source": "src/core/services/webhook-failures.ts:80"
+    "source": "src/core/services/webhook-failures.ts:88"
   }
 ]

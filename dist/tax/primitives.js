@@ -1,4 +1,5 @@
 import { defineId } from '@arki/contracts';
+import { boundedIdSchema } from '../core/id-length.js';
 const taxConfigId = defineId('txc_');
 const taxJurisdictionId = defineId('txj_');
 const taxExemptionId = defineId('txe_');
@@ -9,9 +10,11 @@ export const createTaxJurisdictionId = taxJurisdictionId.create;
 export const createTaxExemptionId = taxExemptionId.create;
 export const createTaxRecordId = taxRecordId.create;
 export const createTaxAuditEntryId = taxAuditEntryId.create;
-export const taxConfigIdSchema = taxConfigId.schema;
-export const taxJurisdictionIdSchema = taxJurisdictionId.schema;
-export const taxExemptionIdSchema = taxExemptionId.schema;
+export const taxConfigIdSchema = boundedIdSchema(taxConfigId.schema);
+export const taxJurisdictionIdSchema = boundedIdSchema(taxJurisdictionId.schema);
+export const taxExemptionIdSchema = boundedIdSchema(taxExemptionId.schema);
+export const taxRecordIdSchema = boundedIdSchema(taxRecordId.schema);
+export const taxAuditEntryIdSchema = boundedIdSchema(taxAuditEntryId.schema);
 export const taxConfigIdFactory = taxConfigId;
 export const taxJurisdictionIdFactory = taxJurisdictionId;
 export const taxExemptionIdFactory = taxExemptionId;
@@ -24,4 +27,7 @@ export const jurisdictionTypeValues = ['country', 'state', 'province', 'city', '
 export const exemptionTypeValues = ['customer', 'product', 'jurisdiction', 'threshold'];
 export const exemptionStatusValues = ['active', 'expired', 'revoked', 'pending_review'];
 export const taxRecordTypeValues = ['sale', 'refund'];
+export const taxPlanIntervalValues = ['monthly', 'yearly', 'weekly', 'daily'];
+export const taxAuditActionValues = ['calculate', 'apply', 'refund', 'exempt', 'report'];
+export const taxAuditEntityValues = ['payment', 'subscription', 'customer', 'exemption'];
 //# sourceMappingURL=primitives.js.map

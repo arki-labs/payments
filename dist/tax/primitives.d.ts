@@ -17,6 +17,8 @@ export declare const createTaxAuditEntryId: () => `txa_${string}` | import("@ark
 export declare const taxConfigIdSchema: import("@arki/contracts").ZodTemplateLiteral<`txc_${string}`>;
 export declare const taxJurisdictionIdSchema: import("@arki/contracts").ZodTemplateLiteral<`txj_${string}`>;
 export declare const taxExemptionIdSchema: import("@arki/contracts").ZodTemplateLiteral<`txe_${string}`>;
+export declare const taxRecordIdSchema: import("@arki/contracts").ZodTemplateLiteral<`txr_${string}`>;
+export declare const taxAuditEntryIdSchema: import("@arki/contracts").ZodTemplateLiteral<`txa_${string}`>;
 export declare const taxConfigIdFactory: import("@arki/contracts").IdDeclaration<"txc_">;
 export declare const taxJurisdictionIdFactory: import("@arki/contracts").IdDeclaration<"txj_">;
 export declare const taxExemptionIdFactory: import("@arki/contracts").IdDeclaration<"txe_">;
@@ -29,6 +31,12 @@ export declare const jurisdictionTypeValues: readonly ['country', 'state', 'prov
 export declare const exemptionTypeValues: readonly ['customer', 'product', 'jurisdiction', 'threshold'];
 export declare const exemptionStatusValues: readonly ['active', 'expired', 'revoked', 'pending_review'];
 export declare const taxRecordTypeValues: readonly ['sale', 'refund'];
+export declare const taxPlanIntervalValues: readonly ['monthly', 'yearly', 'weekly', 'daily'];
+export declare const taxAuditActionValues: readonly ['calculate', 'apply', 'refund', 'exempt', 'report'];
+export declare const taxAuditEntityValues: readonly ['payment', 'subscription', 'customer', 'exemption'];
+export type TaxPlanInterval = (typeof taxPlanIntervalValues)[number];
+export type TaxAuditAction = (typeof taxAuditActionValues)[number];
+export type TaxAuditEntity = (typeof taxAuditEntityValues)[number];
 export type TaxRecordType = (typeof taxRecordTypeValues)[number];
 export type TaxConfigStatus = (typeof taxConfigStatusValues)[number];
 export type TaxCalculationMode = (typeof taxCalculationModeValues)[number];

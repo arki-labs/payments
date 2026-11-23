@@ -3,7 +3,7 @@ import type { Failure } from '@arki/failure';
 import { Money } from '@arki/money';
 import type { StripeProvider } from '../core/providers/stripe-provider.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../core/types.js';
-import type { TaxExemptionId } from './primitives.js';
+import type { TaxExemptionId, TaxPlanInterval } from './primitives.js';
 import type { TaxExemptionRepository, TaxJurisdictionRepository, TaxRecordRepository } from './repository.js';
 import type { TaxJurisdiction } from './types.js';
 /** What `TaxService` reads. A `TaxExemptionRepository` and a `TaxJurisdictionRepository` fit. */
@@ -113,9 +113,16 @@ export declare class TaxService {
      * jurisdiction): one without would exempt every sale, so it is never applied.
      *
      * A Stripe amount that `@arki/money` refuses (an unknown currency, units off Stripe's rule) is returned as a
-     * `MoneyFailure`, so a sale is never priced with a wrong tax.
+     * `MoneyFailure`, so a sale is never priced with a wrong tax. So is a sale Stripe cannot price:
+     * `money.provider_amount` for a currency outside ISO 4217 (a custom currency; Stripe is not asked),
+     * and for a Stripe answer in another currency than the sale's. A line item in another currency than
+     * `input.currency` returns `TaxLineCurrencyMismatch` before anything is read or asked.
      */
-    calculateTax(input: TaxCalculationInput): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
+    calculateTax(input: TaxCalculationInput): Promise<Failure<"payments.tax_address_incomplete", undefined> | Failure<"payments.tax_line_currency_mismatch", {
+        lineReference: string;
+        lineCurrency: string;
+        transactionCurrency: string;
+    }> | TaxCalculationResult | import("@arki/money").MoneyFailure | import("@arki/failure").SchemaFailure>;
     /**
      * Create a tax transaction for compliance tracking
      * Called when a payment is successful or a refund is processed
@@ -123,7 +130,16 @@ export declare class TaxService {
      * `breakdown` is the tax the checkout's `calculateTax` returned for this sale. It is stored, one
      * record per jurisdiction and rate, and is what `getCustomerTaxSummary` and the compliance report
      * add up. Recording a `reference` twice (for the same `type`) returns the first record and does
-     * not call the provider again. A failure is the caller's to handle, as in `calculateTax`.
+     * not call the provider again. A failure is the caller's to handle, as in `calculateTax`; a currency
+     * outside ISO 4217 returns `money.provider_amount` before anything is read or recorded.
+     *
+     * Nothing is read and the provider is not called when the input cannot be recorded: a line item in
+     * another currency (`TaxLineCurrencyMismatch`), a breakdown line in another currency
+     * (`TaxCurrencyMismatch`), or a record a `tax_records` column cannot store (`InvalidInput`, from
+     * `taxRecordRowSchema`: a reference or jurisdiction over 255 characters, U+0000, a negative amount,
+     * a rate of 10000 or more, an `occurredAt` outside the years 1 to 9999; and a jurisdiction's tax that is
+     * not whole minor units or is past 2^53 - 1 of them, from `nonNegativeMoneySchema`). So the provider and the records never disagree. A `reference` recorded
+     * earlier in another currency returns `TaxCurrencyMismatch` too.
      */
     createTaxTransaction(params: {
         reference: string;
@@ -146,8 +162,11 @@ export declare class TaxService {
         occurredAt?: Instant;
         /** For a `refund`: the `reference` of the recorded sale it reverses. Required there, ignored for a sale. */
         originalReference?: string;
-    }): Promise<Failure<"money.input_too_large", undefined> | Failure<"money.invalid_text", undefined> | Failure<"money.out_of_range", undefined> | Failure<"money.provider_amount", undefined> | Failure<"money.unknown_currency", undefined> | Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+    }): Promise<Failure<"money.input_too_large", undefined> | Failure<"money.invalid_text", undefined> | Failure<"money.out_of_range", undefined> | Failure<"money.provider_amount", undefined> | Failure<"money.unknown_currency", undefined> | Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | Failure<"payments.reference_not_found", {
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | Failure<"payments.tax_address_incomplete", undefined> | Failure<"payments.tax_currency_mismatch", {
@@ -155,10 +174,14 @@ export declare class TaxService {
         jurisdiction: string;
         taxCurrency: string;
         transactionCurrency: string;
+    }> | Failure<"payments.tax_line_currency_mismatch", {
+        lineReference: string;
+        lineCurrency: string;
+        transactionCurrency: string;
     }> | Failure<"payments.tax_refund_sale_not_found", {
         reference: string;
         originalReference: string | null;
-    }> | TaxTransaction>;
+    }> | TaxTransaction | import("@arki/failure").SchemaFailure>;
     /**
      * Get tax settings and configuration
      * Useful for displaying tax information to customers
@@ -187,10 +210,14 @@ export declare class TaxService {
     calculateSubscriptionTax(params: {
         customerId: CustomerId;
         planAmount: Money;
-        planInterval: 'monthly' | 'yearly' | 'weekly' | 'daily';
+        planInterval: TaxPlanInterval;
         taxCode?: string;
         customerDetails?: TaxCalculationInput['customerDetails'];
-    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
+    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | Failure<"payments.tax_line_currency_mismatch", {
+        lineReference: string;
+        lineCurrency: string;
+        transactionCurrency: string;
+    }> | TaxCalculationResult | import("@arki/money").MoneyFailure | import("@arki/failure").SchemaFailure>;
     /**
      * Calculate tax for one-time payments (tips, donations)
      * Special handling for non-recurring transactions
@@ -201,7 +228,11 @@ export declare class TaxService {
         description: string;
         taxCode?: string;
         customerDetails?: TaxCalculationInput['customerDetails'];
-    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | TaxCalculationResult | import("@arki/money").MoneyFailure>;
+    }): Promise<Failure<"payments.tax_address_incomplete", undefined> | Failure<"payments.tax_line_currency_mismatch", {
+        lineReference: string;
+        lineCurrency: string;
+        transactionCurrency: string;
+    }> | TaxCalculationResult | import("@arki/money").MoneyFailure | import("@arki/failure").SchemaFailure>;
     /**
      * Check the format of a customer's tax ID. The format only: whether the number is registered
      * takes the registry (VIES, HMRC, the IRS). `format: 'unknown'` means no format is known for
@@ -225,6 +256,10 @@ export declare class TaxService {
      * customer's sales, less what it gave back on refunds. Totals are one `Money` per currency
      * (never added across currencies), ordered by currency code; `breakdown` has one row per
      * jurisdiction and currency. `totalTransactions` counts the sales that carried tax.
+     *
+     * `year` is from 2000 to 2100, as `getCustomerTaxSummaryInputSchema` reads it from a request:
+     * anything else (NaN, a year outside that range) is a bug in the caller, and throws
+     * `FailureError` (`invariant`) before anything is read.
      */
     getCustomerTaxSummary(params: {
         customerId: CustomerId;

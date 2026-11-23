@@ -1,0 +1,105 @@
+// Fixture setup needs scalar IDs; stop before the scenario if entropy is unavailable.
+import { PGlite } from '@electric-sql/pglite';
+import { pushSchema } from 'drizzle-kit/api-postgres';
+import { and, asc, count, eq } from 'drizzle-orm';
+import { pgSchema, varchar } from 'drizzle-orm/pg-core';
+import { drizzle } from 'drizzle-orm/pglite';
+import { z } from 'zod';
+import { orThrow } from '@arki/failure';
+import { initJournal } from '@arki/journal';
+import { journalTables } from '@arki/journal/pg';
+import { createCoreJournal } from './core/journal.js';
+import { createCustomerId, createPlanId } from './core/primitives.js';
+import { createCoreTables } from './core/tables.js';
+import { createRefundsJournal } from './refunds/journal.js';
+import { createRefundsTables } from './refunds/tables.js';
+export const schema = pgSchema('pay');
+export const users = schema.table('users', { id: varchar('id', { length: 256 }).primaryKey() });
+export const core = createCoreTables({ schema, userIdRef: () => users.id });
+export const refundsTables = createRefundsTables({
+    schema,
+    paymentIdRef: () => core.payments.id,
+    userIdRef: () => users.id,
+});
+export const journalTablesInSchema = journalTables(schema);
+export const userId = 'usr_buyer';
+export const adminId = 'usr_admin';
+export const planId = orThrow(createPlanId());
+export const customerId = orThrow(createCustomerId());
+export const metaSchema = z.object({ actorId: z.string().min(1) });
+export const meta = { actorId: 'usr_test' };
+const plainDefinitions = initJournal({ tables: journalTablesInSchema, meta: metaSchema });
+export const plain = {
+    j: plainDefinitions,
+    core: createCoreJournal(plainDefinitions, core),
+    refunds: createRefundsJournal(plainDefinitions, { refunds: refundsTables.refunds, payments: core.payments }),
+    journal: plainDefinitions.compose({}),
+};
+const typedDefinitions = initJournal
+    .tx()
+    .db()
+    .create({ tables: journalTablesInSchema, meta: metaSchema });
+export const typed = {
+    j: typedDefinitions,
+    core: createCoreJournal(typedDefinitions, core),
+    refunds: createRefundsJournal(typedDefinitions, { refunds: refundsTables.refunds, payments: core.payments }),
+    journal: typedDefinitions.compose({}),
+};
+/** Every table and enum of the test schema, pushed in one call (a second push would drop the first's). */
+export const pushedSchema = {
+    schema,
+    users,
+    ...core.enums,
+    plans: core.plans,
+    customers: core.customers,
+    subscriptions: core.subscriptions,
+    payments: core.payments,
+    webhookEvents: core.webhookEvents,
+    ...refundsTables.enums,
+    refunds: refundsTables.refunds,
+    ...journalTablesInSchema,
+};
+/** The user, admin, plan and customer every scenario points at. */
+export async function seedFixture(db) {
+    await db.insert(users).values([{ id: userId }, { id: adminId }]);
+    await db.insert(core.plans).values({ id: planId, name: 'Pro', priceMinor: 1000 });
+    await db
+        .insert(core.customers)
+        .values({ id: customerId, userId, providerCustomerId: 'cus_test', email: 'buyer@example.com' });
+}
+/** `extra`: more tables or enums of the same schema, pushed in the same call (a second push would drop these). */
+export async function openDb(extra = {}) {
+    const client = new PGlite('memory://');
+    await client.waitReady;
+    const db = drizzle({ client });
+    const { apply } = await pushSchema({ ...pushedSchema, ...extra }, db);
+    await apply();
+    await seedFixture(db);
+    return { db, client };
+}
+/** The event types written for one entity, oldest first. */
+export async function eventTypesOf(db, kind, entityId) {
+    const { events } = journalTablesInSchema;
+    const rows = await db
+        .select({ type: events.type })
+        .from(events)
+        .where(and(eq(events.kind, kind), eq(events.entityId, entityId)))
+        .orderBy(asc(events.version));
+    return rows.map(row => row.type);
+}
+/** How many events the journal holds. A rejected or repeated command must leave it unchanged. */
+export async function countEvents(db) {
+    const [row] = await db.select({ total: count() }).from(journalTablesInSchema.events);
+    return row?.total ?? 0;
+}
+/** The error a promise rejects with. Fails the test when the promise resolves. */
+export async function rejectionOf(promise) {
+    try {
+        await promise;
+    }
+    catch (error) {
+        return error;
+    }
+    throw new Error('expected the command to be rejected, but it wrote');
+}
+//# sourceMappingURL=test-support.js.map

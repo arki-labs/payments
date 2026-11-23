@@ -47,6 +47,15 @@ export declare const riskCategorySchema: z.ZodEnum<{
     low: "low";
     medium: "medium";
 }>;
+/** The user a dunning write is attributed to (`created_by`, `updated_by`): a `usr_` id Postgres can store. */
+export declare const dunningActorSchema: z.ZodPipe<z.ZodString, z.ZodCustom<`usr_${string}`, `usr_${string}`>>;
+/**
+ * The longest span a dunning setting may name, 100 years, in days and in hours. The services turn these
+ * spans into dates (a cutoff, a schedule); a longer span leaves the range of dates `@arki/date` and
+ * Postgres can hold, so the contract refuses it as `schema.invalid_input`.
+ */
+export declare const MAX_DUNNING_DAYS = 36500;
+export declare const MAX_DUNNING_HOURS: number;
 export declare const campaignTriggerSchema: z.ZodObject<{
     type: z.ZodEnum<{
         manual: "manual";
@@ -56,7 +65,16 @@ export declare const campaignTriggerSchema: z.ZodObject<{
     }>;
     conditions: z.ZodObject<{
         paymentFailureCount: z.ZodOptional<z.ZodNumber>;
-        subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+            active: "active";
+            canceled: "canceled";
+            incomplete: "incomplete";
+            incomplete_expired: "incomplete_expired";
+            past_due: "past_due";
+            paused: "paused";
+            trialing: "trialing";
+            unpaid: "unpaid";
+        }>>>;
         daysSinceLastPayment: z.ZodOptional<z.ZodNumber>;
         daysSinceFailure: z.ZodOptional<z.ZodNumber>;
         trialEndingDays: z.ZodOptional<z.ZodNumber>;
@@ -146,7 +164,12 @@ export declare const segmentCriteriaSchema: z.ZodObject<{
         count: z.ZodNumber;
         timeframe: z.ZodNumber;
     }, z.core.$strip>>;
-    planTier: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    planTier: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+        basic: "basic";
+        enterprise: "enterprise";
+        premium: "premium";
+        pro: "pro";
+    }>>>;
     lastPaymentDate: z.ZodOptional<z.ZodObject<{
         daysAgo: z.ZodNumber;
     }, z.core.$strip>>;
@@ -207,7 +230,10 @@ export declare const dunningCampaignTemplateInputSchema: z.ZodObject<{
         }, z.core.$strip>>;
     }, z.core.$strip>;
 }, z.core.$strip>;
-/** The full set of steps of a campaign. Step numbers are unique: update matches steps by number. */
+/**
+ * The full set of steps of a campaign. Step numbers are unique: update matches steps by number. The
+ * steps run one after another, so their delays together stay within 100 years too.
+ */
 export declare const dunningCampaignTemplatesSchema: z.ZodArray<z.ZodObject<{
     name: z.ZodString;
     stepNumber: z.ZodNumber;
@@ -247,7 +273,16 @@ export declare const createDunningCampaignInputSchema: z.ZodObject<{
         }>;
         conditions: z.ZodObject<{
             paymentFailureCount: z.ZodOptional<z.ZodNumber>;
-            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+                active: "active";
+                canceled: "canceled";
+                incomplete: "incomplete";
+                incomplete_expired: "incomplete_expired";
+                past_due: "past_due";
+                paused: "paused";
+                trialing: "trialing";
+                unpaid: "unpaid";
+            }>>>;
             daysSinceLastPayment: z.ZodOptional<z.ZodNumber>;
             daysSinceFailure: z.ZodOptional<z.ZodNumber>;
             trialEndingDays: z.ZodOptional<z.ZodNumber>;
@@ -340,7 +375,16 @@ export declare const updateDunningCampaignInputSchema: z.ZodObject<{
         }>;
         conditions: z.ZodObject<{
             paymentFailureCount: z.ZodOptional<z.ZodNumber>;
-            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+                active: "active";
+                canceled: "canceled";
+                incomplete: "incomplete";
+                incomplete_expired: "incomplete_expired";
+                past_due: "past_due";
+                paused: "paused";
+                trialing: "trialing";
+                unpaid: "unpaid";
+            }>>>;
             daysSinceLastPayment: z.ZodOptional<z.ZodNumber>;
             daysSinceFailure: z.ZodOptional<z.ZodNumber>;
             trialEndingDays: z.ZodOptional<z.ZodNumber>;
@@ -495,7 +539,12 @@ export declare const createCustomerSegmentInputSchema: z.ZodObject<{
             count: z.ZodNumber;
             timeframe: z.ZodNumber;
         }, z.core.$strip>>;
-        planTier: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        planTier: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+            basic: "basic";
+            enterprise: "enterprise";
+            premium: "premium";
+            pro: "pro";
+        }>>>;
         lastPaymentDate: z.ZodOptional<z.ZodObject<{
             daysAgo: z.ZodNumber;
         }, z.core.$strip>>;
@@ -555,7 +604,12 @@ export declare const updateCustomerSegmentInputSchema: z.ZodObject<{
             count: z.ZodNumber;
             timeframe: z.ZodNumber;
         }, z.core.$strip>>;
-        planTier: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        planTier: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+            basic: "basic";
+            enterprise: "enterprise";
+            premium: "premium";
+            pro: "pro";
+        }>>>;
         lastPaymentDate: z.ZodOptional<z.ZodObject<{
             daysAgo: z.ZodNumber;
         }, z.core.$strip>>;
@@ -645,18 +699,21 @@ export declare const updateCommunicationStatusInputSchema: z.ZodObject<{
     providerResponse: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     trackingData: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>;
+/**
+ * A delivery callback from a channel provider, as `CommunicationOrchestrationService.handleCommunicationWebhook`
+ * reads it: the provider's message id, the event, when it happened, and the provider's extra data.
+ */
 export declare const communicationWebhookSchema: z.ZodObject<{
-    communicationId: z.ZodTemplateLiteral<`dcm${string}`>;
+    providerMessageId: z.ZodString;
     event: z.ZodEnum<{
         bounced: "bounced";
         clicked: "clicked";
         complained: "complained";
         delivered: "delivered";
         opened: "opened";
-        sent: "sent";
     }>;
     timestamp: z.ZodType<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant, z.core.$ZodTypeInternals<import("temporal-spec").Temporal.Instant, string | Date | import("temporal-spec").Temporal.Instant>>;
-    providerData: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+    metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>;
 export declare const bulkExecuteCampaignInputSchema: z.ZodObject<{
     campaignIds: z.ZodArray<z.ZodTemplateLiteral<`dc${string}`>>;
@@ -844,7 +901,16 @@ export declare const dunningCampaignResponseSchema: z.ZodObject<{
         }>;
         conditions: z.ZodObject<{
             paymentFailureCount: z.ZodOptional<z.ZodNumber>;
-            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+                active: "active";
+                canceled: "canceled";
+                incomplete: "incomplete";
+                incomplete_expired: "incomplete_expired";
+                past_due: "past_due";
+                paused: "paused";
+                trialing: "trialing";
+                unpaid: "unpaid";
+            }>>>;
             daysSinceLastPayment: z.ZodOptional<z.ZodNumber>;
             daysSinceFailure: z.ZodOptional<z.ZodNumber>;
             trialEndingDays: z.ZodOptional<z.ZodNumber>;
@@ -936,7 +1002,12 @@ export declare const customerSegmentResponseSchema: z.ZodObject<{
             count: z.ZodNumber;
             timeframe: z.ZodNumber;
         }, z.core.$strip>>;
-        planTier: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        planTier: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+            basic: "basic";
+            enterprise: "enterprise";
+            premium: "premium";
+            pro: "pro";
+        }>>>;
         lastPaymentDate: z.ZodOptional<z.ZodObject<{
             daysAgo: z.ZodNumber;
         }, z.core.$strip>>;
@@ -1013,7 +1084,16 @@ export declare const updateCampaignWrapperInputSchema: z.ZodObject<{
             }>;
             conditions: z.ZodObject<{
                 paymentFailureCount: z.ZodOptional<z.ZodNumber>;
-                subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                subscriptionStatus: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+                    active: "active";
+                    canceled: "canceled";
+                    incomplete: "incomplete";
+                    incomplete_expired: "incomplete_expired";
+                    past_due: "past_due";
+                    paused: "paused";
+                    trialing: "trialing";
+                    unpaid: "unpaid";
+                }>>>;
                 daysSinceLastPayment: z.ZodOptional<z.ZodNumber>;
                 daysSinceFailure: z.ZodOptional<z.ZodNumber>;
                 trialEndingDays: z.ZodOptional<z.ZodNumber>;
@@ -1142,7 +1222,12 @@ export declare const updateSegmentWrapperInputSchema: z.ZodObject<{
                 count: z.ZodNumber;
                 timeframe: z.ZodNumber;
             }, z.core.$strip>>;
-            planTier: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            planTier: z.ZodOptional<z.ZodArray<z.ZodEnum<{
+                basic: "basic";
+                enterprise: "enterprise";
+                premium: "premium";
+                pro: "pro";
+            }>>>;
             lastPaymentDate: z.ZodOptional<z.ZodObject<{
                 daysAgo: z.ZodNumber;
             }, z.core.$strip>>;

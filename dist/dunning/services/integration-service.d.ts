@@ -1,13 +1,21 @@
 import type { Instant } from '@arki/date';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import type { MoneyFailure } from '@arki/money';
 import { Money } from '@arki/money';
 import type { PaymentRetryService } from '../../core/services/payment-retry-service.js';
+import { ReferenceNotFound } from '../../core/providers/provider-error.js';
 import type { CoreTables } from '../../core/tables.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../../core/types.js';
 import type { DunningTables } from '../tables.js';
 import type { DunningTickReport } from '../failures.js';
+import type { PaymentsConfigurationInvalid } from '../../core/failures.js';
 import type { CommunicationOrchestrationConfig } from './communication-service.js';
 import type { DunningDatabase } from '../repository.js';
+/**
+ * What an event handler that updates the risk profile can return: a stored amount money refuses, an unknown
+ * customer, or the risk profile write's `schema.invalid_input`.
+ */
+type HandlerFailure = MoneyFailure | FailureOf<typeof ReferenceNotFound> | SchemaFailure;
 /**
  * Events that trigger dunning campaigns
  */
@@ -42,12 +50,20 @@ export declare class DunningIntegrationService {
     private readonly dunningCampaigns;
     private readonly dunningCommunications;
     private readonly customerSegments;
-    constructor(db: DunningDatabase, coreTables: DunningIntegrationCoreTables, dunningTables: DunningIntegrationDunningTables, config: DunningIntegrationConfig, paymentRetryService?: PaymentRetryService | undefined);
+    private constructor();
+    /**
+     * Builds the service, or returns `payments.configuration_invalid` for a channel setting in
+     * `config.communication` that no provider can use (see `createCommunicationOrchestrationService`).
+     */
+    static create(db: DunningDatabase, coreTables: DunningIntegrationCoreTables, dunningTables: DunningIntegrationDunningTables, config: DunningIntegrationConfig, paymentRetryService?: PaymentRetryService): DunningIntegrationService | FailureOf<typeof PaymentsConfigurationInvalid>;
     /**
      * Handle payment failure events from the payment system.
      *
      * A campaign whose stored spend range is not valid money (`@arki/money` refuses it) is skipped, and the
      * first such failure is returned after the other campaigns have run, so one bad campaign stops no other.
+     * A customer, payment or subscription the event names with no row returns `ReferenceNotFound` (a payment
+     * with no subscription only has no retries). A campaign run that throws (a database error) is thrown,
+     * never logged and dropped, so the caller can retry the event.
      */
     handlePaymentFailure(event: {
         paymentId: PaymentId;
@@ -57,9 +73,13 @@ export declare class DunningIntegrationService {
         amount: Money;
         failureCount: number;
         metadata?: Record<string, unknown>;
-    }): Promise<void | MoneyFailure>;
+    }): Promise<void | HandlerFailure>;
     /**
-     * Handle subscription status changes
+     * Handle subscription status changes. An unknown customer returns `ReferenceNotFound` (`kind: 'customer'`)
+     * from the risk profile update, before any campaign runs. The subscription id is not looked up: an
+     * unknown one returns no failure (the campaigns pick customers from stored subscriptions). A row
+     * deleted while a campaign schedules returns its `ReferenceNotFound`, and a stored segment range money
+     * refuses its `MoneyFailure`. A campaign run that throws is thrown, so the caller can retry the event.
      */
     handleSubscriptionStatusChange(event: {
         subscriptionId: SubscriptionId;
@@ -67,9 +87,12 @@ export declare class DunningIntegrationService {
         oldStatus: string;
         newStatus: string;
         metadata?: Record<string, unknown>;
-    }): Promise<void | MoneyFailure>;
+    }): Promise<void | HandlerFailure>;
     /**
-     * Handle trial ending notifications
+     * Handle trial ending notifications. The customer and subscription ids are not looked up: an unknown
+     * one matches no stored trial, so no campaign runs and no failure is returned. A row deleted while a
+     * campaign schedules returns its `ReferenceNotFound`, and a stored segment range money refuses its
+     * `MoneyFailure`. A campaign run that throws is thrown, so the caller can retry the event.
      */
     handleTrialEnding(event: {
         subscriptionId: SubscriptionId;
@@ -77,9 +100,11 @@ export declare class DunningIntegrationService {
         trialEndDate: Instant;
         daysUntilEnd: number;
         metadata?: Record<string, unknown>;
-    }): Promise<void | MoneyFailure>;
+    }): Promise<void | HandlerFailure>;
     /**
-     * Handle successful payment events (can stop dunning campaigns)
+     * Handle successful payment events (can stop dunning campaigns). An unknown customer returns
+     * `ReferenceNotFound`; a database error while stopping the active executions is thrown, never logged
+     * and dropped, so the caller can retry the event.
      */
     handlePaymentSuccess(event: {
         paymentId: PaymentId;
@@ -87,9 +112,11 @@ export declare class DunningIntegrationService {
         subscriptionId?: SubscriptionId;
         amount: Money;
         metadata?: Record<string, unknown>;
-    }): Promise<void | MoneyFailure>;
+    }): Promise<void | HandlerFailure>;
     /**
-     * Execute a specific campaign for a customer
+     * Execute a specific campaign for a customer. A customer, subscription or payment the event names
+     * with no row returns its `ReferenceNotFound`. A campaign deleted, paused or emptied since it was
+     * listed as active is skipped (the other campaigns still run).
      */
     private executeCampaignForCustomer;
     /**
@@ -105,7 +132,9 @@ export declare class DunningIntegrationService {
      */
     private handleSubscriptionRecovery;
     /**
-     * Stop active dunning campaigns when payment succeeds (if configured)
+     * Stop active dunning campaigns when payment succeeds (if configured). The executions are cancelled
+     * in one statement: a database error is thrown, so a caller never sees success while dunning goes on.
+     * An id no row can hold (U+0000) has no executions to stop, answered without a query.
      */
     private stopDunningCampaignsOnPaymentSuccess;
     /**
@@ -151,7 +180,9 @@ export declare class DunningIntegrationService {
     /**
      * Execution and communication counts of the last `days` days, from the stored rows. `successRate`
      * is completed executions over all executions (0 to 1); `averageProcessingTime` is the mean
-     * processing time, in milliseconds, recorded on completed executions.
+     * processing time, in milliseconds, recorded on completed executions. Precondition (anything else
+     * throws an invariant failure and runs no query): `days` is a whole number from 0 to `MAX_DUNNING_DAYS`
+     * (100 years).
      */
     getIntegrationMetrics(days?: number): Promise<{
         totalExecutions: number;
@@ -163,7 +194,11 @@ export declare class DunningIntegrationService {
     }>;
 }
 /**
- * Factory function to create DunningIntegrationService.
+ * Factory function to create DunningIntegrationService: {@link DunningIntegrationService.create}.
  */
-export declare function createDunningIntegrationService(db: DunningDatabase, coreTables: DunningIntegrationCoreTables, dunningTables: DunningIntegrationDunningTables, config: DunningIntegrationConfig, paymentRetryService?: PaymentRetryService): DunningIntegrationService;
+export declare function createDunningIntegrationService(db: DunningDatabase, coreTables: DunningIntegrationCoreTables, dunningTables: DunningIntegrationDunningTables, config: DunningIntegrationConfig, paymentRetryService?: PaymentRetryService): DunningIntegrationService | import("@arki/failure").Failure<"payments.configuration_invalid", {
+    setting: string;
+    problem: string;
+}>;
+export {};
 //# sourceMappingURL=integration-service.d.ts.map

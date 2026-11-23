@@ -1,11 +1,12 @@
-import type { IdGenerationFailure } from '@arki/contracts';
 import Stripe from 'stripe';
 
-import type { UserId } from '../user-id.js';
-import { fromUnix, now } from '@arki/date';
-import type { FailureOf, Result } from '@arki/failure';
-import { isFailure } from '@arki/failure';
+import type { IdGenerationFailure } from '@arki/contracts';
+import type { FailureOf, Result, SchemaFailure } from '@arki/failure';
 import type { MoneyFailure } from '@arki/money';
+import { z } from '@arki/contracts';
+import { fromUnix, now } from '@arki/date';
+import { invariant, isFailure } from '@arki/failure';
+import { getLogger } from '@arki/log';
 import {
   AmountOutOfRange,
   Currency,
@@ -14,8 +15,10 @@ import {
   ProviderAmount,
   ProviderAmountError,
   sum,
+  UnknownCurrencyError,
 } from '@arki/money';
 import { fromStripeAmount, toStripeAmount } from '@arki/money/stripe';
+import { is, parse } from '@arki/schema';
 
 import type { RefundId } from '../../refunds/primitives.js';
 import type {
@@ -34,28 +37,33 @@ import type {
   SubscriptionPreview,
   WebhookValidationResult,
 } from '../types.js';
+import type { UserId } from '../user-id.js';
 import type { PaymentProviderConfig, ProviderRefundResult } from './base-provider.js';
 import type { CardDeclined, IdempotencyConflict } from './provider-error.js';
-import { toMinorColumn } from '../money.js';
+import { PaymentsConfigurationInvalid } from '../failures.js';
+import { holdsLoneSurrogate, MAX_BATCH_ITEMS, pgJsonRecordSchema, pgTextSchema } from '../pg-values.js';
 import { createCustomerId, createPaymentId, createPlanId, createSubscriptionId, planIdSchema } from '../primitives.js';
-import { BasePaymentProvider } from './base-provider.js';
 import { observePayments } from '../telemetry.js';
+import { BasePaymentProvider } from './base-provider.js';
 import {
+  cardDeclinedOf,
+  idempotencyConflictOf,
   InvalidWebhookSignature,
+  mapStripeError,
   PaymentMethodRequired,
   PaymentProviderError,
   PlanPriceNotFlat,
   ReferenceNotFound,
   TaxAddressIncomplete,
-  cardDeclinedOf,
-  idempotencyConflictOf,
-  mapStripeError,
 } from './provider-error.js';
 import { mapStripeEventType } from './stripe-event-types.js';
 
+const logger = getLogger('arki:payments:stripe');
+
 /**
  * The rows the provider reads to turn our ids into Stripe ids. A `PaymentRepository` fits.
- * Without it, the calls that take a customer, plan, subscription or payment id throw `not_configured`.
+ * Without it, the calls that take a customer, plan, subscription or payment id return
+ * `PaymentsConfigurationInvalid` (`payments.configuration_invalid`, setting `references`) and send no request.
  * An id with no row, or a row with no Stripe id, is returned as `ReferenceNotFound` before any request.
  */
 export type StripeReferenceReads = {
@@ -69,7 +77,10 @@ export type StripeProviderOptions = {
   references?: StripeReferenceReads;
   /** Replaces Stripe's HTTP layer. Tests pass one that never leaves the process. */
   httpClient?: Stripe.HttpClient;
-  /** Retries of network failures and 5xx answers. Stripe's default is 1. */
+  /**
+   * Retries of network failures and 5xx answers: a whole number, 0 or more. Stripe's default is 1.
+   * Anything else is returned as `payments.configuration_invalid` when the provider is built.
+   */
   maxNetworkRetries?: number;
 };
 
@@ -95,16 +106,158 @@ function stripeAmountOf(amount: Money) {
   }
 }
 
+/**
+ * The currency a tax call names, read from the caller's code. A code outside ISO 4217 (a custom
+ * currency such as `PTS`, or a typo such as `us`) has no Stripe rule, so it is returned as
+ * `ProviderAmount` with an `UnknownCurrencyError` as `cause`, as `stripeAmountOf` does for a custom currency.
+ */
+function stripeCurrencyOf(code: string) {
+  const upper = code.toUpperCase();
+  const currency = Currency.parse(upper);
+  return isFailure(currency) ? ProviderAmount({ cause: new UnknownCurrencyError(upper.slice(0, 32)) }) : currency;
+}
+
+/**
+ * Our minor-unit column for an amount Stripe sent. Stripe can send more than a column holds: its zero-decimal
+ * MGA unit is 100 of our minor units, and so a Stripe amount near 2^53 is past 2^53 - 1 minor units here. That
+ * is returned as `AmountOutOfRange` (`money.out_of_range`), as `fromStripeAmount` returns one past 2^53 Stripe units.
+ */
+function minorColumnOf(amount: Money) {
+  const units = amount.toMinorUnits();
+  return typeof units === 'number' ? units : AmountOutOfRange();
+}
+
 /** An amount of ours that Stripe cannot take: what `stripeAmountOf` returns instead of units. */
 type SendAmountFailure = Exclude<ReturnType<typeof stripeAmountOf>, number>;
 /** An amount Stripe sent that is not a valid `Money`: what `fromStripeAmount` returns instead. */
 type ReadAmountFailure = Exclude<ReturnType<typeof fromStripeAmount>, Money>;
 type NotFound = FailureOf<typeof ReferenceNotFound>;
 type NotFlat = FailureOf<typeof PlanPriceNotFlat>;
+/** The provider was built without `references`, which the call needs (`payments.configuration_invalid`). */
+type NotConfigured = FailureOf<typeof PaymentsConfigurationInvalid>;
 type Declined = FailureOf<typeof CardDeclined>;
 type Conflict = FailureOf<typeof IdempotencyConflict>;
 
-/** Metadata Stripe accepts: strings only. Objects become JSON, null and undefined are left out. */
+/**
+ * The caller's `metadata`, checked before any request: it is sent to Stripe as JSON text and kept on the
+ * row we return, so a value `JSON.stringify` or a jsonb column cannot take (a `bigint` anywhere, U+0000 in
+ * a key or a string) is returned as `InvalidInput` (`schema.invalid_input`).
+ */
+function checkMetadata(metadata: Record<string, unknown> | undefined) {
+  return parse(pgJsonRecordSchema.optional(), metadata);
+}
+
+/** Text Stripe's form encoder can take: a lone surrogate (such as U+D800 alone) makes it throw a raw `URIError`. */
+const stripeTextsSchema = z.record(
+  z.string(),
+  z
+    .string()
+    .refine(value => !holdsLoneSurrogate(value), 'Text cannot contain a lone surrogate (such as U+D800 alone)')
+    .optional(),
+);
+
+/**
+ * The caller's text parameters, checked before any request: one Stripe cannot take (a lone surrogate)
+ * is returned as `InvalidInput` (`schema.invalid_input`), the key naming the parameter.
+ */
+function checkStripeTexts(texts: Record<string, string | undefined>) {
+  return parse(stripeTextsSchema, texts);
+}
+
+/** The proration choices Stripe takes; any other text is returned as `InvalidInput` before any request. */
+const prorationBehaviorSchema = z.enum(['create_prorations', 'none', 'always_invoice']).optional();
+
+/** The lists of a tax call: at most `MAX_BATCH_ITEMS` (1,000) line items and as many tax ids; more is `InvalidInput`. */
+const taxListsSchema = z.object({
+  lineItems: z.array(z.unknown()).max(MAX_BATCH_ITEMS),
+  taxIds: z.array(z.unknown()).max(MAX_BATCH_ITEMS).optional(),
+});
+
+/** Every free-text field of a tax call (references, tax codes, address, tax ids), keyed by its path, for `checkStripeTexts`. */
+function taxTextsOf(params: {
+  reference?: string;
+  originalTransactionId?: string;
+  lineItems: { reference: string; taxCode?: string }[];
+  customerDetails?: TaxCustomerDetails;
+}) {
+  const texts: Record<string, string | undefined> = {
+    reference: params.reference,
+    originalTransactionId: params.originalTransactionId,
+  };
+  for (const [index, item] of params.lineItems.entries()) {
+    texts[`lineItems.${index}.reference`] = item.reference;
+    texts[`lineItems.${index}.taxCode`] = item.taxCode;
+  }
+  const details = params.customerDetails;
+  for (const [field, value] of Object.entries(details?.address ?? {})) texts[`address.${field}`] = value;
+  for (const [index, taxId] of (details?.taxIds ?? []).entries()) {
+    texts[`taxIds.${index}.type`] = taxId.type;
+    texts[`taxIds.${index}.value`] = taxId.value;
+  }
+  return texts;
+}
+
+/**
+ * An idempotency key Stripe receives unchanged in the `Idempotency-Key` header: 1 to 255 printable
+ * ASCII characters (Stripe's length limit). A header cannot carry a control character, a line break
+ * or a character past U+00FF, and fetch trims outer spaces.
+ */
+const idempotencyKeySchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[\u0021-\u007E](?:[\u0020-\u007E]*[\u0021-\u007E])?$/, 'must be printable ASCII with no outer spaces');
+
+/**
+ * The request options for the caller's idempotency key, checked before any request: a key a header
+ * cannot carry is returned as `InvalidInput` (`schema.invalid_input`) instead of failing inside
+ * Stripe's HTTP client, where it would look like a retryable outage.
+ */
+function requestOptionsOf(idempotencyKey: string | undefined) {
+  if (idempotencyKey === undefined) return;
+  const key = parse(idempotencyKeySchema, idempotencyKey);
+  if (isFailure(key)) return key;
+  return { idempotencyKey: key };
+}
+
+/**
+ * The precondition of a count of days or intervals we send to Stripe and keep on a row: a whole number
+ * from 1 to `max`. Anything else throws an invariant failure before any request.
+ */
+function assertWholeCount(value: number | undefined, name: string, max: number): void {
+  invariant(
+    value === undefined || (Number.isSafeInteger(value) && value >= 1 && value <= max),
+    () => `[@arki/payments] ${name} must be a whole number from 1 to ${max}`,
+  );
+}
+
+/**
+ * The preconditions of tax line items that the types cannot state: a `quantity`, when given, is a
+ * whole number of 1 or more (Stripe takes no other). Anything else throws an invariant failure
+ * before any request, where it used to throw a raw `RoundingNecessaryError` or `NumericRangeError`.
+ */
+function assertQuantities(lineItems: { quantity?: number }[]): void {
+  for (const item of lineItems) {
+    invariant(
+      item.quantity === undefined || (Number.isSafeInteger(item.quantity) && item.quantity >= 1),
+      '[@arki/payments] a tax line item quantity must be a whole number of 1 or more',
+    );
+  }
+}
+
+/**
+ * A line item's amount times its quantity, in the call's `currency`. A line item in another currency
+ * breaks the call's precondition (one calculation has one currency): it throws an invariant failure.
+ */
+function lineTotal(item: { amount: Money; quantity?: number }, currency: Currency): Money {
+  invariant(
+    item.amount.currency.code === currency.code,
+    () => `[@arki/payments] every tax line item must be in ${currency.code}, the currency of the call`,
+  );
+  return item.amount.times(item.quantity ?? 1);
+}
+
+/** Metadata Stripe accepts: strings only. Objects become JSON, null and undefined are left out. Run `checkMetadata` on caller metadata first. */
 function toStripeMetadata(metadata: Record<string, unknown> | undefined): Stripe.MetadataParam | undefined {
   if (!metadata) return undefined;
   const out: Stripe.MetadataParam = {};
@@ -155,23 +308,25 @@ type TaxTransactionParams = {
 
 /**
  * The Stripe tax calculation params for line items in one currency. Shared by quotes and recorded transactions.
- * Returns `TaxAddressIncomplete` for an address with no country (the package's `customerDetails` input
- * schema allows one) and the money failure of a line amount Stripe cannot take. A line item in another
- * currency than `currency`, or a fractional quantity, throws: both are the caller's own typed values.
+ * Returns `ProviderAmount` for a currency outside ISO 4217, `TaxAddressIncomplete` for an address with no
+ * country (the package's `customerDetails` input schema allows one) and the money failure of a line amount
+ * Stripe cannot take. A line item in another currency than `currency` breaks a precondition and throws
+ * an invariant failure (`lineTotal`); quantities were checked at the public door (`assertQuantities`).
  */
 function toTaxCalculationParams(params: {
   currency: string;
   lineItems: { amount: Money; quantity?: number; reference: string; taxCode?: string }[];
   customerDetails?: TaxCustomerDetails;
 }) {
-  const currency = params.currency.toUpperCase();
+  const currency = stripeCurrencyOf(params.currency);
+  if (isFailure(currency)) return currency;
   const address = params.customerDetails?.address;
   if (address && !address.country) return TaxAddressIncomplete();
 
   const lineItems: Stripe.Tax.CalculationCreateParams.LineItem[] = [];
   for (const item of params.lineItems) {
-    // Throws CurrencyMismatchError for a line item in another currency. A whole quantity times an amount is exact.
-    const amount = stripeAmountOf(Money.of(item.amount, currency).times(item.quantity ?? 1));
+    // A whole quantity times an amount is exact
+    const amount = stripeAmountOf(lineTotal(item, currency));
     if (isFailure(amount)) return amount;
     lineItems.push({
       amount,
@@ -225,7 +380,11 @@ export class StripeProvider extends BasePaymentProvider {
     taxReporting: false,
   };
 
-  constructor(config: PaymentProviderConfig, options: StripeProviderOptions = {}) {
+  /**
+   * Build a Stripe provider with `StripeProvider.create`. The constructor is private so that a bad
+   * setting is a returned failure, not a throw.
+   */
+  private constructor(config: PaymentProviderConfig, options: StripeProviderOptions) {
     super(config);
     this.references = options.references;
     this.stripe = new Stripe(config.apiKey, {
@@ -237,10 +396,32 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   /**
+   * A Stripe provider for `config`. Returns `PaymentsConfigurationInvalid` (`payments.configuration_invalid`) when
+   * `config.apiKey` is empty (the Stripe client throws on one) or `options.maxNetworkRetries` is not a whole
+   * number of retries, 0 or more.
+   */
+  static create(
+    config: PaymentProviderConfig,
+    options: StripeProviderOptions = {},
+  ): StripeProvider | FailureOf<typeof PaymentsConfigurationInvalid> {
+    if (config.apiKey.length === 0) {
+      return PaymentsConfigurationInvalid({ setting: 'apiKey', problem: 'a Stripe secret key, not empty' });
+    }
+    const retries = options.maxNetworkRetries;
+    if (retries !== undefined && !(Number.isSafeInteger(retries) && retries >= 0)) {
+      return PaymentsConfigurationInvalid({
+        setting: 'maxNetworkRetries',
+        problem: 'a whole number of retries, 0 or more',
+      });
+    }
+    return new StripeProvider(config, options);
+  }
+
+  /**
    * Runs one Stripe request in a `payments.<operation>` span, where `operation` names the Stripe
    * resource and method (`stripe.payment_intents.create`). `answer` turns the errors the call expects
    * (a declined card, a reused idempotency key) into returned failures, which the span records as
-   * `payments.failure_code`; any other Stripe error is thrown as a `PaymentProviderError`.
+   * `failure.code`; any other Stripe error is thrown as a `PaymentProviderError`.
    */
   private async call<T, Answer = never>(
     operation: string,
@@ -253,28 +434,46 @@ export class StripeProvider extends BasePaymentProvider {
       } catch (error) {
         const expected = answer?.(error);
         if (expected !== undefined) return expected;
+        // Stripe's form encoder throws a raw URIError for a lone surrogate (such as U+D800 alone) in a
+        // text parameter: caller input Stripe cannot take, thrown as the documented bad-input error
+        if (error instanceof URIError) {
+          throw new PaymentProviderError(
+            'invalid_request',
+            'A text parameter holds a lone surrogate (such as U+D800 alone), which Stripe cannot take',
+            { cause: error },
+          );
+        }
         throw mapStripeError(error);
       }
     });
   }
 
-  private requireReferences(): StripeReferenceReads {
-    if (!this.references) {
-      throw new PaymentProviderError(
-        'not_configured',
-        'StripeProvider needs `references` (a repository) to turn customer, plan and subscription ids into Stripe ids',
-      );
-    }
-    return this.references;
+  /** `references`, or `PaymentsConfigurationInvalid` when the provider was built without it: the call then sends no request. */
+  private requireReferences(): StripeReferenceReads | NotConfigured {
+    return (
+      this.references ??
+      PaymentsConfigurationInvalid({
+        setting: 'references',
+        problem: 'a repository that turns customer, plan, subscription and payment ids into Stripe ids',
+      })
+    );
   }
 
+  /*
+   * The ref helpers and the `get*` reads answer an id no row can hold (U+0000) as missing, without
+   * asking `references`: a lookup by it would fail in Postgres with a raw 22021.
+   */
   private async customerRef(customerId: CustomerId) {
-    const customer = await this.requireReferences().findCustomerById(customerId);
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const customer = is(customerId, pgTextSchema) ? await references.findCustomerById(customerId) : null;
     return customer ?? ReferenceNotFound({ kind: 'customer', id: customerId, missing: 'row' });
   }
 
   private async planRef(planId: PlanId) {
-    const plan = await this.requireReferences().findPlanById(planId);
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const plan = is(planId, pgTextSchema) ? await references.findPlanById(planId) : null;
     return plan ?? ReferenceNotFound({ kind: 'plan', id: planId, missing: 'row' });
   }
 
@@ -294,12 +493,18 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   private async paymentRef(paymentId: PaymentId) {
-    const payment = await this.requireReferences().findPaymentById(paymentId);
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const payment = is(paymentId, pgTextSchema) ? await references.findPaymentById(paymentId) : null;
     return payment ?? ReferenceNotFound({ kind: 'payment', id: paymentId, missing: 'row' });
   }
 
   private async subscriptionRef(subscriptionId: SubscriptionId) {
-    const subscription = await this.requireReferences().findSubscriptionById(subscriptionId);
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const subscription = is(subscriptionId, pgTextSchema)
+      ? await references.findSubscriptionById(subscriptionId)
+      : null;
     return subscription ?? ReferenceNotFound({ kind: 'subscription', id: subscriptionId, missing: 'row' });
   }
 
@@ -333,12 +538,17 @@ export class StripeProvider extends BasePaymentProvider {
     };
   }
 
+  /** A Stripe customer for the user, and the customer row to store. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
   async createCustomer(params: {
     userId: UserId;
     email: string;
     name?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<Customer | IdGenerationFailure> {
+  }): Promise<Customer | IdGenerationFailure | SchemaFailure> {
+    const texts = checkStripeTexts({ userId: params.userId, email: params.email, name: params.name });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
     const customerId = createCustomerId();
     if (isFailure(customerId)) return customerId;
 
@@ -346,10 +556,7 @@ export class StripeProvider extends BasePaymentProvider {
       this.stripe.customers.create({
         email: params.email,
         name: params.name,
-        metadata: {
-          userId: params.userId,
-          ...params.metadata,
-        },
+        metadata: toStripeMetadata({ ...params.metadata, userId: params.userId }),
       }),
     );
 
@@ -380,8 +587,10 @@ export class StripeProvider extends BasePaymentProvider {
     };
   }
 
-  async getCustomer(customerId: CustomerId): Promise<Customer | null> {
-    const row = await this.requireReferences().findCustomerById(customerId);
+  async getCustomer(customerId: CustomerId): Promise<Result<Customer | null, NotConfigured>> {
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const row = is(customerId, pgTextSchema) ? await references.findCustomerById(customerId) : null;
     if (!row) return null;
 
     const stripeCustomer = await this.call('stripe.customers.retrieve', () =>
@@ -392,10 +601,15 @@ export class StripeProvider extends BasePaymentProvider {
     return this.toCustomer(row, stripeCustomer);
   }
 
+  /** The customer after Stripe applied the change. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
   async updateCustomer(
     customerId: CustomerId,
     params: { email?: string; name?: string; metadata?: Record<string, unknown> },
-  ): Promise<Result<Customer, NotFound>> {
+  ): Promise<Result<Customer, NotFound | NotConfigured | SchemaFailure>> {
+    const texts = checkStripeTexts({ email: params.email, name: params.name });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
     const row = await this.customerRef(customerId);
     if (isFailure(row)) return row;
 
@@ -424,10 +638,12 @@ export class StripeProvider extends BasePaymentProvider {
     if (price.unit_amount === null || !price.recurring) return PlanPriceNotFlat({ priceId: price.id });
     const amount = fromStripeAmount(price.unit_amount, price.currency);
     if (isFailure(amount)) return amount;
+    const priceMinor = minorColumnOf(amount);
+    if (isFailure(priceMinor)) return priceMinor;
     return {
       ...row,
       name: productName ?? row.name,
-      priceMinor: toMinorColumn(amount),
+      priceMinor,
       currency: amount.currency.code,
       interval: this.mapStripeIntervalToBilling(price.recurring.interval),
       intervalCount: price.recurring.interval_count,
@@ -447,6 +663,11 @@ export class StripeProvider extends BasePaymentProvider {
     return product.name;
   }
 
+  /**
+   * A Stripe product and recurring price for the plan, and the plan row to store. `intervalCount` and
+   * `trialPeriodDays`, when given, are whole numbers from 1 to 365 (a precondition: anything else throws
+   * an invariant failure before any request). `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request.
+   */
   async createPlan(params: {
     name: string;
     description?: string;
@@ -458,12 +679,21 @@ export class StripeProvider extends BasePaymentProvider {
     intervalCount?: number;
     trialPeriodDays?: number;
     metadata?: Record<string, unknown>;
-  }): Promise<Result<Plan, IdGenerationFailure | SendAmountFailure>> {
+  }): Promise<Result<Plan, IdGenerationFailure | SendAmountFailure | SchemaFailure>> {
+    assertWholeCount(params.intervalCount, 'intervalCount', 365);
+    assertWholeCount(params.trialPeriodDays, 'trialPeriodDays', 365);
+    const texts = checkStripeTexts({ name: params.name, description: params.description });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
     const planId = createPlanId();
     if (isFailure(planId)) return planId;
     // Before any request: a price Stripe cannot take must not leave a product behind
     const unitAmount = stripeAmountOf(params.amount);
     if (isFailure(unitAmount)) return unitAmount;
+    // Our row holds the price in minor units: past 2^53 - 1 of them (an MGA unit at Stripe is 100) has no row
+    const priceMinor = minorColumnOf(params.amount);
+    if (isFailure(priceMinor)) return priceMinor;
     const stripeProduct = await this.call('stripe.products.create', () =>
       this.stripe.products.create({
         name: params.name,
@@ -484,14 +714,18 @@ export class StripeProvider extends BasePaymentProvider {
         // `planId` lets `listPlans` find our row from a Stripe price
         metadata: toStripeMetadata({ ...params.metadata, planId }),
       }),
-    );
+    ).catch(async (error: unknown) => {
+      // A product with no price is no plan: delete it, then throw the price error as before
+      await this.deleteOrphanProduct(stripeProduct.id);
+      throw error;
+    });
 
     const plan: Plan = {
       id: planId,
       name: params.name,
       description: params.description ?? null,
       tier: params.tier,
-      priceMinor: toMinorColumn(params.amount),
+      priceMinor,
       currency: params.amount.currency.code,
       interval: params.interval,
       intervalCount: params.intervalCount || 1,
@@ -505,9 +739,26 @@ export class StripeProvider extends BasePaymentProvider {
     return plan;
   }
 
+  /**
+   * Deletes a product `createPlan` made whose price Stripe refused. A failed delete is logged at WARN
+   * with the product id, and the caller still gets the price error `createPlan` throws.
+   */
+  private async deleteOrphanProduct(productId: string) {
+    try {
+      await this.call('stripe.products.del', () => this.stripe.products.del(productId));
+    } catch (error) {
+      logger.warn('Stripe product {productId} has no price and could not be deleted: {error}', {
+        productId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /** `null` when the plan has no row; `ReferenceNotFound` when its row has no Stripe price. */
-  async getPlan(planId: PlanId): Promise<Result<Plan | null, NotFound | NotFlat | ReadAmountFailure>> {
-    const row = await this.requireReferences().findPlanById(planId);
+  async getPlan(planId: PlanId): Promise<Result<Plan | null, NotFound | NotFlat | ReadAmountFailure | NotConfigured>> {
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const row = is(planId, pgTextSchema) ? await references.findPlanById(planId) : null;
     if (!row) return null;
     const priceId = this.priceIdOf(row);
     if (isFailure(priceId)) return priceId;
@@ -518,10 +769,15 @@ export class StripeProvider extends BasePaymentProvider {
     return this.toPlan(row, price, this.expandedProductName(price));
   }
 
+  /** The plan after Stripe applied the new name or metadata. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
   async updatePlan(
     planId: PlanId,
     params: { name?: string; metadata?: Record<string, unknown> },
-  ): Promise<Result<Plan, NotFound | NotFlat | ReadAmountFailure>> {
+  ): Promise<Result<Plan, NotFound | NotFlat | ReadAmountFailure | NotConfigured | SchemaFailure>> {
+    const texts = checkStripeTexts({ name: params.name });
+    if (isFailure(texts)) return texts;
+    const checked = checkMetadata(params.metadata);
+    if (isFailure(checked)) return checked;
     const row = await this.planRef(planId);
     if (isFailure(row)) return row;
     const priceId = this.priceIdOf(row);
@@ -542,7 +798,9 @@ export class StripeProvider extends BasePaymentProvider {
 
     const refreshed = this.toPlan(row, price, name);
     if (isFailure(refreshed)) return refreshed;
-    return params.metadata === undefined ? refreshed : { ...refreshed, metadata: { ...row.metadata, ...params.metadata } };
+    return params.metadata === undefined
+      ? refreshed
+      : { ...refreshed, metadata: { ...row.metadata, ...params.metadata } };
   }
 
   /** Stripe prices cannot be deleted, so a deleted plan is archived: the price and its product stop being sold. */
@@ -561,8 +819,9 @@ export class StripeProvider extends BasePaymentProvider {
    * The active plans Stripe sells that this package created: prices carrying our `planId` in their
    * metadata, whose row still exists. Prices made in the Stripe dashboard have no row here and are left out.
    */
-  async listPlans(): Promise<Result<Plan[], NotFlat | ReadAmountFailure>> {
+  async listPlans(): Promise<Result<Plan[], NotFlat | ReadAmountFailure | NotConfigured>> {
     const references = this.requireReferences();
+    if (isFailure(references)) return references;
     const prices = await this.call('stripe.prices.list', () =>
       this.stripe.prices
         .list({ active: true, type: 'recurring', expand: ['data.product'], limit: 100 })
@@ -572,7 +831,7 @@ export class StripeProvider extends BasePaymentProvider {
     const plans: Plan[] = [];
     for (const price of prices) {
       const parsed = planIdSchema.safeParse(price.metadata.planId);
-      if (!parsed.success) continue;
+      if (!parsed.success || !is(parsed.data, pgTextSchema)) continue;
       const row = await references.findPlanById(parsed.data);
       if (!row) continue;
       const plan = this.toPlan(row, price, this.expandedProductName(price));
@@ -582,6 +841,10 @@ export class StripeProvider extends BasePaymentProvider {
     return plans;
   }
 
+  /**
+   * A Stripe subscription to the plan's price. `trialPeriodDays`, when given, is a whole number from 1 to
+   * 365 (a precondition: anything else throws an invariant failure before any request). `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request.
+   */
   async createSubscription(params: {
     customerId: CustomerId;
     planId: PlanId;
@@ -590,6 +853,13 @@ export class StripeProvider extends BasePaymentProvider {
     metadata?: Record<string, unknown>;
     idempotencyKey?: string;
   }) {
+    assertWholeCount(params.trialPeriodDays, 'trialPeriodDays', 365);
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
+    const requestOptions = requestOptionsOf(params.idempotencyKey);
+    if (isFailure(requestOptions)) return requestOptions;
     const customer = await this.customerRef(params.customerId);
     if (isFailure(customer)) return customer;
     const priceId = await this.priceRef(params.planId);
@@ -614,7 +884,7 @@ export class StripeProvider extends BasePaymentProvider {
               planId: params.planId,
             }),
           },
-          params.idempotencyKey === undefined ? undefined : { idempotencyKey: params.idempotencyKey },
+          requestOptions,
         ),
       declinedOrConflictOf,
     );
@@ -630,8 +900,10 @@ export class StripeProvider extends BasePaymentProvider {
     });
   }
 
-  async getSubscription(subscriptionId: SubscriptionId): Promise<Subscription | null> {
-    const row = await this.requireReferences().findSubscriptionById(subscriptionId);
+  async getSubscription(subscriptionId: SubscriptionId): Promise<Result<Subscription | null, NotConfigured>> {
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const row = is(subscriptionId, pgTextSchema) ? await references.findSubscriptionById(subscriptionId) : null;
     if (!row) return null;
 
     const stripeSubscription = await this.call('stripe.subscriptions.retrieve', () =>
@@ -640,6 +912,7 @@ export class StripeProvider extends BasePaymentProvider {
     return this.toSubscription(stripeSubscription, row);
   }
 
+  /** The subscription after Stripe applied the change. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
   async updateSubscription(
     subscriptionId: SubscriptionId,
     params: {
@@ -651,6 +924,14 @@ export class StripeProvider extends BasePaymentProvider {
       idempotencyKey?: string;
     },
   ) {
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId });
+    if (isFailure(texts)) return texts;
+    const proration = parse(prorationBehaviorSchema, params.prorationBehavior);
+    if (isFailure(proration)) return proration;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
+    const requestOptions = requestOptionsOf(params.idempotencyKey);
+    if (isFailure(requestOptions)) return requestOptions;
     const current = await this.subscriptionRef(subscriptionId);
     if (isFailure(current)) return current;
     const priceId = params.planId === undefined ? undefined : await this.priceRef(params.planId);
@@ -677,12 +958,7 @@ export class StripeProvider extends BasePaymentProvider {
 
     const stripeSubscription = await this.call(
       'stripe.subscriptions.update',
-      () =>
-        this.stripe.subscriptions.update(
-          current.providerSubscriptionId,
-          update,
-          params.idempotencyKey === undefined ? undefined : { idempotencyKey: params.idempotencyKey },
-        ),
+      () => this.stripe.subscriptions.update(current.providerSubscriptionId, update, requestOptions),
       declinedOrConflictOf,
     );
     if (isFailure(stripeSubscription)) return stripeSubscription;
@@ -701,9 +977,12 @@ export class StripeProvider extends BasePaymentProvider {
     subscriptionId: SubscriptionId,
     options: { immediately?: boolean; reason?: string; idempotencyKey?: string },
   ) {
+    const texts = checkStripeTexts({ reason: options.reason });
+    if (isFailure(texts)) return texts;
+    const requestOptions = requestOptionsOf(options.idempotencyKey);
+    if (isFailure(requestOptions)) return requestOptions;
     const current = await this.subscriptionRef(subscriptionId);
     if (isFailure(current)) return current;
-    const requestOptions = options.idempotencyKey === undefined ? undefined : { idempotencyKey: options.idempotencyKey };
     const cancellationDetails = options.reason === undefined ? undefined : { comment: options.reason };
 
     const stripeSubscription = await this.call(
@@ -735,10 +1014,7 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   /** Updates the Stripe subscription and returns our subscription row as Stripe now has it. */
-  private async updateStripeSubscription(
-    subscriptionId: SubscriptionId,
-    update: Stripe.SubscriptionUpdateParams,
-  ) {
+  private async updateStripeSubscription(subscriptionId: SubscriptionId, update: Stripe.SubscriptionUpdateParams) {
     const current = await this.subscriptionRef(subscriptionId);
     if (isFailure(current)) return current;
     const stripeSubscription = await this.call('stripe.subscriptions.update', () =>
@@ -771,7 +1047,9 @@ export class StripeProvider extends BasePaymentProvider {
     subscriptionId: SubscriptionId;
     planId: PlanId;
     prorationBehavior?: 'create_prorations' | 'none' | 'always_invoice';
-  }): Promise<Result<SubscriptionPreview, NotFound | ReadAmountFailure>> {
+  }): Promise<Result<SubscriptionPreview, NotFound | ReadAmountFailure | NotConfigured | SchemaFailure>> {
+    const proration = parse(prorationBehaviorSchema, params.prorationBehavior);
+    if (isFailure(proration)) return proration;
     const current = await this.subscriptionRef(params.subscriptionId);
     if (isFailure(current)) return current;
     const priceId = await this.priceRef(params.planId);
@@ -799,10 +1077,18 @@ export class StripeProvider extends BasePaymentProvider {
     // The invoice's currency is Stripe's answer: one money refuses is a returned failure, not a throw
     const currency = Currency.parse(invoice.currency.toUpperCase());
     if (isFailure(currency)) return currency;
+    // The preview carries the first page of lines (10 by default); the rest are read by the preview's id
+    const lines = invoice.lines.has_more
+      ? await this.call('stripe.invoices.list_line_items', async () => {
+          const all: Stripe.InvoiceLineItem[] = [];
+          for await (const line of this.stripe.invoices.listLineItems(invoice.id, { limit: 100 })) all.push(line);
+          return all;
+        })
+      : invoice.lines.data;
     let charged = Money.zero(currency);
     let credited = Money.zero(currency);
     let next = Money.zero(currency);
-    for (const line of invoice.lines.data) {
+    for (const line of lines) {
       const amount = fromStripeAmount(line.amount, currency);
       if (isFailure(amount)) return amount;
       const proration = line.parent?.subscription_item_details?.proration ?? false;
@@ -832,16 +1118,22 @@ export class StripeProvider extends BasePaymentProvider {
   /** Our payment from a Stripe payment intent fetched with `expand: ['payment_method', 'latest_charge']`. */
   private toPayment(
     intent: Stripe.PaymentIntent,
-    base: Pick<Payment, 'id' | 'userId' | 'customerId' | 'subscriptionId' | 'metadata' | 'disputeId' | 'disputeStatus' | 'createdAt'>,
-  ): Payment | MoneyFailure {
+    base: Pick<
+      Payment,
+      'id' | 'userId' | 'customerId' | 'subscriptionId' | 'metadata' | 'disputeId' | 'disputeStatus' | 'createdAt'
+    >,
+  ): Payment | ReadAmountFailure {
     const amount = fromStripeAmount(intent.amount, intent.currency);
     if (isFailure(amount)) return amount;
+    const amountMinor = minorColumnOf(amount);
+    if (isFailure(amountMinor)) return amountMinor;
     const paymentMethod = intent.payment_method;
     const charge = intent.latest_charge;
     const chargeObject = charge !== null && typeof charge === 'object' ? charge : null;
     const refunded = chargeObject ? fromStripeAmount(chargeObject.amount_refunded, intent.currency) : null;
     if (isFailure(refunded)) return refunded;
-    const refundedMinor = refunded ? toMinorColumn(refunded) : 0;
+    const refundedMinor = refunded ? minorColumnOf(refunded) : 0;
+    if (isFailure(refundedMinor)) return refundedMinor;
 
     return {
       id: base.id,
@@ -849,7 +1141,7 @@ export class StripeProvider extends BasePaymentProvider {
       customerId: base.customerId,
       subscriptionId: base.subscriptionId,
       providerPaymentId: intent.id,
-      amountMinor: toMinorColumn(amount),
+      amountMinor,
       currency: amount.currency.code,
       status: this.mapPaymentIntentStatus(intent),
       paymentMethod:
@@ -894,7 +1186,7 @@ export class StripeProvider extends BasePaymentProvider {
     }
   }
 
-  /** Charges the payment method now, with the customer present. */
+  /** Charges the payment method now, with the customer present. `metadata` holding a `bigint` or U+0000 is `InvalidInput` (`schema.invalid_input`) before any request. */
   async createPayment(params: {
     customerId: CustomerId;
     amount: Money;
@@ -902,6 +1194,10 @@ export class StripeProvider extends BasePaymentProvider {
     description?: string;
     metadata?: Record<string, unknown>;
   }) {
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId, description: params.description });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
     const customer = await this.customerRef(params.customerId);
     if (isFailure(customer)) return customer;
 
@@ -942,8 +1238,10 @@ export class StripeProvider extends BasePaymentProvider {
     });
   }
 
-  async getPayment(paymentId: PaymentId): Promise<Payment | MoneyFailure | null> {
-    const row = await this.requireReferences().findPaymentById(paymentId);
+  async getPayment(paymentId: PaymentId): Promise<Payment | ReadAmountFailure | NotConfigured | null> {
+    const references = this.requireReferences();
+    if (isFailure(references)) return references;
+    const row = is(paymentId, pgTextSchema) ? await references.findPaymentById(paymentId) : null;
     if (!row) return null;
 
     const intent = await this.call('stripe.payment_intents.retrieve', () =>
@@ -983,6 +1281,7 @@ export class StripeProvider extends BasePaymentProvider {
    * The answer holds the Stripe refund id, its status and Stripe's `failure_reason`. A `pending`, `requires_action`, `failed` or
    * `canceled` refund is returned, not thrown. A key reused with different parameters returns
    * `IdempotencyConflict`; any other Stripe error throws a `PaymentProviderError`.
+   * `metadata` holding a `bigint` or U+0000, or an `idempotencyKey` a header cannot carry, is `InvalidInput` (`schema.invalid_input`) before any request.
    */
   async refundPayment(
     paymentId: PaymentId,
@@ -993,7 +1292,13 @@ export class StripeProvider extends BasePaymentProvider {
       reason?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<Result<ProviderRefundResult, NotFound | Conflict | SendAmountFailure>> {
+  ): Promise<Result<ProviderRefundResult, NotFound | Conflict | SendAmountFailure | NotConfigured | SchemaFailure>> {
+    const texts = checkStripeTexts({ refundId: params.refundId });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
+    const idempotencyKey = parse(idempotencyKeySchema, params.idempotencyKey);
+    if (isFailure(idempotencyKey)) return idempotencyKey;
     const row = await this.paymentRef(paymentId);
     if (isFailure(row)) return row;
     // The caller names the payment and builds the amount: an amount in another currency is its bug.
@@ -1019,7 +1324,7 @@ export class StripeProvider extends BasePaymentProvider {
             // Ours win over the caller's: `findRefund` matches on `refundId`
             metadata: toStripeMetadata({ ...params.metadata, paymentId: row.id, refundId: params.refundId }),
           },
-          { idempotencyKey: params.idempotencyKey },
+          { idempotencyKey },
         ),
       idempotencyConflictOf,
     );
@@ -1077,7 +1382,9 @@ export class StripeProvider extends BasePaymentProvider {
   async attachPaymentMethod(params: {
     customerId: CustomerId;
     paymentMethodId: string;
-  }): Promise<Result<PaymentMethodInfo, Declined | NotFound>> {
+  }): Promise<Result<PaymentMethodInfo, Declined | NotFound | NotConfigured | SchemaFailure>> {
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId });
+    if (isFailure(texts)) return texts;
     const customer = await this.customerRef(params.customerId);
     if (isFailure(customer)) return customer;
 
@@ -1090,8 +1397,11 @@ export class StripeProvider extends BasePaymentProvider {
     return this.toPaymentMethodInfo(method, await this.defaultPaymentMethodOf(customer.providerCustomerId));
   }
 
-  async detachPaymentMethod(paymentMethodId: string): Promise<void> {
+  async detachPaymentMethod(paymentMethodId: string): Promise<Result<undefined, SchemaFailure>> {
+    const texts = checkStripeTexts({ paymentMethodId });
+    if (isFailure(texts)) return texts;
     await this.call('stripe.payment_methods.detach', () => this.stripe.paymentMethods.detach(paymentMethodId));
+    return;
   }
 
   async listPaymentMethods(customerId: CustomerId) {
@@ -1108,6 +1418,8 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   async setDefaultPaymentMethod(params: { customerId: CustomerId; paymentMethodId: string }) {
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId });
+    if (isFailure(texts)) return texts;
     const customer = await this.customerRef(params.customerId);
     if (isFailure(customer)) return customer;
 
@@ -1119,6 +1431,10 @@ export class StripeProvider extends BasePaymentProvider {
     return;
   }
 
+  /**
+   * Checks the signature with Stripe's async `constructEventAsync`, which runs on Node, Bun, Deno and
+   * workers (their crypto is async only). A bad signature or an unreadable payload is `isValid: false`.
+   */
   async validateWebhook(
     payload: string | Buffer,
     signature: string,
@@ -1126,8 +1442,8 @@ export class StripeProvider extends BasePaymentProvider {
     _sourceIp: string,
   ): Promise<WebhookValidationResult> {
     try {
-      // Validate Stripe webhook signature
-      const event = this.stripe.webhooks.constructEvent(payload, signature, this.config.webhookSecret);
+      // The async check: Bun, Deno and workers have only async crypto (WebCrypto), where the sync `constructEvent` throws
+      const event = await this.stripe.webhooks.constructEventAsync(payload, signature, this.config.webhookSecret);
 
       return {
         isValid: true,
@@ -1153,10 +1469,11 @@ export class StripeProvider extends BasePaymentProvider {
    * `Stripe.Event` so it can narrow on `event.type` and read `event.data.object` as a
    * `Stripe.Subscription` with no unsafe cast. A bad, missing or stale signature returns
    * `InvalidWebhookSignature` (the Stripe error is its `cause`); a webhook route answers it with HTTP 400.
+   * Async: it uses Stripe's `constructEventAsync`, so it runs on Node, Bun, Deno and workers alike.
    */
-  constructWebhookEvent(payload: string | Buffer, signature: string) {
+  async constructWebhookEvent(payload: string | Buffer, signature: string) {
     try {
-      return this.stripe.webhooks.constructEvent(payload, signature, this.config.webhookSecret);
+      return await this.stripe.webhooks.constructEventAsync(payload, signature, this.config.webhookSecret);
     } catch (error) {
       if (error instanceof Stripe.errors.StripeSignatureVerificationError) {
         return InvalidWebhookSignature({ cause: error });
@@ -1166,10 +1483,9 @@ export class StripeProvider extends BasePaymentProvider {
     }
   }
 
-  async createSetupIntent(
-    customerId: CustomerId,
-    options: { idempotencyKey?: string } = {},
-  ) {
+  async createSetupIntent(customerId: CustomerId, options: { idempotencyKey?: string } = {}) {
+    const requestOptions = requestOptionsOf(options.idempotencyKey);
+    if (isFailure(requestOptions)) return requestOptions;
     const customer = await this.customerRef(customerId);
     if (isFailure(customer)) return customer;
 
@@ -1183,7 +1499,7 @@ export class StripeProvider extends BasePaymentProvider {
             automatic_payment_methods: { enabled: true },
             metadata: toStripeMetadata({ userId: customer.userId, customerId: customer.id }),
           },
-          options.idempotencyKey === undefined ? undefined : { idempotencyKey: options.idempotencyKey },
+          requestOptions,
         ),
       idempotencyConflictOf,
     );
@@ -1204,6 +1520,10 @@ export class StripeProvider extends BasePaymentProvider {
   }) {
     // The package's `createPaymentIntentInputSchema` lets this through (`automatic` defaults to true): returned
     if (params.automatic && params.paymentMethodId === undefined) return PaymentMethodRequired();
+    const texts = checkStripeTexts({ paymentMethodId: params.paymentMethodId });
+    if (isFailure(texts)) return texts;
+    const requestOptions = requestOptionsOf(params.idempotencyKey);
+    if (isFailure(requestOptions)) return requestOptions;
     const customer = await this.customerRef(params.customerId);
     if (isFailure(customer)) return customer;
     const amount = stripeAmountOf(params.amount);
@@ -1224,7 +1544,7 @@ export class StripeProvider extends BasePaymentProvider {
               ? { confirm: true, off_session: true }
               : { automatic_payment_methods: { enabled: true } }),
           },
-          params.idempotencyKey === undefined ? undefined : { idempotencyKey: params.idempotencyKey },
+          requestOptions,
         ),
       declinedOrConflictOf,
     );
@@ -1239,7 +1559,9 @@ export class StripeProvider extends BasePaymentProvider {
   async createCustomerPortalSession(
     providerCustomerId: string,
     returnUrl: string,
-  ): Promise<{ url: string }> {
+  ): Promise<Result<{ url: string }, SchemaFailure>> {
+    const texts = checkStripeTexts({ providerCustomerId, returnUrl });
+    if (isFailure(texts)) return texts;
     const session = await this.call('stripe.billing_portal.sessions.create', () =>
       this.stripe.billingPortal.sessions.create({ customer: providerCustomerId, return_url: returnUrl }),
     );
@@ -1254,6 +1576,9 @@ export class StripeProvider extends BasePaymentProvider {
    * `customer.subscription.*` webhooks that the billing preset projects into the `subscriptions`
    * table. We deliberately use Checkout rather than the raw `subscriptions.create` API so we never
    * touch card data (no PCI scope) and get trials + Stripe Tax for free.
+   *
+   * `trialPeriodDays`, when given, is a whole number from 1 to 730, Stripe's longest trial (a
+   * precondition: anything else throws an invariant failure before any request).
    */
   async createCheckoutSession(params: {
     /** Stripe Price ID for the plan being subscribed to. */
@@ -1271,24 +1596,38 @@ export class StripeProvider extends BasePaymentProvider {
     metadata?: Record<string, string>;
     /** Enable Stripe Tax (must be configured on the account) so EU VAT is calculated at checkout. */
     automaticTax?: boolean;
-  }): Promise<{ url: string; sessionId: string }> {
-    const session = await this.call('stripe.checkout.sessions.create', () => this.stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: params.priceId, quantity: 1 }],
-      // `customer` and `customer_email` are mutually exclusive in Checkout.
-      customer: params.providerCustomerId,
-      customer_email: params.providerCustomerId ? undefined : params.customerEmail,
-      client_reference_id: params.clientReferenceId,
-      success_url: params.successUrl,
-      cancel_url: params.cancelUrl,
-      allow_promotion_codes: true,
-      ...(params.automaticTax ? { automatic_tax: { enabled: true } } : {}),
-      subscription_data: {
-        ...(params.trialPeriodDays ? { trial_period_days: params.trialPeriodDays } : {}),
-        ...(params.metadata ? { metadata: params.metadata } : {}),
-      },
-      metadata: params.metadata,
-    }));
+  }): Promise<Result<{ url: string; sessionId: string }, SchemaFailure>> {
+    assertWholeCount(params.trialPeriodDays, 'trialPeriodDays', 730);
+    const texts = checkStripeTexts({
+      priceId: params.priceId,
+      successUrl: params.successUrl,
+      cancelUrl: params.cancelUrl,
+      providerCustomerId: params.providerCustomerId,
+      customerEmail: params.customerEmail,
+      clientReferenceId: params.clientReferenceId,
+    });
+    if (isFailure(texts)) return texts;
+    const metadata = checkMetadata(params.metadata);
+    if (isFailure(metadata)) return metadata;
+    const session = await this.call('stripe.checkout.sessions.create', () =>
+      this.stripe.checkout.sessions.create({
+        mode: 'subscription',
+        line_items: [{ price: params.priceId, quantity: 1 }],
+        // `customer` and `customer_email` are mutually exclusive in Checkout.
+        customer: params.providerCustomerId,
+        customer_email: params.providerCustomerId ? undefined : params.customerEmail,
+        client_reference_id: params.clientReferenceId,
+        success_url: params.successUrl,
+        cancel_url: params.cancelUrl,
+        allow_promotion_codes: true,
+        ...(params.automaticTax ? { automatic_tax: { enabled: true } } : {}),
+        subscription_data: {
+          ...(params.trialPeriodDays ? { trial_period_days: params.trialPeriodDays } : {}),
+          ...(params.metadata ? { metadata: params.metadata } : {}),
+        },
+        metadata: params.metadata,
+      }),
+    );
 
     if (!session.url) {
       throw new PaymentProviderError('unknown', `Stripe Checkout session ${session.id} came back without a URL`);
@@ -1297,6 +1636,12 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   // Tax-related methods
+
+  /**
+   * The tax Stripe calculates for the line items. Precondition: every line item is in `currency` (one
+   * calculation has one currency); one in another currency throws an invariant failure before any request.
+   * At most `MAX_BATCH_ITEMS` (1,000) line items, and as many tax ids: more is `InvalidInput` (`schema.invalid_input`).
+   */
   async calculateTax(params: {
     customerId: CustomerId;
     /** Every line item is in `currency`: one calculation has one currency. */
@@ -1320,24 +1665,33 @@ export class StripeProvider extends BasePaymentProvider {
         value: string;
       }[];
     };
-  }): Promise<{
-    amountTotal: Money;
-    taxAmountExclusive: Money;
-    taxAmountInclusive: Money;
-    taxBreakdown: {
-      amount: Money;
-      rate: number;
-      /** The jurisdiction's display name, such as `California`. Not unique: use `country`, `state` and `level` to tell places apart. */
-      jurisdiction: string;
-      /** Two-letter country code of the jurisdiction. */
-      country: string;
-      /** ISO 3166-2 subdivision code without the country prefix, such as `NY`. Absent for a country-level tax. */
-      state?: string;
-      /** `country`, `state`, `county`, `city` or `district` (Stripe may add more). */
-      level: string;
-      taxCode?: string;
-    }[];
-  } | MoneyFailure | FailureOf<typeof TaxAddressIncomplete>> {
+  }): Promise<
+    | {
+        amountTotal: Money;
+        taxAmountExclusive: Money;
+        taxAmountInclusive: Money;
+        taxBreakdown: {
+          amount: Money;
+          rate: number;
+          /** The jurisdiction's display name, such as `California`. Not unique: use `country`, `state` and `level` to tell places apart. */
+          jurisdiction: string;
+          /** Two-letter country code of the jurisdiction. */
+          country: string;
+          /** ISO 3166-2 subdivision code without the country prefix, such as `NY`. Absent for a country-level tax. */
+          state?: string;
+          /** `country`, `state`, `county`, `city` or `district` (Stripe may add more). */
+          level: string;
+          taxCode?: string;
+        }[];
+      }
+    | MoneyFailure
+    | SchemaFailure
+    | FailureOf<typeof TaxAddressIncomplete>
+  > {
+    const lists = parse(taxListsSchema, { lineItems: params.lineItems, taxIds: params.customerDetails?.taxIds });
+    if (isFailure(lists)) return lists;
+    const texts = checkStripeTexts(taxTextsOf(params));
+    if (isFailure(texts)) return texts;
     const request = toTaxCalculationParams(params);
     if (isFailure(request)) return request;
     const calculation = await this.call('stripe.tax.calculations.create', () =>
@@ -1358,9 +1712,10 @@ export class StripeProvider extends BasePaymentProvider {
         if (isFailure(amount)) return amount;
         taxBreakdown.push({
           amount,
-          rate: typeof breakdown.tax_rate_details?.percentage_decimal === 'number'
-            ? breakdown.tax_rate_details.percentage_decimal
-            : Number.parseFloat(String(breakdown.tax_rate_details?.percentage_decimal || 0)),
+          rate:
+            typeof breakdown.tax_rate_details?.percentage_decimal === 'number'
+              ? breakdown.tax_rate_details.percentage_decimal
+              : Number.parseFloat(String(breakdown.tax_rate_details?.percentage_decimal || 0)),
           jurisdiction: breakdown.jurisdiction.display_name,
           country: breakdown.jurisdiction.country,
           state: breakdown.jurisdiction.state ?? undefined,
@@ -1381,15 +1736,28 @@ export class StripeProvider extends BasePaymentProvider {
    *   the whole transaction is reversed. With them, the refunded total (tax included) is reversed.
    *
    * The totals are read from the line items of the recorded transaction: negative for a refund.
+   *
+   * At most `MAX_BATCH_ITEMS` (1,000) line items, and as many tax ids: more is `InvalidInput` (`schema.invalid_input`).
+   *
+   * Preconditions (an invariant failure before any request): every line item is in `currency`, and a
+   * `quantity`, when given, is a whole number of 1 or more.
    */
   async createTaxTransaction(params: TaxTransactionParams) {
+    const lists = parse(taxListsSchema, { lineItems: params.lineItems, taxIds: params.customerDetails?.taxIds });
+    if (isFailure(lists)) return lists;
+    assertQuantities(params.lineItems);
+    const texts = checkStripeTexts(taxTextsOf(params));
+    if (isFailure(texts)) return texts;
     const transaction =
       params.type === 'refund' ? await this.reverseTaxTransaction(params) : await this.recordTaxSale(params);
     if (isFailure(transaction)) return transaction;
 
     const lines = transaction.line_items?.data;
     if (!lines) {
-      throw new PaymentProviderError('unknown', `Stripe tax transaction ${transaction.id} came back without line items`);
+      throw new PaymentProviderError(
+        'unknown',
+        `Stripe tax transaction ${transaction.id} came back without line items`,
+      );
     }
     const currency = Currency.parse(transaction.currency.toUpperCase());
     if (isFailure(currency)) return currency;
@@ -1447,10 +1815,12 @@ export class StripeProvider extends BasePaymentProvider {
    */
   private async reverseTaxTransaction(params: TaxTransactionParams) {
     if (params.originalTransactionId === undefined) {
-      throw new PaymentProviderError('invalid_request', 'A tax refund needs originalTransactionId: the sale it reverses');
+      throw new PaymentProviderError(
+        'invalid_request',
+        'A tax refund needs originalTransactionId: the sale it reverses',
+      );
     }
     const originalTransactionId = params.originalTransactionId;
-    const currency = params.currency.toUpperCase();
 
     let reversal: Stripe.Tax.TransactionCreateReversalParams = {
       mode: 'full',
@@ -1459,10 +1829,12 @@ export class StripeProvider extends BasePaymentProvider {
       expand: ['line_items'],
     };
     if (params.lineItems.length > 0) {
+      const currency = stripeCurrencyOf(params.currency);
+      if (isFailure(currency)) return currency;
       // Stripe wants the refunded total, tax included, as a negative integer
       const refunded = stripeAmountOf(
         sum(
-          params.lineItems.map(item => Money.of(item.amount, currency).times(item.quantity ?? 1)),
+          params.lineItems.map(item => lineTotal(item, currency)),
           currency,
         ),
       );
@@ -1581,15 +1953,15 @@ export class StripeProvider extends BasePaymentProvider {
     if (!reason) return undefined;
 
     const reasonMap: Record<string, Stripe.RefundCreateParams.Reason> = {
-      'customer_request': 'requested_by_customer',
-      'duplicate_charge': 'duplicate',
-      'fraudulent_transaction': 'fraudulent',
-      'service_not_delivered': 'requested_by_customer',
-      'billing_error': 'requested_by_customer',
-      'technical_issue': 'requested_by_customer',
-      'goodwill_gesture': 'requested_by_customer',
-      'chargeback_prevention': 'requested_by_customer',
-      'other': 'requested_by_customer',
+      customer_request: 'requested_by_customer',
+      duplicate_charge: 'duplicate',
+      fraudulent_transaction: 'fraudulent',
+      service_not_delivered: 'requested_by_customer',
+      billing_error: 'requested_by_customer',
+      technical_issue: 'requested_by_customer',
+      goodwill_gesture: 'requested_by_customer',
+      chargeback_prevention: 'requested_by_customer',
+      other: 'requested_by_customer',
     };
 
     return reasonMap[reason] || 'requested_by_customer';

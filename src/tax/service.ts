@@ -2,16 +2,28 @@ import type { Instant } from '@arki/date';
 import { fromDate, now, sub } from '@arki/date';
 import type { Failure } from '@arki/failure';
 import { invariant, isFailure } from '@arki/failure';
+import { is, parse } from '@arki/schema';
+import { z } from '@arki/contracts';
 import { getLogger } from '@arki/log';
-import { Money, sum } from '@arki/money';
+import { Currency, CurrencyMismatchError, Money, ProviderAmount, sum, UnknownCurrencyError } from '@arki/money';
 
 import type { StripeProvider } from '../core/providers/stripe-provider.js';
 import type { CustomerId, PaymentId, SubscriptionId } from '../core/types.js';
-import type { TaxExemptionId } from './primitives.js';
+import type { TaxExemptionId, TaxPlanInterval } from './primitives.js';
 import type { TaxExemptionRepository, TaxJurisdictionRepository, TaxRecordRepository } from './repository.js';
 import type { TaxJurisdiction } from './types.js';
-import { TaxCurrencyMismatch, TaxRefundSaleNotFound } from './failures.js';
+import {
+  calculateSubscriptionTaxInputSchema,
+  getCustomerTaxSummaryInputSchema,
+  taxCustomerDetailsSchema,
+  taxLineTextSchema,
+  taxRecordRowSchema,
+  taxRecordRowsSchema,
+} from './contracts.js';
+import { TaxCurrencyMismatch, TaxLineCurrencyMismatch, TaxRefundSaleNotFound } from './failures.js';
 import { checkTaxIdFormat } from './tax-id.js';
+import { nonNegativeMoneySchema } from '../core/money.js';
+import { MAX_BATCH_ITEMS } from '../core/pg-values.js';
 
 /** What `TaxService` reads. A `TaxExemptionRepository` and a `TaxJurisdictionRepository` fit. */
 export type TaxServiceReads = {
@@ -21,6 +33,19 @@ export type TaxServiceReads = {
 };
 
 const logger = getLogger('arki:payments:tax');
+
+/**
+ * Stripe refuses text with a lone surrogate (such as `'\ud800'`) as an invalid request. Returns
+ * `InvalidInput` for such text in the line items or the customer's details (or for more than
+ * `MAX_BATCH_ITEMS` line items), so the request never goes out.
+ */
+function refuseUnsendable(lineItems: TaxCalculationInput['lineItems'], customerDetails: TaxCalculationInput['customerDetails']) {
+  const lines = parse(z.array(taxLineTextSchema).max(MAX_BATCH_ITEMS), lineItems);
+  if (isFailure(lines)) return lines;
+  const details = parse(taxCustomerDetailsSchema.optional(), customerDetails);
+  if (isFailure(details)) return details;
+  return;
+}
 
 type TaxBreakdownLine = Exclude<Awaited<ReturnType<StripeProvider['calculateTax']>>, Failure>['taxBreakdown'][number];
 
@@ -59,6 +84,28 @@ export function jurisdictionOwnsLine(jurisdiction: TaxJurisdiction, line: TaxBre
   if (jurisdiction.stateCode !== null && state !== subdivisionCode(jurisdiction.stateCode)) return false;
 
   return line.jurisdiction.toLowerCase() === jurisdiction.name.toLowerCase();
+}
+
+/**
+ * The ISO 4217 currency of `code` (any case). A custom currency is valid `Money`, but Stripe has no
+ * unit rule for it: `money.provider_amount`, as the provider returns for a custom-currency amount.
+ */
+function stripeCurrency(code: string) {
+  const upper = code.toUpperCase();
+  const currency = Currency.parse(upper);
+  return isFailure(currency) ? ProviderAmount({ cause: new UnknownCurrencyError(upper) }) : currency;
+}
+
+/** `TaxLineCurrencyMismatch` for the first line item that is not in `currency`. */
+function lineInOtherCurrency(lineItems: readonly { amount: Money; reference: string }[], currency: Currency) {
+  const line = lineItems.find(item => item.amount.currency.code !== currency.code);
+  return line === undefined
+    ? undefined
+    : TaxLineCurrencyMismatch({
+        lineReference: line.reference,
+        lineCurrency: line.amount.currency.code,
+        transactionCurrency: currency.code,
+      });
 }
 
 /**
@@ -161,10 +208,18 @@ export class TaxService {
    * jurisdiction): one without would exempt every sale, so it is never applied.
    *
    * A Stripe amount that `@arki/money` refuses (an unknown currency, units off Stripe's rule) is returned as a
-   * `MoneyFailure`, so a sale is never priced with a wrong tax.
+   * `MoneyFailure`, so a sale is never priced with a wrong tax. So is a sale Stripe cannot price:
+   * `money.provider_amount` for a currency outside ISO 4217 (a custom currency; Stripe is not asked),
+   * and for a Stripe answer in another currency than the sale's. A line item in another currency than
+   * `input.currency` returns `TaxLineCurrencyMismatch` before anything is read or asked.
    */
   async calculateTax(input: TaxCalculationInput) {
-    const currency = input.currency.toUpperCase();
+    const unsendable = refuseUnsendable(input.lineItems, input.customerDetails);
+    if (unsendable) return unsendable;
+    const currency = stripeCurrency(input.currency);
+    if (isFailure(currency)) return currency;
+    const mismatch = lineInOtherCurrency(input.lineItems, currency);
+    if (mismatch) return mismatch;
     // An exemption "for a customer" must name the customer; same for the other two types
     const applicable = await this.reads.exemptions.findApplicableExemptions(input.customerId);
     const scoped = applicable.filter(
@@ -219,6 +274,10 @@ export class TaxService {
         customerDetails: input.customerDetails,
       });
       if (isFailure(result)) return result;
+      // Stripe answers in one currency; one other than the sale's cannot be added to its exempt lines
+      if (result.amountTotal.currency.code !== currency.code) {
+        return ProviderAmount({ cause: new CurrencyMismatchError(result.amountTotal.currency.code, currency.code) });
+      }
 
       subtotal = exemptSubtotal.plus(result.amountTotal.minus(result.taxAmountExclusive));
       taxAmount = result.taxAmountExclusive;
@@ -283,7 +342,16 @@ export class TaxService {
    * `breakdown` is the tax the checkout's `calculateTax` returned for this sale. It is stored, one
    * record per jurisdiction and rate, and is what `getCustomerTaxSummary` and the compliance report
    * add up. Recording a `reference` twice (for the same `type`) returns the first record and does
-   * not call the provider again. A failure is the caller's to handle, as in `calculateTax`.
+   * not call the provider again. A failure is the caller's to handle, as in `calculateTax`; a currency
+   * outside ISO 4217 returns `money.provider_amount` before anything is read or recorded.
+   *
+   * Nothing is read and the provider is not called when the input cannot be recorded: a line item in
+   * another currency (`TaxLineCurrencyMismatch`), a breakdown line in another currency
+   * (`TaxCurrencyMismatch`), or a record a `tax_records` column cannot store (`InvalidInput`, from
+   * `taxRecordRowSchema`: a reference or jurisdiction over 255 characters, U+0000, a negative amount,
+   * a rate of 10000 or more, an `occurredAt` outside the years 1 to 9999; and a jurisdiction's tax that is
+   * not whole minor units or is past 2^53 - 1 of them, from `nonNegativeMoneySchema`). So the provider and the records never disagree. A `reference` recorded
+   * earlier in another currency returns `TaxCurrencyMismatch` too.
    */
   async createTaxTransaction(params: {
     reference: string;
@@ -307,18 +375,25 @@ export class TaxService {
     /** For a `refund`: the `reference` of the recorded sale it reverses. Required there, ignored for a sale. */
     originalReference?: string;
   }) {
-    const currency = params.currency.toUpperCase();
+    const type = parse(taxRecordRowSchema.shape.type, params.type);
+    if (isFailure(type)) return type;
+    const unsendable = refuseUnsendable(params.lineItems, params.customerDetails);
+    if (unsendable) return unsendable;
+    const currency = stripeCurrency(params.currency);
+    if (isFailure(currency)) return currency;
+    const mismatch = lineInOtherCurrency(params.lineItems, currency);
+    if (mismatch) return mismatch;
     const taxCode = params.lineItems[0]?.taxCode;
 
     // Per jurisdiction and rate: one record each, whatever number of lines carried it
     const grouped = new Map<string, { jurisdiction: string; rate: number; amounts: Money[] }>();
     for (const line of params.breakdown) {
-      if (line.amount.currency.code !== currency) {
+      if (line.amount.currency.code !== currency.code) {
         return TaxCurrencyMismatch({
           reference: params.reference,
           jurisdiction: line.jurisdiction,
           taxCurrency: line.amount.currency.code,
-          transactionCurrency: currency,
+          transactionCurrency: currency.code,
         });
       }
       const key = `${line.jurisdiction}\u0000${line.rate}`;
@@ -327,12 +402,42 @@ export class TaxService {
       grouped.set(key, entry);
     }
     const lines = [...grouped.values()].map(entry => ({ ...entry, taxAmount: sum(entry.amounts, currency) }));
+    // A `Money` can hold digits below the currency's minor unit (`Money.fromJSON` keeps them) or more units than a
+    // number holds: the record stores whole minor units, so such a total is `InvalidInput`, never a raw throw below
+    const storableAmounts = parse(z.array(nonNegativeMoneySchema), lines.map(line => line.taxAmount.toJSON()));
+    if (isFailure(storableAmounts)) return storableAmounts;
     const taxAmount = sum(
       lines.map(line => line.taxAmount),
       currency,
     );
+    const createdAt = params.occurredAt ?? now();
+    // The records as they will be written, less the provider's id: checked now, before the provider records anything
+    const rows = lines.map(line => ({
+      reference: params.reference,
+      type: params.type,
+      jurisdiction: line.jurisdiction,
+      rate: String(line.rate),
+      taxAmountMinor: line.taxAmount.toMinorNumber(),
+      currency: currency.code,
+      taxCode,
+      customerId: params.customerId,
+      paymentId: params.paymentId,
+      subscriptionId: params.subscriptionId,
+      occurredAt: createdAt,
+    }));
+    const storable = parse(taxRecordRowsSchema, rows);
+    if (isFailure(storable)) return storable;
 
     const existing = await this.reads.records.findByReference(params.type, params.reference);
+    const stranger = existing.find(record => record.currency !== currency.code);
+    if (stranger) {
+      return TaxCurrencyMismatch({
+        reference: params.reference,
+        jurisdiction: stranger.jurisdiction,
+        taxCurrency: stranger.currency,
+        transactionCurrency: currency.code,
+      });
+    }
     const first = existing[0];
     if (first) {
       logger.debug('Tax transaction {reference} was already recorded', { reference: params.reference });
@@ -393,7 +498,7 @@ export class TaxService {
 
     // The provider worked the tax out itself; the records are the caller's breakdown. They should agree.
     const recorded = transaction.taxAmountExclusive.plus(transaction.taxAmountInclusive).abs();
-    if (recorded.toMinorNumber() !== taxAmount.toMinorNumber()) {
+    if (recorded.toMinorBigInt() !== taxAmount.toMinorBigInt()) {
       logger.warn('Tax transaction {reference}: the provider recorded {recorded} tax, the breakdown says {breakdown}', {
         reference: params.reference,
         recorded: recorded.toString(),
@@ -401,23 +506,9 @@ export class TaxService {
       });
     }
 
-    const createdAt = params.occurredAt ?? now();
-    await this.reads.records.recordMany(
-      lines.map(line => ({
-        reference: params.reference,
-        type: params.type,
-        jurisdiction: line.jurisdiction,
-        rate: String(line.rate),
-        taxAmountMinor: line.taxAmount.toMinorNumber(),
-        currency,
-        taxCode,
-        customerId: params.customerId,
-        paymentId: params.paymentId,
-        subscriptionId: params.subscriptionId,
-        providerTransactionId: transaction.id,
-        occurredAt: createdAt,
-      })),
-    );
+    const written = await this.reads.records.recordMany(rows.map(row => ({ ...row, providerTransactionId: transaction.id })));
+    // Only the provider's id was not checked before the provider was called
+    if (isFailure(written)) return written;
 
     const created: TaxTransaction = {
       id: transaction.id,
@@ -451,10 +542,12 @@ export class TaxService {
   async calculateSubscriptionTax(params: {
     customerId: CustomerId;
     planAmount: Money;
-    planInterval: 'monthly' | 'yearly' | 'weekly' | 'daily';
+    planInterval: TaxPlanInterval;
     taxCode?: string;
     customerDetails?: TaxCalculationInput['customerDetails'];
   }) {
+    const interval = parse(calculateSubscriptionTaxInputSchema.shape.planInterval, params.planInterval);
+    if (isFailure(interval)) return interval;
     return this.calculateTax({
       customerId: params.customerId,
       lineItems: [{
@@ -526,6 +619,10 @@ export class TaxService {
    * customer's sales, less what it gave back on refunds. Totals are one `Money` per currency
    * (never added across currencies), ordered by currency code; `breakdown` has one row per
    * jurisdiction and currency. `totalTransactions` counts the sales that carried tax.
+   *
+   * `year` is from 2000 to 2100, as `getCustomerTaxSummaryInputSchema` reads it from a request:
+   * anything else (NaN, a year outside that range) is a bug in the caller, and throws
+   * `FailureError` (`invariant`) before anything is read.
    */
   async getCustomerTaxSummary(params: {
     customerId: CustomerId;
@@ -539,6 +636,10 @@ export class TaxService {
       transactionCount: number;
     }[];
   }> {
+    invariant(
+      is(params.year, getCustomerTaxSummaryInputSchema.shape.year),
+      () => `getCustomerTaxSummary needs a year from 2000 to 2100, received ${String(params.year)}`,
+    );
     const start = fromDate(new Date(Date.UTC(params.year, 0, 1)));
     const end = sub(fromDate(new Date(Date.UTC(params.year + 1, 0, 1))), { nanoseconds: 1 });
     const period = { start, end, customerId: params.customerId };
@@ -546,7 +647,7 @@ export class TaxService {
 
     const breakdown = totals.map(total => ({
       jurisdiction: total.jurisdiction,
-      taxAmount: Money.fromMinor(total.saleTaxMinor - total.refundTaxMinor, total.currency),
+      taxAmount: Money.fromMinor(total.saleTaxMinor, total.currency).minus(Money.fromMinor(total.refundTaxMinor, total.currency)),
       transactionCount: total.saleCount,
     }));
 

@@ -1,6 +1,8 @@
 import type { IdOf } from '@arki/contracts';
 import { defineId } from '@arki/contracts';
 
+import { boundedIdSchema } from '../core/id-length.js';
+
 export type TaxConfigId = IdOf<typeof taxConfigId>;
 export type TaxJurisdictionId = IdOf<typeof taxJurisdictionId>;
 export type TaxExemptionId = IdOf<typeof taxExemptionId>;
@@ -19,9 +21,11 @@ export const createTaxExemptionId = taxExemptionId.create;
 export const createTaxRecordId = taxRecordId.create;
 export const createTaxAuditEntryId = taxAuditEntryId.create;
 
-export const taxConfigIdSchema = taxConfigId.schema;
-export const taxJurisdictionIdSchema = taxJurisdictionId.schema;
-export const taxExemptionIdSchema = taxExemptionId.schema;
+export const taxConfigIdSchema = boundedIdSchema(taxConfigId.schema);
+export const taxJurisdictionIdSchema = boundedIdSchema(taxJurisdictionId.schema);
+export const taxExemptionIdSchema = boundedIdSchema(taxExemptionId.schema);
+export const taxRecordIdSchema = boundedIdSchema(taxRecordId.schema);
+export const taxAuditEntryIdSchema = boundedIdSchema(taxAuditEntryId.schema);
 
 export const taxConfigIdFactory = taxConfigId;
 export const taxJurisdictionIdFactory = taxJurisdictionId;
@@ -37,7 +41,13 @@ export const exemptionTypeValues = ['customer', 'product', 'jurisdiction', 'thre
 export const exemptionStatusValues = ['active', 'expired', 'revoked', 'pending_review'] as const;
 
 export const taxRecordTypeValues = ['sale', 'refund'] as const;
+export const taxPlanIntervalValues = ['monthly', 'yearly', 'weekly', 'daily'] as const;
+export const taxAuditActionValues = ['calculate', 'apply', 'refund', 'exempt', 'report'] as const;
+export const taxAuditEntityValues = ['payment', 'subscription', 'customer', 'exemption'] as const;
 
+export type TaxPlanInterval = (typeof taxPlanIntervalValues)[number];
+export type TaxAuditAction = (typeof taxAuditActionValues)[number];
+export type TaxAuditEntity = (typeof taxAuditEntityValues)[number];
 export type TaxRecordType = (typeof taxRecordTypeValues)[number];
 export type TaxConfigStatus = (typeof taxConfigStatusValues)[number];
 export type TaxCalculationMode = (typeof taxCalculationModeValues)[number];

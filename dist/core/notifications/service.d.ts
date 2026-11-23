@@ -2,7 +2,7 @@
  * Refund notifications: an approval request to the admins, a status mail to the customer, and a
  * failure alert to support. Email goes through a transport the app passes in (payments sends no
  * mail of its own); Slack posts to an incoming-webhook URL. A send that did not go out returns
- * `NotificationFailed`; a misconfigured service throws when it is built, never on the first send.
+ * `NotificationFailed`; a misconfigured service is refused when it is built (`payments.configuration_invalid` is returned), never on the first send.
  */
 import type { Failure } from '@arki/failure';
 import type { Refund } from '../../refunds/types.js';
@@ -10,6 +10,12 @@ import type { PaymentRepository } from '../repository.js';
 /**
  * Sends refund notifications. Each method resolves with nothing when the notification went out,
  * or with an `@arki/failure` value when it did not. The refund itself never depends on it.
+ *
+ * Precondition: `refund` is a row this package stored (the refunds workflow and effects pass the row
+ * they read). The refund commands store only whole minor units of a currency `@arki/money` knows, so
+ * the amount always formats. A hand-built `Refund` with a fractional, `NaN` or unsafe
+ * `refundAmountMinor`, or an unknown `currency`, is a caller bug: the call throws an invariant failure
+ * (`ARKI_FAILURE_E008`, from `fromMinorColumn`) before anything is sent.
  */
 export type NotificationService = {
     sendRefundApprovalRequest?(refund: Refund): Promise<void | Failure>;
@@ -28,7 +34,7 @@ export type NotificationMail = {
  */
 export type SendNotificationMail = (mail: NotificationMail) => Promise<unknown>;
 export type EmailNotificationConfig = {
-    /** Who gets the approval requests. At least one address. */
+    /** Who gets the approval requests. At least one address, at most `MAX_BATCH_ITEMS` (1,000). */
     adminEmails: readonly string[];
     /** Who gets the failure alerts. */
     supportEmail: string;
@@ -40,8 +46,12 @@ export type EmailNotificationConfig = {
 /** Refund notifications by mail, sent through the transport the app passes in. */
 export declare class EmailNotificationService implements NotificationService {
     private readonly config;
-    /** Throws `payments.configuration_invalid` for a config without a transport, reads, an admin address or a valid support address. */
-    constructor(config: EmailNotificationConfig);
+    private constructor();
+    /** Builds the service. Returns `payments.configuration_invalid` for a config without a transport, reads, an admin address or a valid support address. */
+    static create(config: EmailNotificationConfig): EmailNotificationService | Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }>;
     sendRefundApprovalRequest(refund: Refund): Promise<Failure<"payments.notification_failed", {
         channel: "email" | "slack";
         notification: "refund_approval_request" | "refund_failure_alert" | "refund_status_update";
@@ -53,7 +63,7 @@ export declare class EmailNotificationService implements NotificationService {
         notification: "refund_approval_request" | "refund_failure_alert" | "refund_status_update";
         status?: number | undefined;
     }> | Failure<"payments.reference_not_found", {
-        kind: "customer" | "payment" | "plan" | "subscription";
+        kind: "customer" | "payment" | "plan" | "subscription" | "user";
         id: string;
         missing: "provider_id" | "row";
     }> | undefined>;
@@ -65,7 +75,7 @@ export declare class EmailNotificationService implements NotificationService {
     private mail;
 }
 export type SlackNotificationConfig = {
-    /** The Slack incoming-webhook URL. It is a secret: it is never logged. */
+    /** The Slack incoming-webhook URL: http(s), no user name or password, no port `fetch` blocks. It is a secret: it is never logged. */
     webhookUrl: string;
     adminChannel: string;
     supportChannel: string;
@@ -77,8 +87,16 @@ export type SlackNotificationConfig = {
 /** Refund notifications posted to a Slack incoming webhook. */
 export declare class SlackNotificationService implements NotificationService {
     private readonly config;
-    /** Throws `payments.configuration_invalid` for a config without a valid webhook URL, channels or admin URL. */
-    constructor(config: SlackNotificationConfig);
+    private constructor();
+    /**
+     * Builds the service. Returns `payments.configuration_invalid` for a config without a valid webhook
+     * URL (an http(s) URL with no user name or password, on a port the Fetch standard does not block),
+     * channels or admin URL.
+     */
+    static create(config: SlackNotificationConfig): Failure<"payments.configuration_invalid", {
+        setting: string;
+        problem: string;
+    }> | SlackNotificationService;
     sendRefundApprovalRequest(refund: Refund): Promise<Failure<"payments.notification_failed", {
         channel: "email" | "slack";
         notification: "refund_approval_request" | "refund_failure_alert" | "refund_status_update";
@@ -120,7 +138,7 @@ export type NotificationServiceConfig = {
     slack?: SlackNotificationConfig;
 };
 /**
- * Builds the notification service a config names. Throws `payments.configuration_invalid` at boot for a config that
+ * Builds the notification service a config names. Returns `payments.configuration_invalid` for a config that
  * cannot send: no transport, no webhook URL, a bad address, or a `multi` with no channel.
  *
  * @example
@@ -134,5 +152,8 @@ export type NotificationServiceConfig = {
  *   },
  * });
  */
-export declare function createNotificationService(config: NotificationServiceConfig): NotificationService;
+export declare function createNotificationService(config: NotificationServiceConfig): EmailNotificationService | Failure<"payments.configuration_invalid", {
+    setting: string;
+    problem: string;
+}> | MultiChannelNotificationService | SlackNotificationService;
 //# sourceMappingURL=service.d.ts.map

@@ -1,3 +1,9 @@
+/**
+ * What every payment provider implements. A call that takes `metadata` returns `SchemaFailure`
+ * (`schema.invalid_input`) before any request for metadata a jsonb column cannot store (a `bigint`
+ * anywhere, U+0000 in a key or a string). A call that takes an `idempotencyKey` returns it for a key
+ * an HTTP header cannot carry unchanged (empty, over 255 characters, or not printable ASCII).
+ */
 export class BasePaymentProvider {
     config;
     constructor(config) {

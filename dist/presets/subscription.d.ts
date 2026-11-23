@@ -1,20 +1,20 @@
 import type { IdGenerationFailure } from '@arki/contracts';
-import type { FailureOf } from '@arki/failure';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import type Stripe from 'stripe';
 import type { UserId } from '../core/user-id.js';
 import type { Instant } from '@arki/date';
 import type { CoreWrites } from '../core/journal.js';
-import type { JournalWriteFailure } from '../core/journal/support.js';
 import type { CustomerConflict } from '../core/failures.js';
-import type { InvalidWebhookSignature } from '../core/providers/provider-error.js';
+import type { InvalidWebhookSignature, ReferenceNotFound } from '../core/providers/provider-error.js';
 import type { StripeProvider } from '../core/providers/stripe-provider.js';
 import type { PaymentRepository } from '../core/repository.js';
 import type { PlanId, SubscriptionStatus } from '../core/types.js';
+import { PaymentsConfigurationInvalid } from '../core/failures.js';
 import { PriceNotConfigured, SubscriptionWithoutItems, UnknownProviderCustomer, UnknownSubscriptionStatus } from './failures.js';
 /** The one journal write a webhook preset makes. A `CoreWrites` fits. */
 type SubscriptionSync = Pick<CoreWrites, 'syncSubscription'>;
 /** Why `projectStripeSubscription` stored nothing. */
-type ProjectionFailure = FailureOf<typeof UnknownProviderCustomer> | FailureOf<typeof SubscriptionWithoutItems> | FailureOf<typeof UnknownSubscriptionStatus> | JournalWriteFailure;
+type ProjectionFailure = FailureOf<typeof UnknownProviderCustomer> | FailureOf<typeof SubscriptionWithoutItems> | FailureOf<typeof UnknownSubscriptionStatus> | SchemaFailure | FailureOf<SubscriptionSync['syncSubscription']>;
 /**
  * Project a Stripe Subscription object onto our `subscriptions` table.
  *
@@ -31,8 +31,11 @@ type ProjectionFailure = FailureOf<typeof UnknownProviderCustomer> | FailureOf<t
  *
  * The event is outside data, so what cannot be stored is returned before anything is written:
  * `UnknownProviderCustomer` (no local customer row, such as a subscription made in the Stripe
- * dashboard: never invent an owner), `SubscriptionWithoutItems` (no billing period to read) and
- * `UnknownSubscriptionStatus` (a status Stripe added later: never guessed).
+ * dashboard: never invent an owner), `SubscriptionWithoutItems` (no billing period to read),
+ * `UnknownSubscriptionStatus` (a status Stripe added later: never guessed) and `InvalidInput`
+ * (`schema.invalid_input`: a subscription body missing a field the projection reads, an id that
+ * does not fit its column, or a period, trial or cancel time that is not whole Unix seconds up to
+ * year 9999). The sync's own failures come back unchanged, `ReferenceNotFound` for a plan with no row among them.
  */
 export declare function projectStripeSubscription(params: {
     repo: Pick<PaymentRepository, 'findCustomerByProviderCustomerId'>;
@@ -59,6 +62,7 @@ export type Entitlement = {
  * Read a user's current entitlement straight from our own `subscriptions` table — the single
  * source of truth. Both rails (web Stripe webhooks, native RevenueCat webhooks) project into this
  * table, so this one read answers "is Pro?" regardless of where the purchase happened.
+ * A `userId` holding U+0000 names no user (no row can hold it), so it is `{ tier: 'free' }`.
  */
 export declare function getEntitlement(repo: Pick<PaymentRepository, 'findSubscriptionsByUserId'>, userId: UserId): Promise<Entitlement>;
 /** A Stripe price wired to the local plan row it represents (monthly + yearly can share a plan). */
@@ -79,12 +83,15 @@ export type SubscriptionBillingConfig = {
         success: string;
         cancel: string;
     };
-    /** Free-trial length applied to new subscriptions; omit for no trial. */
+    /**
+     * Free-trial length applied to new subscriptions; omit for no trial. A whole number of days from 1 to
+     * 730 (Stripe's range): anything else makes `createSubscriptionBilling` return `payments.configuration_invalid`.
+     */
     trialDays?: number;
     /** Enable Stripe Tax at checkout (EU VAT). Requires Stripe Tax configured on the account. */
     automaticTax?: boolean;
 };
-export type SubscriptionBilling = ReturnType<typeof createSubscriptionBilling>;
+export type SubscriptionBilling = ReturnType<typeof buildSubscriptionBilling>;
 /** The three Stripe events `handleWebhook` projects onto the `subscriptions` table. */
 type SubscriptionEventType = 'customer.subscription.created' | 'customer.subscription.updated' | 'customer.subscription.deleted';
 /** What `handleWebhook` returns for a verified event: whether it changed a subscription, and the event's type. */
@@ -103,21 +110,27 @@ export type StripeWebhookOutcome = {
  * Customers are found-or-created at checkout: the `subscriptions` table's `customerId`/`planId`
  * are NOT NULL, so a local customer row must exist *before* the subscription webhook arrives (the
  * projection resolves the owning user via the Stripe customer id).
+ *
+ * A `trialDays` Stripe cannot take is a configuration fault: it returns `PaymentsConfigurationInvalid`
+ * (`payments.configuration_invalid`) here, at boot, instead of failing every checkout.
  */
-export declare function createSubscriptionBilling(config: SubscriptionBillingConfig): {
+export declare function createSubscriptionBilling(config: SubscriptionBillingConfig): SubscriptionBilling | FailureOf<typeof PaymentsConfigurationInvalid>;
+declare function buildSubscriptionBilling(config: SubscriptionBillingConfig): {
     /**
      * Start a hosted Checkout subscribe flow; returns the URL to redirect the browser to.
-     * A price that is not in `prices` returns `PriceNotConfigured` before any provider request.
+     * A price that is not in `prices` returns `PriceNotConfigured`, and a `userId` that holds U+0000 or a
+     * lone surrogate, or an email the customer row cannot hold (not an address, or over 255 characters),
+     * returns `InvalidInput`, all before any provider request, so no Stripe customer is left without a local row.
      */
     createCheckoutSession({ userId, email, priceId, }: {
         userId: UserId;
         email: string;
         priceId: string;
-    }): Promise<Awaited<ReturnType<StripeProvider['createCheckoutSession']>> | IdGenerationFailure | FailureOf<typeof PriceNotConfigured> | FailureOf<typeof CustomerConflict>>;
+    }): Promise<Awaited<ReturnType<StripeProvider['createCheckoutSession']>> | IdGenerationFailure | FailureOf<typeof PriceNotConfigured> | FailureOf<typeof CustomerConflict> | FailureOf<typeof ReferenceNotFound> | SchemaFailure>;
     /**
      * Verify + project a Stripe webhook. Returns `InvalidWebhookSignature` for a bad signature (answer
      * it with HTTP 400), `SubscriptionWithoutItems` or `PriceNotConfigured` for a subscription it cannot
-     * map to a plan, the failures of `projectStripeSubscription`, and the journal's refused writes.
+     * map to a plan, the failures of `projectStripeSubscription` (`InvalidInput` for a time that is not Unix seconds), and the journal's refused writes.
      * Nothing is written for any of them; a webhook route must not acknowledge them.
      */
     handleWebhook(payload: string | Buffer, signature: string): Promise<StripeWebhookOutcome | FailureOf<typeof InvalidWebhookSignature> | FailureOf<typeof SubscriptionWithoutItems> | FailureOf<typeof PriceNotConfigured> | ProjectionFailure>;

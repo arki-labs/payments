@@ -30,6 +30,51 @@ export declare const TaxCurrencyMismatch: import("@arki/failure").FailureDefinit
     transactionCurrency: string;
 }>>;
 /**
+ * A line item is in another currency than the sale or refund it belongs to. Nothing was read or
+ * recorded, and the provider was not called.
+ *
+ * @fix Price every line item in the transaction's `currency`.
+ * @verify bun run test -- src/tax
+ */
+export declare const TaxLineCurrencyMismatch: import("@arki/failure").FailureDefinition<"payments.tax_line_currency_mismatch", import("@standard-schema/spec").StandardSchemaV1<{
+    lineReference: string;
+    lineCurrency: string;
+    transactionCurrency: string;
+}, {
+    lineReference: string;
+    lineCurrency: string;
+    transactionCurrency: string;
+}>>;
+/**
+ * A tax jurisdiction cannot be deleted while another row points at it: a child jurisdiction
+ * (`usedBy: 'jurisdiction'`) or an exemption (`usedBy: 'exemption'`). Nothing was deleted.
+ *
+ * @fix Delete or move the row named by `usedById` first, or deactivate the jurisdiction (`isActive: false`).
+ * @verify bun run test -- src/tax
+ */
+export declare const TaxJurisdictionInUse: import("@arki/failure").FailureDefinition<"payments.tax_jurisdiction_in_use", import("@standard-schema/spec").StandardSchemaV1<{
+    id: string;
+    usedBy: "exemption" | "jurisdiction";
+    usedById: string;
+}, {
+    id: string;
+    usedBy: "exemption" | "jurisdiction";
+    usedById: string;
+}>>;
+/**
+ * A new tax row was given an `id` that another row already has. Nothing was written.
+ *
+ * @fix Leave `id` out, so the repository makes a new one.
+ * @verify bun run test -- src/tax
+ */
+export declare const TaxRowExists: import("@arki/failure").FailureDefinition<"payments.tax_row_exists", import("@standard-schema/spec").StandardSchemaV1<{
+    kind: "audit_entry" | "configuration" | "exemption" | "jurisdiction";
+    id: string;
+}, {
+    kind: "audit_entry" | "configuration" | "exemption" | "jurisdiction";
+    id: string;
+}>>;
+/**
  * A tax refund names no recorded sale to reverse: `originalReference` is missing (`null` here), or
  * no sale was recorded under it. Nothing was recorded and the provider was not called.
  *
@@ -44,11 +89,12 @@ export declare const TaxRefundSaleNotFound: import("@arki/failure").FailureDefin
     originalReference: string | null;
 }>>;
 /**
- * A payment's stored `taxAmount` metadata cannot be added up: it is not `Money` JSON
- * (`problem: 'not_money'`), or it is in another currency than the payment (`'other_currency'`).
- * A wrong total must not pass, so the report stops here.
+ * The tax stored for a payment cannot be added up: its `taxAmount` metadata is not `Money` JSON
+ * (`problem: 'not_money'`), or that metadata or a tax record under its id is in another currency
+ * than the payment (`'other_currency'`). A wrong total must not pass, so the report stops here.
  *
- * @fix Correct the payment's `metadata.taxAmount` to `Money` JSON in the payment's currency.
+ * @fix Correct the payment's `metadata.taxAmount` to `Money` JSON in the payment's currency, or the
+ * tax records under its id (`tax_records.payment_id`) to the payment's currency.
  * @verify bun run test -- src/tax
  */
 export declare const StoredTaxInvalid: import("@arki/failure").FailureDefinition<"payments.stored_tax_invalid", import("@standard-schema/spec").StandardSchemaV1<{

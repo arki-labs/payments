@@ -1,10 +1,12 @@
 import type { Instant } from '@arki/date';
+import type { FailureOf, SchemaFailure } from '@arki/failure';
 import { Money } from '@arki/money';
 import type { PaymentRepository } from '../core/repository.js';
 import type { CustomerId } from '../core/types.js';
-import type { ExemptionType } from './primitives.js';
+import type { ExemptionType, TaxAuditAction, TaxAuditEntity } from './primitives.js';
 import type { TaxAuditRepository, TaxConfigurationRepository, TaxExemptionRepository, TaxJurisdictionRepository, TaxRecordRepository } from './repository.js';
 import type { ExportTaxDataInput } from './contracts.js';
+import { StoredTaxInvalid } from './failures.js';
 /**
  * Tax compliance and reporting periods
  */
@@ -83,14 +85,15 @@ export type TaxReportReads = {
     configurations: Pick<TaxConfigurationRepository, 'findDefaultConfiguration'>;
     jurisdictions: Pick<TaxJurisdictionRepository, 'findActiveJurisdictions'>;
 };
+type StoredTaxFailure = FailureOf<typeof StoredTaxInvalid>;
 /**
  * Tax audit trail entry
  */
 export type TaxAuditEntry = {
     id: string;
     timestamp: Instant;
-    action: 'calculate' | 'apply' | 'refund' | 'exempt' | 'report';
-    entity: 'payment' | 'subscription' | 'customer' | 'exemption';
+    action: TaxAuditAction;
+    entity: TaxAuditEntity;
     entityId: string;
     details: {
         before?: unknown;
@@ -126,15 +129,26 @@ export declare class TaxReportingService {
      * payments, the tax records and the exemptions. Stripe Tax has no report endpoint, so nothing is
      * fetched from it. `reportType` names the report; the records do not tell VAT from sales tax.
      * `jurisdiction` (any case) limits the tax, and the payments to those it taxed.
+     *
+     * A tax record stored under a payment's id in another currency than the payment cannot be added to
+     * it: `StoredTaxInvalid` (`problem: 'other_currency'`) is returned, never a wrong total.
+     *
+     * `period.startDate` and `period.endDate` fall in the years 1 to 9999 (UTC), the times Postgres
+     * compares: another time is a bug in the caller, and throws `FailureError` (`invariant`) before the
+     * first query. `year`, `quarter` and `month` only label the report.
      */
     generateComplianceReport(params: {
         reportType: 'sales_and_use_tax' | 'vat' | 'gst';
         period: ReportingPeriod;
         jurisdiction?: string;
-    }): Promise<TaxComplianceReport>;
+    }): Promise<TaxComplianceReport | StoredTaxFailure>;
     /**
      * Get customer tax summary for a specific year (UTC): the customer's succeeded payments with the
      * tax recorded on each, and the exemptions in force during the year.
+     *
+     * `year` is from 2000 to 2100, as `getCustomerAnnualSummaryInputSchema` reads it from a request:
+     * anything else (NaN, a year outside that range) is a bug in the caller, and throws `FailureError`
+     * (`invariant`) before anything is read.
      */
     getCustomerTaxSummary(customerId: CustomerId, year: number): Promise<CustomerTaxSummary | import("@arki/failure").Failure<"money.input_too_large", undefined> | import("@arki/failure").Failure<"money.invalid_shape", undefined> | import("@arki/failure").Failure<"money.invalid_text", undefined> | import("@arki/failure").Failure<"money.unknown_currency", undefined> | import("@arki/failure").Failure<"payments.stored_tax_invalid", {
         paymentId: string;
@@ -144,8 +158,13 @@ export declare class TaxReportingService {
     }>>;
     /**
      * Create audit trail entry for tax-related actions. The entry is stored; `id` and `timestamp` are the stored ones.
+     * An `entityId` over 255 characters, or `details` the jsonb column cannot store (U+0000, a bigint),
+     * returns `InvalidInput` and nothing is stored.
      */
-    createAuditEntry(entry: Omit<TaxAuditEntry, 'id' | 'timestamp'>): Promise<TaxAuditEntry>;
+    createAuditEntry(entry: Omit<TaxAuditEntry, 'id' | 'timestamp'>): Promise<import("@arki/failure").Failure<"payments.tax_row_exists", {
+        kind: "audit_entry" | "configuration" | "exemption" | "jurisdiction";
+        id: string;
+    }> | TaxAuditEntry | SchemaFailure>;
     /** The audit entries about one entity, oldest first. */
     getAuditTrail(entity: TaxAuditEntry['entity'], entityId: string): Promise<TaxAuditEntry[]>;
     /**
@@ -153,7 +172,8 @@ export declare class TaxReportingService {
      * when it requires registration, has a monthly, quarterly or annual `filingFrequency`, and the
      * default tax configuration holds an active registration for its country. The deadline is the
      * end (UTC) of the month after the filing period closes: the jurisdiction row stores no due day,
-     * so this is the common rule, not a statute. Nearest first.
+     * so this is the common rule, not a statute. Nearest first. A deadline after the last date a
+     * JavaScript `Date` holds (`+275760-09-13`) cannot be written, so that jurisdiction is left out.
      */
     getUpcomingDeadlines(asOf?: Instant): Promise<{
         jurisdiction: string;
@@ -182,6 +202,11 @@ export declare class TaxReportingService {
      * recorded for it, and with `includeExemptions` one row per exemption in force in the period.
      * CSV values are quoted when they need it, and text that a spreadsheet would run as a formula is
      * prefixed with a quote. XML text is escaped, and characters XML 1.0 cannot hold are dropped.
+     *
+     * A `format` that is not `csv`, `json` or `xml` returns `InvalidInput` (`schema.invalid_input`) before any query.
+     *
+     * `period.startDate` and `period.endDate` fall in the years 1 to 9999 (UTC): another time throws
+     * `FailureError` (`invariant`) before the first query. `year`, `quarter` and `month` only name the file.
      */
     exportTaxData(params: {
         format: ExportTaxDataInput['format'];
@@ -191,11 +216,12 @@ export declare class TaxReportingService {
         format: string;
         data: string;
         filename: string;
-    }>;
+    } | StoredTaxFailure | SchemaFailure>;
     /**
      * The succeeded payments of the period with their tax. Tax per payment is what the tax records
      * hold under its payment id (sales less refunds); a payment with none carried none. Collected
-     * tax is every record of the period, so it includes tax recorded without a payment id.
+     * tax is every record of the period, so it includes tax recorded without a payment id. A record
+     * in another currency than its payment returns `StoredTaxInvalid`.
      */
     private aggregateLocalTransactions;
 }
@@ -203,6 +229,7 @@ export declare class TaxReportingService {
  * Factory function to create TaxReportingService
  */
 export declare function createTaxReportingService(reads: TaxReportReads): TaxReportingService;
+export {};
 /**
  * Tax Reporting and Compliance Module
  *
